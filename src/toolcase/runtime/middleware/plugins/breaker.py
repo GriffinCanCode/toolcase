@@ -9,6 +9,14 @@ State Machine:
     OPEN → recovery_time elapses → HALF_OPEN  
     HALF_OPEN → success → CLOSED
     HALF_OPEN → failure → OPEN
+
+Distributed Support:
+    By default, state is in-memory. For distributed deployments,
+    inject a RedisStateStore to share state across instances.
+    
+    >>> from toolcase.middleware.plugins.store import RedisStateStore
+    >>> store = RedisStateStore.from_url("redis://localhost:6379/0")
+    >>> registry.use(CircuitBreakerMiddleware(store=store))
 """
 
 from __future__ import annotations
@@ -16,11 +24,18 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
-from toolcase.foundation.errors import ErrorCode, ErrorTrace, JsonDict, ToolError, ToolException, classify_exception
+from toolcase.foundation.errors import (
+    ErrorCode,
+    ErrorTrace,
+    JsonDict,
+    ToolError,
+    ToolException,
+    classify_exception,
+)
 from toolcase.runtime.middleware import Context, Next
 
 if TYPE_CHECKING:
@@ -40,6 +55,50 @@ class CircuitState:
     successes: int = 0
     last_failure: float = 0.0
     last_state_change: float = field(default_factory=time.time)
+    
+    def to_dict(self) -> JsonDict:
+        """Serialize for distributed storage."""
+        return {"state": self.state, "failures": self.failures, "successes": self.successes,
+                "last_failure": self.last_failure, "last_state_change": self.last_state_change}
+    
+    @classmethod
+    def from_dict(cls, d: JsonDict) -> CircuitState:
+        """Deserialize from distributed storage."""
+        return cls(State(d["state"]), int(d["failures"]), int(d["successes"]),
+                   float(d["last_failure"]), float(d["last_state_change"]))
+
+
+@runtime_checkable
+class StateStore(Protocol):
+    """Protocol for circuit state storage backends."""
+    def get(self, key: str) -> CircuitState | None: ...
+    def set(self, key: str, state: CircuitState) -> None: ...
+    def delete(self, key: str) -> bool: ...
+    def keys(self) -> list[str]: ...
+
+
+class MemoryStateStore:
+    """Thread-safe in-memory state store (default).
+    
+    Suitable for single-instance deployments. For distributed systems,
+    use RedisStateStore to share circuit state across instances.
+    """
+    __slots__ = ("_states",)
+    
+    def __init__(self) -> None:
+        self._states: dict[str, CircuitState] = {}
+    
+    def get(self, key: str) -> CircuitState | None:
+        return self._states.get(key)
+    
+    def set(self, key: str, state: CircuitState) -> None:
+        self._states[key] = state
+    
+    def delete(self, key: str) -> bool:
+        return self._states.pop(key, None) is not None
+    
+    def keys(self) -> list[str]:
+        return list(self._states)
 
 
 @dataclass(slots=True)
@@ -62,6 +121,7 @@ class CircuitBreakerMiddleware:
         success_threshold: Successes in half-open to close (default: 2)
         per_tool: Track per-tool (True) or global (False)
         trip_on: Error codes that trip the breaker (default: transient)
+        store: State storage backend (default: MemoryStateStore)
     
     Example:
         >>> registry.use(CircuitBreakerMiddleware(
@@ -71,6 +131,11 @@ class CircuitBreakerMiddleware:
         >>> 
         >>> # After 3 failures, circuit opens:
         >>> # "**Tool Error (search):** Circuit open - failing fast"
+        
+        # Distributed deployment with Redis:
+        >>> from toolcase.middleware.plugins.store import RedisStateStore
+        >>> store = RedisStateStore.from_url("redis://localhost:6379/0")
+        >>> registry.use(CircuitBreakerMiddleware(store=store))
     """
     
     failure_threshold: int = 5
@@ -82,36 +147,45 @@ class CircuitBreakerMiddleware:
         ErrorCode.NETWORK_ERROR,
         ErrorCode.EXTERNAL_SERVICE_ERROR,
     }))
-    _circuits: dict[str, CircuitState] = field(default_factory=dict, repr=False)
+    store: StateStore = field(default_factory=MemoryStateStore, repr=False)
     
     def _get_circuit(self, key: str) -> CircuitState:
-        return self._circuits.setdefault(key, CircuitState())
+        if (state := self.store.get(key)) is None:
+            state = CircuitState()
+            self.store.set(key, state)
+        return state
     
-    def _check_state(self, circuit: CircuitState) -> State:
+    def _save_circuit(self, key: str, circuit: CircuitState) -> None:
+        """Persist circuit state (required for distributed stores)."""
+        self.store.set(key, circuit)
+    
+    def _check_state(self, key: str, circuit: CircuitState) -> State:
         """Evaluate and potentially transition circuit state."""
-        # Check if recovery time elapsed
         if circuit.state == State.OPEN and time.time() - circuit.last_state_change >= self.recovery_time:
             circuit.state, circuit.successes, circuit.last_state_change = State.HALF_OPEN, 0, time.time()
+            self._save_circuit(key, circuit)
         return circuit.state
     
-    def _record_success(self, circuit: CircuitState) -> None:
+    def _record_success(self, key: str, circuit: CircuitState) -> None:
         """Record successful execution."""
         if circuit.state == State.HALF_OPEN:
             circuit.successes += 1
             if circuit.successes >= self.success_threshold:  # Recovery confirmed
                 circuit.state, circuit.failures, circuit.last_state_change = State.CLOSED, 0, time.time()
-        elif circuit.state == State.CLOSED:
-            circuit.failures = max(0, circuit.failures - 1)  # Reset failure count on success
+            self._save_circuit(key, circuit)
+        elif circuit.state == State.CLOSED and circuit.failures > 0:
+            circuit.failures = max(0, circuit.failures - 1)
+            self._save_circuit(key, circuit)
     
-    def _record_failure(self, circuit: CircuitState, code: ErrorCode) -> None:
+    def _record_failure(self, key: str, circuit: CircuitState, code: ErrorCode) -> None:
         """Record failed execution."""
         if code not in self.trip_on:
             return
         circuit.failures += 1
         circuit.last_failure = time.time()
-        # Probe failed OR threshold exceeded → open circuit
         if circuit.state == State.HALF_OPEN or (circuit.state == State.CLOSED and circuit.failures >= self.failure_threshold):
             circuit.state, circuit.last_state_change = State.OPEN, time.time()
+        self._save_circuit(key, circuit)
     
     async def __call__(
         self,
@@ -122,7 +196,7 @@ class CircuitBreakerMiddleware:
     ) -> str:
         key = tool.metadata.name if self.per_tool else "_global_"
         circuit = self._get_circuit(key)
-        state = self._check_state(circuit)
+        state = self._check_state(key, circuit)
         
         # Store circuit info in context for observability
         ctx.update(circuit_state=state.name, circuit_failures=circuit.failures, circuit_key=key)
@@ -145,14 +219,14 @@ class CircuitBreakerMiddleware:
         
         try:
             result = await next(tool, params, ctx)
-            # Check for error responses (string-based error detection)
-            self._record_failure(circuit, ErrorCode.EXTERNAL_SERVICE_ERROR) if result.startswith("**Tool Error") else self._record_success(circuit)
+            (self._record_failure(key, circuit, ErrorCode.EXTERNAL_SERVICE_ERROR) 
+             if result.startswith("**Tool Error") else self._record_success(key, circuit))
         except ToolException as e:
-            self._record_failure(circuit, e.error.code)
+            self._record_failure(key, circuit, e.error.code)
             ctx["circuit_state"] = circuit.state.name
             raise
         except Exception as e:
-            self._record_failure(circuit, classify_exception(e))
+            self._record_failure(key, circuit, classify_exception(e))
             ctx["circuit_state"] = circuit.state.name
             raise
         ctx["circuit_state"] = circuit.state.name
@@ -162,25 +236,21 @@ class CircuitBreakerMiddleware:
         """Get current circuit state for a tool (for monitoring)."""
         key = tool_name if self.per_tool else "_global_"
         circuit = self._get_circuit(key)
-        return self._check_state(circuit)
+        return self._check_state(key, circuit)
     
     def reset(self, tool_name: str | None = None) -> None:
         """Manually reset circuit(s) (for operations)."""
         if tool_name:
             key = tool_name if self.per_tool else "_global_"
-            if key in self._circuits:
-                self._circuits[key] = CircuitState()
+            if self.store.get(key):
+                self.store.set(key, CircuitState())
         else:
-            self._circuits.clear()
+            for key in self.store.keys():
+                self.store.delete(key)
     
     def stats(self) -> dict[str, JsonDict]:
         """Get statistics for all circuits (for monitoring)."""
         return {
-            key: {
-                "state": circuit.state.name,
-                "failures": circuit.failures,
-                "successes": circuit.successes,
-                "last_failure": circuit.last_failure,
-            }
-            for key, circuit in self._circuits.items()
+            key: (circuit.to_dict() if (circuit := self.store.get(key)) else {})
+            for key in self.store.keys()
         }
