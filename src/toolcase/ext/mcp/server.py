@@ -27,9 +27,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
-from toolcase.foundation.errors import ErrorCode, JsonDict, JsonValue, ToolError, ToolException
+from toolcase.foundation.errors import ErrorCode, JsonDict, ToolError, ToolException, format_validation_error
 
 if TYPE_CHECKING:
     from toolcase.foundation.core import BaseTool
@@ -72,42 +72,19 @@ class ToolServer(ABC):
     def list_tools(self) -> list[JsonDict]:
         """List all available tools with schemas."""
         from .bridge import get_required_params, get_tool_properties
-        
-        return [
-            {
-                "name": tool.metadata.name,
-                "description": tool.metadata.description,
-                "category": tool.metadata.category,
-                "parameters": {
-                    "type": "object",
-                    "properties": get_tool_properties(tool),
-                    "required": get_required_params(tool),
-                },
-            }
-            for tool in self._registry
-            if tool.metadata.enabled
-        ]
+        return [{
+            "name": (m := t.metadata).name, "description": m.description, "category": m.category,
+            "parameters": {"type": "object", "properties": get_tool_properties(t), "required": get_required_params(t)},
+        } for t in self._registry if t.metadata.enabled]
     
     async def invoke(self, tool_name: str, params: JsonDict) -> str:
-        """Invoke a tool by name with parameters.
-        
-        Returns structured error string on failure instead of raising.
-        """
-        tool = self._registry.get(tool_name)
-        if tool is None:
-            return ToolError.create(
-                tool_name, f"Tool '{tool_name}' not found",
-                ErrorCode.NOT_FOUND, recoverable=False
-            ).render()
-        
+        """Invoke a tool by name with parameters. Returns structured error string on failure."""
+        if (tool := self._registry.get(tool_name)) is None:
+            return ToolError.create(tool_name, f"Tool '{tool_name}' not found", ErrorCode.NOT_FOUND, recoverable=False).render()
         try:
             validated = tool.params_schema(**params)
         except ValidationError as e:
-            return ToolError.create(
-                tool_name, f"Invalid parameters: {e}",
-                ErrorCode.INVALID_PARAMS, recoverable=False
-            ).render()
-        
+            return ToolError.create(tool_name, format_validation_error(e, tool_name=tool_name), ErrorCode.INVALID_PARAMS, recoverable=False).render()
         try:
             return await tool.arun(validated)  # type: ignore[arg-type]
         except ToolException as e:
@@ -153,39 +130,15 @@ class MCPServer(ToolServer):
     
     def _register_tools(self, mcp) -> None:
         """Register all registry tools with FastMCP."""
-        for tool in self._registry:
-            if not tool.metadata.enabled:
-                continue
-            
+        for tool in (t for t in self._registry if t.metadata.enabled):
             schema = tool.params_schema
-            
             async def handler(__tool=tool, __schema=schema, **kwargs: object) -> str:
-                params = __schema(**kwargs)
-                return await __tool.arun(params)  # type: ignore[arg-type]
-            
-            mcp.tool(
-                name=tool.metadata.name,
-                description=tool.metadata.description,
-            )(handler)
+                return await __tool.arun(__schema(**kwargs))  # type: ignore[arg-type]
+            mcp.tool(name=tool.metadata.name, description=tool.metadata.description)(handler)
     
-    def run(
-        self,
-        transport: Transport = "stdio",
-        *,
-        host: str = "127.0.0.1",
-        port: int = 8080,
-    ) -> None:
-        """Start MCP server.
-        
-        Args:
-            transport: "stdio" (CLI), "sse" (HTTP), "streamable-http"
-            host: Host for HTTP transports
-            port: Port for HTTP transports
-        """
-        if transport == "stdio":
-            self._mcp.run()
-        else:
-            self._mcp.run(transport=transport, host=host, port=port)
+    def run(self, transport: Transport = "stdio", *, host: str = "127.0.0.1", port: int = 8080) -> None:
+        """Start MCP server. transport: "stdio" (CLI), "sse" (HTTP), "streamable-http"."""
+        self._mcp.run() if transport == "stdio" else self._mcp.run(transport=transport, host=host, port=port)
     
     @property
     def fastmcp(self):
@@ -228,69 +181,42 @@ class HTTPToolServer(ToolServer):
             from starlette.responses import JSONResponse
             from starlette.routing import Route
         except ImportError as e:
-            raise ImportError(
-                "HTTP server requires starlette. "
-                "Install with: pip install toolcase[http]"
-            ) from e
+            raise ImportError("HTTP server requires starlette. Install with: pip install toolcase[http]") from e
         
         async def list_tools(request):
-            return JSONResponse({
-                "server": self._name,
-                "tools": self.list_tools(),
-            })
+            return JSONResponse({"server": self._name, "tools": self.list_tools()})
         
         async def invoke_tool(request):
             tool_name = request.path_params["name"]
-            try:
-                body = await request.json()
-            except Exception:
-                body = {}
-            
+            body = await request.json() if request.headers.get("content-type") == "application/json" else {}
             result = await self.invoke(tool_name, body)
-            
             # Check if result is an error (starts with **Tool Error)
             if result.startswith("**Tool Error"):
-                # Determine status code from error content
                 status = 404 if "not found" in result.lower() else 400 if "Invalid parameters" in result else 500
                 return JSONResponse({"error": result}, status_code=status)
-            
             return JSONResponse({"result": result})
         
         async def get_tool_schema(request):
-            tool_name = request.path_params["name"]
-            tool = self._registry.get(tool_name)
-            if tool is None:
-                return JSONResponse({"error": f"Tool '{tool_name}' not found"}, status_code=404)
-            
+            if (tool := self._registry.get(request.path_params["name"])) is None:
+                return JSONResponse({"error": f"Tool '{request.path_params['name']}' not found"}, status_code=404)
             from .bridge import get_required_params, get_tool_properties
             return JSONResponse({
-                "name": tool.metadata.name,
-                "description": tool.metadata.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": get_tool_properties(tool),
-                    "required": get_required_params(tool),
-                },
+                "name": tool.metadata.name, "description": tool.metadata.description,
+                "parameters": {"type": "object", "properties": get_tool_properties(tool), "required": get_required_params(tool)},
             })
         
-        routes = [
+        return Starlette(routes=[
             Route("/tools", list_tools, methods=["GET"]),
             Route("/tools/{name}", invoke_tool, methods=["POST"]),
             Route("/tools/{name}/schema", get_tool_schema, methods=["GET"]),
-        ]
-        
-        return Starlette(routes=routes)
+        ])
     
     def run(self, host: str = "127.0.0.1", port: int = 8000) -> None:
         """Start HTTP server."""
         try:
             import uvicorn
         except ImportError as e:
-            raise ImportError(
-                "HTTP server requires uvicorn. "
-                "Install with: pip install toolcase[http]"
-            ) from e
-        
+            raise ImportError("HTTP server requires uvicorn. Install with: pip install toolcase[http]") from e
         uvicorn.run(self._app, host=host, port=port)
     
     @property
@@ -304,14 +230,7 @@ class HTTPToolServer(ToolServer):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def serve_mcp(
-    registry: ToolRegistry,
-    *,
-    name: str = "toolcase",
-    transport: Transport = "stdio",
-    host: str = "127.0.0.1",
-    port: int = 8080,
-) -> None:
+def serve_mcp(registry: ToolRegistry, *, name: str = "toolcase", transport: Transport = "stdio", host: str = "127.0.0.1", port: int = 8080) -> None:
     """Expose tools via MCP protocol (Cursor, Claude Desktop, etc).
     
     Args:
@@ -321,17 +240,10 @@ def serve_mcp(
         host: Host for HTTP transports
         port: Port for HTTP transports
     """
-    server = MCPServer(name, registry)
-    server.run(transport=transport, host=host, port=port)
+    MCPServer(name, registry).run(transport=transport, host=host, port=port)
 
 
-def serve_http(
-    registry: ToolRegistry,
-    *,
-    name: str = "toolcase",
-    host: str = "127.0.0.1",
-    port: int = 8000,
-) -> None:
+def serve_http(registry: ToolRegistry, *, name: str = "toolcase", host: str = "127.0.0.1", port: int = 8000) -> None:
     """Expose tools via HTTP REST endpoints (web backends).
     
     Endpoints:
@@ -345,14 +257,11 @@ def serve_http(
         host: Host address
         port: Port number
     """
-    server = HTTPToolServer(name, registry)
-    server.run(host=host, port=port)
+    HTTPToolServer(name, registry).run(host=host, port=port)
 
 
 def create_http_app(registry: ToolRegistry, name: str = "toolcase"):
-    """Create ASGI app without running it.
-    
-    Use for embedding in existing FastAPI/Starlette apps.
+    """Create ASGI app without running it. Use for embedding in existing FastAPI/Starlette apps.
     
     Example:
         >>> from fastapi import FastAPI
@@ -379,9 +288,7 @@ def create_mcp_server(registry: ToolRegistry, name: str = "toolcase") -> MCPServ
 
 
 def create_tool_routes(registry: ToolRegistry):
-    """Create Starlette routes for tool endpoints.
-    
-    For manual integration into existing apps.
+    """Create Starlette routes for tool endpoints. For manual integration into existing apps.
     
     Example:
         >>> from starlette.routing import Mount
@@ -392,13 +299,7 @@ def create_tool_routes(registry: ToolRegistry):
         List of Starlette Route objects
     """
     try:
-        from starlette.responses import JSONResponse
         from starlette.routing import Route
     except ImportError as e:
-        raise ImportError(
-            "Route creation requires starlette. "
-            "Install with: pip install starlette"
-        ) from e
-    
-    server = HTTPToolServer("tools", registry)
-    return server._app.routes
+        raise ImportError("Route creation requires starlette. Install with: pip install starlette") from e
+    return HTTPToolServer("tools", registry)._app.routes
