@@ -56,7 +56,7 @@ from pydantic import (
 from toolcase.foundation.core import ToolMetadata
 from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult
 
-from .base import ConfigurableTool, ToolConfig
+from ..core.base import ConfigurableTool, ToolConfig
 
 if TYPE_CHECKING:
     import httpx

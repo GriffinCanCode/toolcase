@@ -25,13 +25,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .discovery import DiscoveryParams, DiscoveryTool
-
-# Base classes for extensibility
-from .base import ConfigurableTool, ToolConfig
-
-# HTTP Tool (AuthStrategy is a type alias for the union)
-from .http import (
+from .core import ConfigurableTool, DiscoveryParams, DiscoveryTool, ToolConfig
+from .prebuilt import (
     ApiKeyAuth,
     BasicAuth,
     BearerAuth,
@@ -45,8 +40,9 @@ from .http import (
 )
 
 if TYPE_CHECKING:
-    from toolcase.foundation.core import BaseTool
     from pydantic import BaseModel
+
+    from toolcase.foundation.core import BaseTool
 
 
 def standard_tools() -> list[BaseTool[BaseModel]]:
@@ -85,13 +81,13 @@ __all__ = [
     "HttpConfig",
     "HttpParams",
     "HttpResponse",
-    # Auth strategies (concrete classes)
+    # Auth strategies
     "NoAuth",
     "BearerAuth",
     "BasicAuth",
     "ApiKeyAuth",
     "CustomAuth",
-    "get_no_auth",  # Singleton accessor
+    "get_no_auth",
     # Utility
     "standard_tools",
 ]
