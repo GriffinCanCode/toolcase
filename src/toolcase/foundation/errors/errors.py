@@ -9,7 +9,7 @@ from __future__ import annotations
 import traceback
 from enum import StrEnum
 from functools import lru_cache
-from typing import Annotated, Self
+from typing import TYPE_CHECKING, Annotated, Self
 
 from pydantic import (
     BaseModel,
@@ -19,6 +19,9 @@ from pydantic import (
     field_serializer,
     field_validator,
 )
+
+if TYPE_CHECKING:
+    from pydantic import ValidationError
 
 
 class ErrorCode(StrEnum):
