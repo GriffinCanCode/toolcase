@@ -12,13 +12,25 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ValidationError
 
-from toolcase.foundation.errors import ErrorCode, ToolError, ToolException
+from toolcase.foundation.errors import ErrorCode, ToolError, ToolException, format_validation_error
 
 if TYPE_CHECKING:
     from langchain_core.tools import StructuredTool
 
     from toolcase.foundation.core import BaseTool
     from toolcase.foundation.registry import ToolRegistry
+
+
+def _wrap_error(name: str, exc: Exception) -> str:
+    """Convert exception to rendered ToolError string."""
+    if isinstance(exc, ValidationError):
+        return ToolError.create(
+            name, format_validation_error(exc, tool_name=name),
+            ErrorCode.INVALID_PARAMS, recoverable=False
+        ).render()
+    if isinstance(exc, ToolException):
+        return exc.error.render()
+    return ToolError.from_exception(name, exc, "Execution failed").render()
 
 
 def to_langchain(tool: BaseTool[BaseModel]) -> StructuredTool:
@@ -45,53 +57,30 @@ def to_langchain(tool: BaseTool[BaseModel]) -> StructuredTool:
         from langchain_core.tools import StructuredTool
     except ImportError as e:
         raise ImportError(
-            "LangChain integration requires langchain-core. "
-            "Install with: pip install toolcase[langchain]"
+            "LangChain integration requires langchain-core. Install with: pip install toolcase[langchain]"
         ) from e
     
-    schema = tool.params_schema
-    name = tool.metadata.name
+    schema, name = tool.params_schema, tool.metadata.name
     
     def _invoke(**kwargs: object) -> str:
         try:
             return tool.run(schema(**kwargs))  # type: ignore[arg-type, call-arg]
-        except ValidationError as e:
-            return ToolError.create(
-                name, f"Invalid parameters: {e}",
-                ErrorCode.INVALID_PARAMS, recoverable=False
-            ).render()
-        except ToolException as e:
-            return e.error.render()
         except Exception as e:
-            return ToolError.from_exception(name, e, "Execution failed").render()
+            return _wrap_error(name, e)
     
     async def _ainvoke(**kwargs: object) -> str:
         try:
             return await tool.arun(schema(**kwargs))  # type: ignore[arg-type, call-arg]
-        except ValidationError as e:
-            return ToolError.create(
-                name, f"Invalid parameters: {e}",
-                ErrorCode.INVALID_PARAMS, recoverable=False
-            ).render()
-        except ToolException as e:
-            return e.error.render()
         except Exception as e:
-            return ToolError.from_exception(name, e, "Execution failed").render()
+            return _wrap_error(name, e)
     
     return StructuredTool.from_function(
-        func=_invoke,
-        coroutine=_ainvoke,
-        name=name,
-        description=tool.metadata.description,
-        args_schema=schema,
+        func=_invoke, coroutine=_ainvoke, name=name,
+        description=tool.metadata.description, args_schema=schema,
     )
 
 
-def to_langchain_tools(
-    registry: ToolRegistry,
-    *,
-    enabled_only: bool = True,
-) -> list[StructuredTool]:
+def to_langchain_tools(registry: ToolRegistry, *, enabled_only: bool = True) -> list[StructuredTool]:
     """Convert all tools in a registry to LangChain format.
     
     Args:
@@ -109,6 +98,5 @@ def to_langchain_tools(
     """
     return [
         to_langchain(tool)
-        for tool in registry
-        if not enabled_only or tool.metadata.enabled
+        for tool in registry if not enabled_only or tool.metadata.enabled
     ]

@@ -18,7 +18,7 @@ Example:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 from pydantic import BaseModel
 
@@ -93,40 +93,37 @@ _JsonSchema = dict[str, JsonSchemaValue]
 _PropertyMap = dict[str, JsonSchemaProperty]
 
 
-def _get_json_schema(tool: BaseTool[BaseModel]) -> _JsonSchema:
-    """Extract JSON schema from tool's params_schema."""
+def _extract_schema_parts(tool: BaseTool[BaseModel]) -> tuple[_PropertyMap, list[str]]:
+    """Extract cleaned properties and required fields from tool schema."""
     schema: _JsonSchema = tool.params_schema.model_json_schema()
-    # Remove Pydantic metadata not needed by providers
-    schema.pop("title", None)
-    schema.pop("$defs", None)
-    schema.pop("definitions", None)
-    return schema
-
-
-def _clean_properties(properties: _JsonSchema) -> _PropertyMap:
-    """Clean property definitions for provider compatibility.
+    for key in ("title", "$defs", "definitions"):
+        schema.pop(key, None)
     
-    Note: Takes loose dict type since JSON schema structure is dynamic.
-    Returns typed PropertyMap for downstream consumers.
-    """
-    if not isinstance(properties, dict):
-        return {}
-    return {
+    raw_props = schema.get("properties", {})
+    raw_required = schema.get("required", [])
+    
+    # Clean properties: remove 'title' key from each property dict
+    properties: _PropertyMap = {
         name: {k: v for k, v in prop.items() if k != "title"}  # type: ignore[misc]
-        for name, prop in properties.items()
+        for name, prop in (raw_props if isinstance(raw_props, dict) else {}).items()
         if isinstance(prop, dict)
     }
+    required = [str(r) for r in raw_required] if isinstance(raw_required, list) else []
+    
+    return properties, required
+
+
+def _build_params_schema(tool: BaseTool[BaseModel]) -> ParametersSchema:
+    """Build a ParametersSchema from tool's schema."""
+    properties, required = _extract_schema_parts(tool)
+    return {"type": "object", "properties": properties, "required": required}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OpenAI Format
 # ─────────────────────────────────────────────────────────────────────────────
 
-def tool_to_openai(
-    tool: BaseTool[BaseModel],
-    *,
-    strict: bool = False,
-) -> OpenAITool:
+def tool_to_openai(tool: BaseTool[BaseModel], *, strict: bool = False) -> OpenAITool:
     """Convert a toolcase tool to OpenAI function calling format.
     
     OpenAI tools format (Chat Completions API):
@@ -156,23 +153,12 @@ def tool_to_openai(
     Reference:
         https://platform.openai.com/docs/guides/function-calling
     """
-    schema = _get_json_schema(tool)
-    raw_props = schema.get("properties") or {}
-    raw_required = schema.get("required")
-    required = list(raw_required) if isinstance(raw_required, list) else []
-    
-    params: ParametersSchema = {
-        "type": "object",
-        "properties": _clean_properties(raw_props if isinstance(raw_props, dict) else {}),
-        "required": [str(r) for r in required],
-    }
-    
+    params = _build_params_schema(tool)
     function_def: OpenAIFunctionDef = {
         "name": tool.metadata.name,
         "description": tool.metadata.description,
         "parameters": params,
     }
-    
     if strict:
         function_def["strict"] = True
         params["additionalProperties"] = False
@@ -181,10 +167,7 @@ def tool_to_openai(
 
 
 def to_openai(
-    registry: ToolRegistry,
-    *,
-    enabled_only: bool = True,
-    strict: bool = False,
+    registry: ToolRegistry, *, enabled_only: bool = True, strict: bool = False,
 ) -> list[OpenAITool]:
     """Convert all tools in registry to OpenAI format.
     
@@ -209,8 +192,7 @@ def to_openai(
     """
     return [
         tool_to_openai(tool, strict=strict)
-        for tool in registry
-        if not enabled_only or tool.metadata.enabled
+        for tool in registry if not enabled_only or tool.metadata.enabled
     ]
 
 
@@ -243,27 +225,14 @@ def tool_to_anthropic(tool: BaseTool[BaseModel]) -> AnthropicTool:
     Reference:
         https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/implement-tool-use
     """
-    schema = _get_json_schema(tool)
-    raw_props = schema.get("properties") or {}
-    raw_required = schema.get("required")
-    required = list(raw_required) if isinstance(raw_required, list) else []
-    
     return {
         "name": tool.metadata.name,
         "description": tool.metadata.description,
-        "input_schema": {
-            "type": "object",
-            "properties": _clean_properties(raw_props if isinstance(raw_props, dict) else {}),
-            "required": [str(r) for r in required],
-        },
+        "input_schema": _build_params_schema(tool),
     }
 
 
-def to_anthropic(
-    registry: ToolRegistry,
-    *,
-    enabled_only: bool = True,
-) -> list[AnthropicTool]:
+def to_anthropic(registry: ToolRegistry, *, enabled_only: bool = True) -> list[AnthropicTool]:
     """Convert all tools in registry to Anthropic format.
     
     Args:
@@ -286,8 +255,7 @@ def to_anthropic(
     """
     return [
         tool_to_anthropic(tool)
-        for tool in registry
-        if not enabled_only or tool.metadata.enabled
+        for tool in registry if not enabled_only or tool.metadata.enabled
     ]
 
 
@@ -320,27 +288,14 @@ def tool_to_google(tool: BaseTool[BaseModel]) -> GoogleTool:
     Reference:
         https://ai.google.dev/gemini-api/docs/function-calling
     """
-    schema = _get_json_schema(tool)
-    raw_props = schema.get("properties") or {}
-    raw_required = schema.get("required")
-    required = list(raw_required) if isinstance(raw_required, list) else []
-    
     return {
         "name": tool.metadata.name,
         "description": tool.metadata.description,
-        "parameters": {
-            "type": "object",
-            "properties": _clean_properties(raw_props if isinstance(raw_props, dict) else {}),
-            "required": [str(r) for r in required],
-        },
+        "parameters": _build_params_schema(tool),
     }
 
 
-def to_google(
-    registry: ToolRegistry,
-    *,
-    enabled_only: bool = True,
-) -> list[GoogleTool]:
+def to_google(registry: ToolRegistry, *, enabled_only: bool = True) -> list[GoogleTool]:
     """Convert all tools in registry to Google Gemini format.
     
     Args:
@@ -366,8 +321,7 @@ def to_google(
     """
     return [
         tool_to_google(tool)
-        for tool in registry
-        if not enabled_only or tool.metadata.enabled
+        for tool in registry if not enabled_only or tool.metadata.enabled
     ]
 
 
@@ -376,17 +330,11 @@ def to_google(
 # ─────────────────────────────────────────────────────────────────────────────
 
 Provider = Literal["openai", "anthropic", "google"]
-
-# Union type for all provider tool formats
-ProviderTool = OpenAITool | AnthropicTool | GoogleTool
+ProviderTool = OpenAITool | AnthropicTool | GoogleTool  # Union type for all provider tool formats
 
 
 def to_provider(
-    registry: ToolRegistry,
-    provider: Provider,
-    *,
-    enabled_only: bool = True,
-    strict: bool = False,
+    registry: ToolRegistry, provider: Provider, *, enabled_only: bool = True, strict: bool = False,
 ) -> Sequence[ProviderTool]:
     """Convert tools to any supported provider format.
     
@@ -405,12 +353,11 @@ def to_provider(
     Example:
         >>> tools = to_provider(registry, "openai", strict=True)
     """
-    match provider:
-        case "openai":
-            return to_openai(registry, enabled_only=enabled_only, strict=strict)
-        case "anthropic":
-            return to_anthropic(registry, enabled_only=enabled_only)
-        case "google":
-            return to_google(registry, enabled_only=enabled_only)
-        case _:
-            raise ValueError(f"Unsupported provider: {provider}. Supported: openai, anthropic, google")
+    converters = {
+        "openai": lambda: to_openai(registry, enabled_only=enabled_only, strict=strict),
+        "anthropic": lambda: to_anthropic(registry, enabled_only=enabled_only),
+        "google": lambda: to_google(registry, enabled_only=enabled_only),
+    }
+    if provider not in converters:
+        raise ValueError(f"Unsupported provider: {provider}. Supported: {', '.join(converters)}")
+    return converters[provider]()
