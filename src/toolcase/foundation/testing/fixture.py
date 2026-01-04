@@ -11,12 +11,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import TYPE_CHECKING, Callable, ParamSpec, TypeVar, overload
+from typing import Callable, ParamSpec, TypeVar, overload
 
 from toolcase.foundation.errors import JsonDict, JsonValue
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable
 
 T = TypeVar("T")
 P = ParamSpec("P")
@@ -97,9 +94,9 @@ class MockResponse:
     
     def json(self) -> JsonDict:
         """Return data as dict (mimics httpx/requests API)."""
-        if isinstance(self.data, dict):
-            return self.data
-        raise ValueError("Response data is not JSON")
+        if not isinstance(self.data, dict):
+            raise ValueError("Response data is not JSON")
+        return self.data
     
     @property
     def text(self) -> str:
@@ -155,10 +152,8 @@ class MockAPI:
         """Get response for endpoint."""
         if endpoint in self.responses:
             return self._wrap_response(self.responses[endpoint])
-        for pat, resp in self.responses.items():
-            if '*' in pat and endpoint.startswith(pat.split('*')[0]):
-                return self._wrap_response(resp)
-        return MockResponse(status=self.default_status, data=self.default_response)
+        match = next((r for p, r in self.responses.items() if '*' in p and endpoint.startswith(p.split('*')[0])), None)
+        return self._wrap_response(match) if match else MockResponse(status=self.default_status, data=self.default_response)
     
     async def _request(self, method: str, endpoint: str, **kwargs: JsonValue) -> MockResponse:
         """Execute a simulated request with recording and delay."""
@@ -223,15 +218,11 @@ def mock_api() -> MockAPI:
 def mock_api_with_errors() -> MockAPI:
     """MockAPI configured to return errors."""
     api = MockAPI(default_status=500)
-    api.set_error("*", status=500, message="Service unavailable")
+    api.set_error("*", message="Service unavailable")
     return api
 
 
 @fixture
 def mock_api_slow() -> MockAPI:
     """MockAPI with simulated latency."""
-    return MockAPI(
-        responses={
-            "*": MockResponse(data="slow response", delay_ms=100),
-        }
-    )
+    return MockAPI(responses={"*": MockResponse(data="slow response", delay_ms=100)})

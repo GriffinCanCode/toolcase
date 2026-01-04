@@ -54,12 +54,12 @@ class MockTool(Generic[T]):
         return self.invocations[-1] if self.invocations else None
     
     def assert_called(self) -> None:
-        if not self.called:
+        if not self.invocations:
             raise AssertionError("Expected tool to be called")
     
     def assert_not_called(self) -> None:
-        if self.called:
-            raise AssertionError(f"Tool called {self.call_count} times")
+        if self.invocations:
+            raise AssertionError(f"Tool called {len(self.invocations)} times")
     
     def assert_called_with(self, **kwargs: object) -> None:
         if not (last := self.last_call):
@@ -110,24 +110,18 @@ def mock_tool(
 ) -> Generator[MockTool[T], None, None]:
     """Context manager for mocking tool behavior. Replaces tool execution with controlled responses for testing and records all invocations for verification."""
     mock: MockTool[T] = MockTool(original=tool, return_value=return_value, raises=raises, side_effect=side_effect, error_code=error_code)
-    tool_name = mock._get_tool_name()
-    tool_cls = tool if isinstance(tool, type) else type(tool)
-    
-    # Store original methods
+    tool_cls, name = (tool if isinstance(tool, type) else type(tool)), mock._get_tool_name()
     orig_run, orig_async = tool_cls._run_result, tool_cls._async_run_result
     
-    def patched_run(self: BaseTool[BaseModel], params: BaseModel) -> ToolResult:
-        return m._execute(params.model_dump()) if (m := _active_mocks.get(self.metadata.name)) else orig_run(self, params)
+    async def patched_async(s: BaseTool[BaseModel], p: BaseModel) -> ToolResult:
+        return m._execute(p.model_dump()) if (m := _active_mocks.get(s.metadata.name)) else await orig_async(s, p)
     
-    async def patched_async(self: BaseTool[BaseModel], params: BaseModel) -> ToolResult:
-        return m._execute(params.model_dump()) if (m := _active_mocks.get(self.metadata.name)) else await orig_async(self, params)
-    
-    tool_cls._run_result = patched_run  # type: ignore[method-assign]
+    tool_cls._run_result = lambda s, p: m._execute(p.model_dump()) if (m := _active_mocks.get(s.metadata.name)) else orig_run(s, p)  # type: ignore[method-assign]
     tool_cls._async_run_result = patched_async  # type: ignore[method-assign]
-    _active_mocks[tool_name] = mock  # type: ignore[assignment]
+    _active_mocks[name] = mock  # type: ignore[assignment]
     
     try:
         yield mock
     finally:
-        _active_mocks.pop(tool_name, None)
+        _active_mocks.pop(name, None)
         tool_cls._run_result, tool_cls._async_run_result = orig_run, orig_async  # type: ignore[method-assign]

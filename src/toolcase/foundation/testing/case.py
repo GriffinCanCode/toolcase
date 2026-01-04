@@ -12,7 +12,7 @@ import unittest
 from typing import TYPE_CHECKING, TypeVar, overload
 
 from toolcase.io.cache import reset_cache
-from toolcase.foundation.errors import ErrorCode, ErrorTrace, Result, ToolResult
+from toolcase.foundation.errors import ErrorCode, ErrorTrace, Result
 
 if TYPE_CHECKING:
     from toolcase.foundation.core import BaseTool
@@ -42,18 +42,13 @@ class ToolTestCase(unittest.IsolatedAsyncioTestCase):
     
     def setUp(self) -> None:
         """Reset cache before each test for isolation."""
-        super().setUp()
-        reset_cache()
+        super().setUp(); reset_cache()
     
     # ─────────────────────────────────────────────────────────────────
     # Invocation Helpers
     # ─────────────────────────────────────────────────────────────────
     
-    async def invoke(
-        self,
-        tool: BaseTool[BaseModel],
-        **kwargs: object,
-    ) -> Result[str, ErrorTrace]:
+    async def invoke(self, tool: BaseTool[BaseModel], **kwargs: object) -> Result[str, ErrorTrace]:
         """Execute tool and return Result type.
         
         Wraps tool execution in Result for type-safe error handling.
@@ -66,20 +61,11 @@ class ToolTestCase(unittest.IsolatedAsyncioTestCase):
         Returns:
             ToolResult with success string or ErrorTrace
         """
-        params = tool.params_schema(**kwargs)  # type: ignore[call-arg]
-        return await tool.arun_result(params)  # type: ignore[arg-type]
+        return await tool.arun_result(tool.params_schema(**kwargs))  # type: ignore[call-arg, arg-type]
     
-    def invoke_sync(
-        self,
-        tool: BaseTool[BaseModel],
-        **kwargs: object,
-    ) -> Result[str, ErrorTrace]:
-        """Execute tool synchronously.
-        
-        For tools that must run synchronously in tests.
-        """
-        params = tool.params_schema(**kwargs)  # type: ignore[call-arg]
-        return tool.run_result(params)  # type: ignore[arg-type]
+    def invoke_sync(self, tool: BaseTool[BaseModel], **kwargs: object) -> Result[str, ErrorTrace]:
+        """Execute tool synchronously. For tools that must run synchronously in tests."""
+        return tool.run_result(tool.params_schema(**kwargs))  # type: ignore[call-arg, arg-type]
     
     # ─────────────────────────────────────────────────────────────────
     # Result Assertions
@@ -98,39 +84,18 @@ class ToolTestCase(unittest.IsolatedAsyncioTestCase):
         Raises:
             AssertionError: If Result is Err
         """
-        if result.is_err():
-            trace = result.unwrap_err()
-            fail_msg = msg or f"Expected Ok, got Err: {trace.message}"
-            if trace.details:
-                fail_msg += f"\nDetails: {trace.details}"
-            self.fail(fail_msg)
-        return result.unwrap()
+        if result.is_ok():
+            return result.unwrap()
+        t = result.unwrap_err()
+        base = msg or f"Expected Ok, got Err: {t.message}"
+        self.fail(f"{base}\nDetails: {t.details}" if t.details else base)
     
     @overload
-    def assert_err(
-        self,
-        result: Result[T, ErrorTrace],
-        *,
-        code: ErrorCode,
-        msg: str | None = None,
-    ) -> ErrorTrace: ...
-    
+    def assert_err(self, result: Result[T, ErrorTrace], *, code: ErrorCode, msg: str | None = None) -> ErrorTrace: ...
     @overload
-    def assert_err(
-        self,
-        result: Result[T, ErrorTrace],
-        *,
-        contains: str,
-        msg: str | None = None,
-    ) -> ErrorTrace: ...
-    
+    def assert_err(self, result: Result[T, ErrorTrace], *, contains: str, msg: str | None = None) -> ErrorTrace: ...
     @overload
-    def assert_err(
-        self,
-        result: Result[T, ErrorTrace],
-        *,
-        msg: str | None = None,
-    ) -> ErrorTrace: ...
+    def assert_err(self, result: Result[T, ErrorTrace], *, msg: str | None = None) -> ErrorTrace: ...
     
     def assert_err(
         self,
@@ -155,30 +120,15 @@ class ToolTestCase(unittest.IsolatedAsyncioTestCase):
             AssertionError: If Result is Ok or error doesn't match criteria
         """
         if result.is_ok():
-            fail_msg = msg or f"Expected Err, got Ok: {result.unwrap()}"
-            self.fail(fail_msg)
-        
-        trace = result.unwrap_err()
-        
-        if code is not None and trace.error_code != code.value:
-            self.fail(
-                msg or f"Expected error code {code}, got {trace.error_code}"
-            )
-        
-        if contains is not None and contains not in trace.message:
-            self.fail(
-                msg or f"Expected error message to contain '{contains}', "
-                f"got: {trace.message}"
-            )
-        
-        return trace
+            self.fail(msg or f"Expected Err, got Ok: {result.unwrap()}")
+        t = result.unwrap_err()
+        if code and t.error_code != code.value:
+            self.fail(msg or f"Expected error code {code}, got {t.error_code}")
+        if contains and contains not in t.message:
+            self.fail(msg or f"Expected error message to contain '{contains}', got: {t.message}")
+        return t
     
-    def assert_contains(
-        self,
-        result: Result[str, ErrorTrace],
-        substring: str,
-        msg: str | None = None,
-    ) -> None:
+    def assert_contains(self, result: Result[str, ErrorTrace], substring: str, msg: str | None = None) -> None:
         """Assert Ok result contains substring.
         
         Args:
@@ -189,54 +139,28 @@ class ToolTestCase(unittest.IsolatedAsyncioTestCase):
         Raises:
             AssertionError: If Result is Err or doesn't contain substring
         """
-        value = self.assert_ok(result)
-        if substring not in value:
-            self.fail(
-                msg or f"Expected result to contain '{substring}', "
-                f"got: {value[:200]}{'...' if len(value) > 200 else ''}"
-            )
+        if substring not in (value := self.assert_ok(result)):
+            self.fail(msg or f"Expected result to contain '{substring}', got: {value[:200]}{'...' if len(value) > 200 else ''}")
     
-    def assert_not_contains(
-        self,
-        result: Result[str, ErrorTrace],
-        substring: str,
-        msg: str | None = None,
-    ) -> None:
+    def assert_not_contains(self, result: Result[str, ErrorTrace], substring: str, msg: str | None = None) -> None:
         """Assert Ok result does NOT contain substring."""
-        value = self.assert_ok(result)
-        if substring in value:
+        if substring in self.assert_ok(result):
             self.fail(msg or f"Result should not contain '{substring}'")
     
     # ─────────────────────────────────────────────────────────────────
     # Value Assertions
     # ─────────────────────────────────────────────────────────────────
     
-    def assert_result_equals(
-        self,
-        result: Result[T, ErrorTrace],
-        expected: T,
-        msg: str | None = None,
-    ) -> None:
+    def assert_result_equals(self, result: Result[T, ErrorTrace], expected: T, msg: str | None = None) -> None:
         """Assert Ok result equals expected value."""
-        value = self.assert_ok(result)
-        self.assertEqual(value, expected, msg)
+        self.assertEqual(self.assert_ok(result), expected, msg)
     
-    def assert_recoverable(
-        self,
-        result: Result[T, ErrorTrace],
-        msg: str | None = None,
-    ) -> None:
+    def assert_recoverable(self, result: Result[T, ErrorTrace], msg: str | None = None) -> None:
         """Assert error is marked as recoverable."""
-        trace = self.assert_err(result)
-        if not trace.recoverable:
+        if not self.assert_err(result).recoverable:
             self.fail(msg or "Expected recoverable error")
     
-    def assert_not_recoverable(
-        self,
-        result: Result[T, ErrorTrace],
-        msg: str | None = None,
-    ) -> None:
+    def assert_not_recoverable(self, result: Result[T, ErrorTrace], msg: str | None = None) -> None:
         """Assert error is NOT recoverable."""
-        trace = self.assert_err(result)
-        if trace.recoverable:
+        if self.assert_err(result).recoverable:
             self.fail(msg or "Expected non-recoverable error")
