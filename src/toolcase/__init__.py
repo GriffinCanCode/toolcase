@@ -119,6 +119,18 @@ from .middleware import (
     TimeoutMiddleware,
 )
 
+# Retry policies
+from .retry import (
+    Backoff,
+    ConstantBackoff,
+    DecorrelatedJitter,
+    ExponentialBackoff,
+    LinearBackoff,
+    RetryPolicy,
+    DEFAULT_RETRYABLE,
+    NO_RETRY,
+)
+
 # Built-in tools
 from .tools import DiscoveryParams, DiscoveryTool
 
@@ -187,6 +199,15 @@ __all__ = [
     "RateLimitMiddleware",
     "RetryMiddleware",
     "TimeoutMiddleware",
+    # Retry policies
+    "Backoff",
+    "ExponentialBackoff",
+    "LinearBackoff",
+    "ConstantBackoff",
+    "DecorrelatedJitter",
+    "RetryPolicy",
+    "DEFAULT_RETRYABLE",
+    "NO_RETRY",
     # Built-in tools
     "DiscoveryTool",
     "DiscoveryParams",

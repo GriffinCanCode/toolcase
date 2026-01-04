@@ -26,6 +26,7 @@ from ..errors import ErrorCode, ToolError
 from ..monads import Result, ToolResult
 from ..monads.tool import result_to_string, string_to_result
 from ..progress import ProgressCallback, ProgressKind, ToolProgress, complete
+from ..retry import RetryPolicy, execute_with_retry, execute_with_retry_sync
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -105,6 +106,9 @@ class BaseTool(ABC, Generic[TParams]):
     # Caching configuration
     cache_enabled: ClassVar[bool] = True
     cache_ttl: ClassVar[float] = DEFAULT_TTL
+    
+    # Retry configuration (None = no retries)
+    retry_policy: ClassVar[RetryPolicy | None] = None
     
     # ─────────────────────────────────────────────────────────────────
     # Error Handling
@@ -311,10 +315,13 @@ class BaseTool(ABC, Generic[TParams]):
         return output
     
     def run_result(self, params: TParams) -> ToolResult:
-        """Execute with caching, returning Result type.
+        """Execute with caching and retry, returning Result type.
         
         Type-safe alternative to run() that returns Result[str, ErrorTrace]
         instead of string. Enables monadic error handling in tool compositions.
+        
+        Respects retry_policy class variable for automatic retries on
+        retryable error codes (RATE_LIMITED, TIMEOUT, NETWORK_ERROR by default).
         
         Example:
             >>> result = tool.run_result(params)
@@ -324,21 +331,25 @@ class BaseTool(ABC, Generic[TParams]):
         Returns:
             ToolResult with success string or ErrorTrace
         """
-        if not self.cache_enabled:
-            return self._run_result(params)
-        
-        cache = get_cache()
+        cache = get_cache() if self.cache_enabled else None
         tool_name = self.metadata.name
         
         # Cache hit?
-        if (cached := cache.get(tool_name, params)) is not None:
+        if cache and (cached := cache.get(tool_name, params)) is not None:
             return string_to_result(cached, tool_name)
         
-        # Execute
-        result = self._run_result(params)
+        # Execute with optional retry
+        if self.retry_policy:
+            result = execute_with_retry_sync(
+                lambda: self._run_result(params),
+                self.retry_policy,
+                tool_name,
+            )
+        else:
+            result = self._run_result(params)
         
         # Cache successful results only
-        if result.is_ok():
+        if cache and result.is_ok():
             output = result_to_string(result, tool_name)
             cache.set(tool_name, params, output, self.cache_ttl)
         
@@ -365,19 +376,28 @@ class BaseTool(ABC, Generic[TParams]):
         return output
     
     async def arun_result(self, params: TParams, timeout: float = 30.0) -> ToolResult:
-        """Execute asynchronously with Result type, caching and timeout."""
-        if not self.cache_enabled:
-            return await asyncio.wait_for(self._async_run_result(params), timeout=timeout)
-        
-        cache = get_cache()
+        """Execute asynchronously with Result type, caching, retry, and timeout."""
+        cache = get_cache() if self.cache_enabled else None
         tool_name = self.metadata.name
         
-        if (cached := cache.get(tool_name, params)) is not None:
+        # Cache hit?
+        if cache and (cached := cache.get(tool_name, params)) is not None:
             return string_to_result(cached, tool_name)
         
-        result = await asyncio.wait_for(self._async_run_result(params), timeout=timeout)
+        # Execute with optional retry (timeout wraps entire retry sequence)
+        async def execute() -> ToolResult:
+            if self.retry_policy:
+                return await execute_with_retry(
+                    lambda: self._async_run_result(params),
+                    self.retry_policy,
+                    tool_name,
+                )
+            return await self._async_run_result(params)
         
-        if result.is_ok():
+        result = await asyncio.wait_for(execute(), timeout=timeout)
+        
+        # Cache successful results only
+        if cache and result.is_ok():
             output = result_to_string(result, tool_name)
             cache.set(tool_name, params, output, self.cache_ttl)
         
