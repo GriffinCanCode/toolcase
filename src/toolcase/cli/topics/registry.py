@@ -35,10 +35,10 @@ DISCOVERY:
     tools = registry.list_tools()
     
     # Filter by category
-    search_tools = registry.list_tools(category="search")
+    search_tools = registry.list_by_category("search")
     
-    # Get tool schemas
-    schemas = registry.get_schemas()
+    # Get unique categories
+    categories = registry.categories()
 
 INIT HELPER:
     from toolcase import init_tools

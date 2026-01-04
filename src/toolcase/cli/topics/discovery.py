@@ -34,12 +34,14 @@ OUTPUT (DETAILED):
 MANUAL DISCOVERY:
     registry = get_registry()
     
-    # List tools
+    # List all tools
     tools = registry.list_tools()
-    tools = registry.list_tools(category="search")
     
-    # Get schemas
-    schemas = registry.get_schemas()
+    # Filter by category
+    tools = registry.list_by_category("search")
+    
+    # Get unique categories
+    categories = registry.categories()
 
 RELATED TOPICS:
     toolcase help registry   Tool registration

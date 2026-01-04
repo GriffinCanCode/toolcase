@@ -21,7 +21,6 @@ from .testing import TESTING
 from .http import HTTP
 from .discovery import DISCOVERY
 from .imports import IMPORTS
-from .architecture import ARCHITECTURE
 
 TOPICS: dict[str, str] = {
     "help": HELP,
@@ -45,7 +44,6 @@ TOPICS: dict[str, str] = {
     "http": HTTP,
     "discovery": DISCOVERY,
     "imports": IMPORTS,
-    "architecture": ARCHITECTURE,
 }
 
 __all__ = ["TOPICS"]
