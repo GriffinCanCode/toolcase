@@ -7,6 +7,7 @@ The registry provides:
 - Middleware pipeline for cross-cutting concerns
 - Dependency injection for shared resources
 - Integration adapters (e.g., LangChain)
+- Centralized validation via ValidationMiddleware
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from pydantic import BaseModel, ValidationError
 from toolcase.foundation.core import BaseTool, ToolMetadata
 from toolcase.foundation.di import Container, Factory, Scope
 from toolcase.foundation.errors import ErrorCode, ToolError, ToolException, format_validation_error
-from toolcase.runtime.middleware import Context, Middleware, Next, compose, compose_streaming, StreamMiddleware
+from toolcase.runtime.middleware import Context, Middleware, Next, ValidationMiddleware, compose, compose_streaming, StreamMiddleware
 from toolcase.runtime.concurrency import run_sync
 from toolcase.io.streaming import (
     StreamChunk, StreamEvent, StreamEventKind, StreamResult,
@@ -44,9 +45,13 @@ class ToolRegistry:
         >>> registry.use(StreamLoggingMiddleware())
         >>> async for chunk in registry.stream_execute("gen", {"topic": "AI"}):
         ...     print(chunk, end="")
+    
+    Centralized Validation:
+        >>> validation = registry.use_validation()  # Returns ValidationMiddleware
+        >>> validation.add_rule("search", "query", min_length(3), "must be >= 3 chars")
     """
     
-    __slots__ = ("_tools", "_middleware", "_chain", "_stream_chain", "_container")
+    __slots__ = ("_tools", "_middleware", "_chain", "_stream_chain", "_container", "_validation")
     
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool[BaseModel]] = {}
@@ -54,6 +59,7 @@ class ToolRegistry:
         self._chain: Next | None = None
         self._stream_chain: object | None = None  # StreamingChain, lazy import
         self._container = Container()
+        self._validation: ValidationMiddleware | None = None
     
     def register(self, tool: BaseTool[BaseModel]) -> None:
         """Register a tool instance with validation."""
@@ -140,6 +146,42 @@ class ToolRegistry:
         self._middleware.append(middleware)
         self._chain = self._stream_chain = None  # Invalidate cached chains
     
+    def use_validation(self, *, revalidate: bool = False) -> ValidationMiddleware:
+        """Enable centralized validation via ValidationMiddleware.
+        
+        Creates and prepends ValidationMiddleware to the chain. Returns the
+        instance for adding custom rules. Should be called before other middleware.
+        
+        When enabled, execute()/stream_execute() skip internal validation,
+        delegating fully to the middleware chain.
+        
+        Args:
+            revalidate: Re-run Pydantic validation on already-validated BaseModel
+        
+        Returns:
+            ValidationMiddleware instance for adding custom rules
+        
+        Example:
+            >>> validation = registry.use_validation()
+            >>> validation.add_rule("search", "query", min_length(3), "must be >= 3 chars")
+            >>> validation.add_constraint("report", lambda p: p.start <= p.end or "invalid range")
+        """
+        if self._validation is None:
+            self._validation = ValidationMiddleware(revalidate=revalidate)
+            self._middleware.insert(0, self._validation)  # First in chain
+            self._chain = self._stream_chain = None
+        return self._validation
+    
+    @property
+    def validation(self) -> ValidationMiddleware | None:
+        """Access the ValidationMiddleware if configured."""
+        return self._validation
+    
+    @property
+    def has_validation_middleware(self) -> bool:
+        """Check if ValidationMiddleware is configured."""
+        return self._validation is not None
+    
     def _get_chain(self) -> Next:
         """Get or compile the middleware chain."""
         self._chain = self._chain or compose(self._middleware)  # type: ignore[arg-type]
@@ -163,6 +205,9 @@ class ToolRegistry:
         Validates params, builds context, resolves dependencies, and runs
         through the chain.
         
+        When ValidationMiddleware is configured (via use_validation()), validation
+        is delegated to the middleware chain. Otherwise, validates internally.
+        
         Injected dependencies are resolved from the container and added to
         context["injected"] for tools to access. Scoped resources are
         automatically cleaned up after execution.
@@ -182,11 +227,13 @@ class ToolRegistry:
         if (tool := self._tools.get(name)) is None:
             return ToolError.create(name, f"Tool '{name}' not found in registry", ErrorCode.NOT_FOUND, recoverable=False).render()
         
-        # Validate params if dict
-        try:
-            validated = tool.params_schema(**params) if isinstance(params, dict) else params
-        except ValidationError as e:
-            return ToolError.create(name, format_validation_error(e, tool_name=name), ErrorCode.INVALID_PARAMS, recoverable=False).render()
+        # Validate params if dict (skip if ValidationMiddleware handles it)
+        validated: BaseModel | dict[str, object] = params
+        if not self._validation:
+            try:
+                validated = tool.params_schema(**params) if isinstance(params, dict) else params
+            except ValidationError as e:
+                return ToolError.create(name, format_validation_error(e, tool_name=name), ErrorCode.INVALID_PARAMS, recoverable=False).render()
         
         # Build context
         context = ctx or Context()
@@ -206,7 +253,7 @@ class ToolRegistry:
             
             # Execute through chain with exception handling
             try:
-                return await self._get_chain()(tool, validated, context)
+                return await self._get_chain()(tool, validated, context)  # type: ignore[arg-type]
             except ToolException as e:
                 return e.error.render()
             except Exception as e:
@@ -247,6 +294,9 @@ class ToolRegistry:
         generator), this yields string chunks incrementally through each
         middleware's chunk hooks. For regular tools, yields complete result.
         
+        When ValidationMiddleware is configured (via use_validation()), validation
+        is delegated to the middleware chain. Otherwise, validates internally.
+        
         Middleware receives lifecycle hooks: on_start, on_chunk, on_complete,
         on_error. Regular Middleware is auto-adapted to streaming context.
         
@@ -270,12 +320,14 @@ class ToolRegistry:
             yield ToolError.create(name, f"Tool '{name}' not found in registry", ErrorCode.NOT_FOUND, recoverable=False).render()
             return
         
-        # Validate params
-        try:
-            validated = tool.params_schema(**params) if isinstance(params, dict) else params
-        except ValidationError as e:
-            yield ToolError.create(name, format_validation_error(e, tool_name=name), ErrorCode.INVALID_PARAMS, recoverable=False).render()
-            return
+        # Validate params (skip if ValidationMiddleware handles it)
+        validated: BaseModel | dict[str, object] = params
+        if not self._validation:
+            try:
+                validated = tool.params_schema(**params) if isinstance(params, dict) else params
+            except ValidationError as e:
+                yield ToolError.create(name, format_validation_error(e, tool_name=name), ErrorCode.INVALID_PARAMS, recoverable=False).render()
+                return
         
         # Build context
         context = ctx or Context()
@@ -298,15 +350,15 @@ class ToolRegistry:
                 # Get streaming chain and execute through middleware
                 chain = self._get_stream_chain()
                 if isinstance(chain, StreamingChain):
-                    async for chunk in chain(tool, validated, context):
+                    async for chunk in chain(tool, validated, context):  # type: ignore[arg-type]
                         yield chunk.content
                 else:
                     # Fallback if chain type unexpected
                     if hasattr(tool, "supports_result_streaming") and tool.supports_result_streaming:
-                        async for content in tool.stream_result(validated):
+                        async for content in tool.stream_result(validated):  # type: ignore[arg-type]
                             yield content
                     else:
-                        yield await tool.arun(validated)
+                        yield await tool.arun(validated)  # type: ignore[arg-type]
             except Exception as e:
                 yield ToolError.from_exception(name, e, "Stream execution failed").render()
     
@@ -407,6 +459,7 @@ class ToolRegistry:
         self._tools.clear()
         self._middleware.clear()
         self._chain = self._stream_chain = None
+        self._validation = None
         self._container.clear()
     
     async def dispose(self) -> None:

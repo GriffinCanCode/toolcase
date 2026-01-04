@@ -38,6 +38,7 @@ Tracing Example:
 from .middleware import Context, Middleware, Next, compose
 from .plugins import (
     CircuitBreakerMiddleware,
+    FieldRule,
     LoggingMiddleware,
     LogMetricsBackend,
     MetricsBackend,
@@ -45,6 +46,15 @@ from .plugins import (
     RateLimitMiddleware,
     RetryMiddleware,
     TimeoutMiddleware,
+    ValidationMiddleware,
+    Validator,
+    https_only,
+    in_range,
+    matches,
+    max_length,
+    min_length,
+    not_empty,
+    one_of,
 )
 from .streaming import (
     StreamMiddleware,
@@ -68,13 +78,26 @@ __all__ = [
     "compose_streaming",
     "StreamLoggingMiddleware",
     "StreamMetricsMiddleware",
-    # Plugins
+    # Resilience
     "CircuitBreakerMiddleware",
+    "RetryMiddleware",
+    "TimeoutMiddleware",
+    "RateLimitMiddleware",
+    # Observability
     "LoggingMiddleware",
     "LogMetricsBackend",
     "MetricsBackend",
     "MetricsMiddleware",
-    "RateLimitMiddleware",
-    "RetryMiddleware",
-    "TimeoutMiddleware",
+    # Validation
+    "ValidationMiddleware",
+    "FieldRule",
+    "Validator",
+    # Preset validators
+    "min_length",
+    "max_length",
+    "in_range",
+    "matches",
+    "one_of",
+    "not_empty",
+    "https_only",
 ]

@@ -78,7 +78,17 @@ class ToolServer(ABC):
         } for t in self._registry if t.metadata.enabled]
     
     async def invoke(self, tool_name: str, params: JsonDict) -> str:
-        """Invoke a tool by name with parameters. Returns structured error string on failure."""
+        """Invoke a tool by name with parameters.
+        
+        Uses registry.execute() when middleware is configured (including
+        ValidationMiddleware), otherwise validates and executes directly.
+        Returns structured error string on failure.
+        """
+        # Use registry's execute if middleware chain exists (includes validation)
+        if self._registry._middleware:
+            return await self._registry.execute(tool_name, params)
+        
+        # Direct execution path (no middleware)
         if (tool := self._registry.get(tool_name)) is None:
             return ToolError.create(tool_name, f"Tool '{tool_name}' not found", ErrorCode.NOT_FOUND, recoverable=False).render()
         try:
@@ -129,12 +139,24 @@ class MCPServer(ToolServer):
         return mcp
     
     def _register_tools(self, mcp) -> None:
-        """Register all registry tools with FastMCP."""
+        """Register all registry tools with FastMCP.
+        
+        Uses registry.execute() when middleware is configured (including
+        ValidationMiddleware), otherwise executes directly.
+        """
         for tool in (t for t in self._registry if t.metadata.enabled):
-            schema = tool.params_schema
-            async def handler(__tool=tool, __schema=schema, **kwargs: object) -> str:
-                return await __tool.arun(__schema(**kwargs))  # type: ignore[arg-type]
-            mcp.tool(name=tool.metadata.name, description=tool.metadata.description)(handler)
+            schema, name = tool.params_schema, tool.metadata.name
+            
+            if self._registry._middleware:
+                # Use registry's execute for middleware support
+                async def handler(__name=name, **kwargs: object) -> str:
+                    return await self._registry.execute(__name, kwargs)
+            else:
+                # Direct execution (no middleware)
+                async def handler(__tool=tool, __schema=schema, **kwargs: object) -> str:
+                    return await __tool.arun(__schema(**kwargs))  # type: ignore[arg-type]
+            
+            mcp.tool(name=name, description=tool.metadata.description)(handler)
     
     def run(self, transport: Transport = "stdio", *, host: str = "127.0.0.1", port: int = 8080) -> None:
         """Start MCP server. transport: "stdio" (CLI), "sse" (HTTP), "streamable-http"."""

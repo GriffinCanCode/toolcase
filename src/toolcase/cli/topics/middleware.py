@@ -6,9 +6,10 @@ Request/response middleware for cross-cutting concerns.
 
 CONCEPT:
     Middleware wraps tool execution to add behavior like logging,
-    retries, timeouts, rate limiting, and circuit breaking.
+    retries, timeouts, rate limiting, validation, and circuit breaking.
 
 BUILT-IN MIDDLEWARE:
+    ValidationMiddleware      Centralized param validation + custom rules
     LoggingMiddleware         Log tool calls and results
     MetricsMiddleware         Emit metrics (latency, success rate)
     RetryMiddleware           Retry failed calls with backoff
@@ -32,6 +33,19 @@ USAGE:
     # Apply to tool execution
     result = await chain(tool, params, Context())
 
+VALIDATION MIDDLEWARE:
+    # Enable centralized validation (runs first in chain)
+    validation = registry.use_validation()
+    
+    # Add custom field rules
+    validation.add_rule("search", "query", min_length(3), "too short")
+    validation.add_rule("http_request", "url", https_only, "must use HTTPS")
+    
+    # Cross-field constraints
+    validation.add_constraint("report", lambda p: p.start <= p.end or "invalid range")
+    
+    # Preset validators: min_length, max_length, in_range, matches, one_of, not_empty, https_only
+
 CUSTOM MIDDLEWARE:
     from toolcase import Middleware, Context, Next
     
@@ -45,8 +59,9 @@ CUSTOM MIDDLEWARE:
             return result
 
 REGISTRY INTEGRATION:
-    registry.use(LoggingMiddleware())
-    registry.use(TimeoutMiddleware(30.0))
+    validation = registry.use_validation()  # First (validation)
+    registry.use(LoggingMiddleware())       # Second
+    registry.use(TimeoutMiddleware(30.0))   # Third (innermost)
 
 RELATED TOPICS:
     toolcase help retry      Retry policies and backoff
