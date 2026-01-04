@@ -18,8 +18,7 @@ from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from pydantic import BaseModel
 
-from toolcase.foundation.core.decorator import clear_injected_deps, set_injected_deps
-from toolcase.foundation.errors import JsonDict
+from toolcase.foundation.core.decorator import InjectedDeps, clear_injected_deps, set_injected_deps
 from toolcase.io.streaming import StreamChunk
 
 from .middleware import Context, Middleware
@@ -155,7 +154,7 @@ async def _base_stream(
     """Base streaming executor - yields chunks from tool.stream_result()."""
     # Set injected dependencies from context if present
     if (injected := ctx.get("injected")) and isinstance(injected, dict):
-        set_injected_deps(cast("JsonDict", injected))
+        set_injected_deps(cast(InjectedDeps, injected))
     
     try:
         if getattr(tool, "supports_result_streaming", False):

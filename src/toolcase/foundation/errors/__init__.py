@@ -5,6 +5,7 @@
 - Result/Ok/Err: Monadic error handling with railway-oriented programming
 - ErrorTrace/ErrorContext: Error context stacking and provenance tracking
 - TypeAdapter utilities: validate_context, validate_trace for fast validation
+- Runtime type checking: typechecked decorator, is_json_value/is_json_dict guards
 """
 
 from .errors import (
@@ -33,13 +34,22 @@ from .tool import (
 from .types import (
     ErrorContext,
     ErrorTrace,
+    JsonArray,
     JsonDict,
+    JsonObject,
     JsonPrimitive,
     JsonValue,
     ResultT,
+    TypeViolation,
+    TypeViolationError,
+    as_json_dict,
+    as_json_value,
     context,
+    is_json_dict,
+    is_json_value,
     trace,
     trace_from_exc,
+    typechecked,
     validate_context,
     validate_trace,
 )
@@ -61,5 +71,7 @@ __all__ = [
     # Collection ops
     "sequence", "traverse", "collect_results",
     # JSON types
-    "JsonPrimitive", "JsonValue", "JsonDict",
+    "JsonPrimitive", "JsonValue", "JsonArray", "JsonObject", "JsonDict",
+    # Runtime type checking (beartype)
+    "typechecked", "TypeViolation", "TypeViolationError", "is_json_value", "is_json_dict", "as_json_value", "as_json_dict",
 ]

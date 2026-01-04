@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Callable, Protocol, TypeVar, cast, overload, r
 
 from pydantic import BaseModel
 
-from toolcase.foundation.core.decorator import clear_injected_deps, set_injected_deps
-from toolcase.foundation.errors import JsonDict, ToolError, ToolException
+from toolcase.foundation.core.decorator import InjectedDeps, clear_injected_deps, set_injected_deps
+from toolcase.foundation.errors import ToolError, ToolException
 
 if TYPE_CHECKING:
     from typing import Any
@@ -114,9 +114,9 @@ def compose(middleware: Sequence[Middleware]) -> Next:
     """
     async def base(tool: BaseTool[BaseModel], params: BaseModel, ctx: Context) -> str:
         try:
-            # Set injected deps from context if present (cast: injected can be any object)
+            # Set injected deps from context if present
             if (injected := ctx.get("injected")) and isinstance(injected, dict):
-                set_injected_deps(cast("JsonDict", injected))
+                set_injected_deps(cast(InjectedDeps, injected))
             try:
                 return await tool.arun(params)
             finally:

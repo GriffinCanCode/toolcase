@@ -1,14 +1,17 @@
 """Type aliases and error context tracking for monadic error handling.
 
 Uses Pydantic models for validation/serialization. Optimized for high-frequency error paths with minimal allocations.
+Integrates beartype for O(1) runtime type checking via guard functions.
 """
 
 from __future__ import annotations
 
 from io import StringIO
-from typing import TYPE_CHECKING, Annotated, TypeAlias, Union
+from typing import TYPE_CHECKING, Annotated, TypeAlias
 
+from beartype import beartype
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, computed_field, field_serializer
+from pydantic import JsonValue as PydanticJsonValue
 
 if TYPE_CHECKING:
     from .result import Result
@@ -19,11 +22,80 @@ if TYPE_CHECKING:
 
 ResultT: TypeAlias = "Result[str, str]"
 
-# JSON type aliases - using Any for recursive types to avoid Pydantic resolution issues
-from typing import Any
-JsonPrimitive = Union[str, int, float, bool, None]
-JsonValue = Union[JsonPrimitive, list[Any], dict[str, Any]]  # Any for recursive slots
-JsonDict = dict[str, Any]
+# JSON type aliases
+# Use Pydantic's JsonValue for model fields (handles recursion properly at runtime)
+# For static typing, we define stricter aliases that preserve type narrowing
+JsonPrimitive: TypeAlias = str | int | float | bool | None
+JsonArray: TypeAlias = list[PydanticJsonValue]
+JsonObject: TypeAlias = dict[str, PydanticJsonValue]
+JsonValue: TypeAlias = PydanticJsonValue  # Re-export Pydantic's properly recursive type
+JsonDict: TypeAlias = dict[str, PydanticJsonValue]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Runtime Type Checking (beartype)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Re-export beartype decorator for function-level type checking
+typechecked = beartype
+
+# Import beartype exception base for unified error handling
+from beartype.roar import BeartypeException
+
+
+class TypeViolationError(TypeError):
+    """Runtime type violation error for JSON type guards."""
+    pass
+
+
+# TypeViolation: tuple for except clauses catching both our guards and beartype violations
+# Usage: except TypeViolation as e:
+TypeViolation = (BeartypeException, TypeViolationError)
+
+# JSON primitives tuple for O(1) isinstance checks
+_JSON_PRIMITIVES = (str, int, float, bool, type(None))
+
+
+def _is_json_recursive(value: object, _seen: set[int] | None = None) -> bool:
+    """Deep check if value is valid JSON (handles cycles)."""
+    if _seen is None:
+        _seen = set()
+    vid = id(value)
+    if vid in _seen:
+        return False  # Circular reference not allowed in JSON
+    if isinstance(value, _JSON_PRIMITIVES):
+        return True
+    if isinstance(value, list):
+        _seen.add(vid)
+        return all(_is_json_recursive(v, _seen) for v in value)
+    if isinstance(value, dict):
+        _seen.add(vid)
+        return all(isinstance(k, str) and _is_json_recursive(v, _seen) for k, v in value.items())
+    return False
+
+
+def is_json_value(value: object) -> bool:
+    """Check if value conforms to JsonValue at runtime. Handles nested structures and cycles."""
+    return _is_json_recursive(value)
+
+
+def is_json_dict(value: object) -> bool:
+    """Check if value conforms to JsonDict at runtime (dict with string keys and JSON values)."""
+    return isinstance(value, dict) and all(isinstance(k, str) for k in value) and _is_json_recursive(value)
+
+
+def as_json_value(value: object) -> JsonValue:
+    """Narrow value to JsonValue, raising TypeViolation if invalid."""
+    if not is_json_value(value):
+        raise TypeViolationError(f"Expected JsonValue, got {type(value).__name__}: {value!r}")
+    return value  # type: ignore[return-value]
+
+
+def as_json_dict(value: object) -> JsonDict:
+    """Narrow value to JsonDict, raising TypeViolation if invalid."""
+    if not is_json_dict(value):
+        raise TypeViolationError(f"Expected JsonDict, got {type(value).__name__}: {value!r}")
+    return value  # type: ignore[return-value]
+
 
 # Threshold for using StringIO in format() (improves performance for large traces)
 _FORMAT_STRINGIO_THRESHOLD = 10

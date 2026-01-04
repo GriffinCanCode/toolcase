@@ -16,6 +16,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator, Iterator
 
+from beartype import beartype as typechecked
 from pydantic import BaseModel, ValidationError
 
 from toolcase.foundation.core import BaseTool, ToolCapabilities, ToolMetadata
@@ -69,6 +70,7 @@ class ToolRegistry:
         self._validation: ValidationMiddleware | None = None
         self._limiters: dict[str, CapacityLimiter] = {}  # Concurrency control per tool
     
+    @typechecked
     def register(self, tool: BaseTool[BaseModel]) -> None:
         """Register a tool instance with validation.
         
@@ -85,11 +87,13 @@ class ToolRegistry:
         if (max_conc := tool.metadata.max_concurrent) is not None:
             self._limiters[name] = CapacityLimiter(max_conc)
     
+    @typechecked
     def unregister(self, name: str) -> bool:
         """Remove a tool by name. Returns True if found."""
         self._limiters.pop(name, None)
         return self._tools.pop(name, None) is not None
     
+    @typechecked
     def get(self, name: str) -> BaseTool[BaseModel] | None:
         """Get tool by name."""
         return self._tools.get(name)
@@ -103,6 +107,7 @@ class ToolRegistry:
         """Access the DI container for advanced configuration."""
         return self._container
     
+    @typechecked
     def provide(
         self,
         name: str,

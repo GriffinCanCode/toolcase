@@ -21,10 +21,10 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from collections.abc import Callable
 from typing import (
     TYPE_CHECKING,
     Awaitable,
-    Callable,
     Protocol,
     TypeVar,
     runtime_checkable,

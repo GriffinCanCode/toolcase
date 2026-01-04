@@ -9,7 +9,7 @@ from typing import TypeAlias
 
 from .errors import ErrorCode, ToolError, classify_exception
 from .result import Result, _ERR, _OK, collect_results, sequence
-from .types import ErrorContext, ErrorTrace, JsonDict, _EMPTY_CONTEXTS
+from .types import ErrorContext, ErrorTrace, JsonDict, _EMPTY_CONTEXTS, typechecked
 from toolcase.runtime.concurrency import to_thread
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -32,6 +32,7 @@ def _tool_ctx(tool_name: str) -> tuple[ErrorContext, ...]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+@typechecked
 def tool_result(
     tool_name: str,
     message: str,
@@ -44,6 +45,7 @@ def tool_result(
     return Result(ErrorTrace(message=message, contexts=_tool_ctx(tool_name), error_code=code.value, recoverable=recoverable, details=details), _ERR)
 
 
+@typechecked
 def from_tool_error(error: ToolError) -> ToolResult:
     """Convert ToolError to Result type."""
     return Result(ErrorTrace(message=error.message, contexts=_tool_ctx(error.tool_name), error_code=error.code.value, recoverable=error.recoverable, details=error.details), _ERR)
@@ -69,11 +71,13 @@ def to_tool_error(result: ToolResult, tool_name: str) -> ToolError:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+@typechecked
 def ok_result(value: str) -> ToolResult:
     """Create Ok ToolResult."""
     return Result(value, _OK)
 
 
+@typechecked
 def _make_error_trace(tool_name: str, e: Exception, ctx: str) -> ErrorTrace:
     """Internal helper to build ErrorTrace from exception."""
     contexts = (ErrorContext(operation=f"tool:{tool_name}", location="", metadata=_EMPTY_META),
@@ -82,6 +86,7 @@ def _make_error_trace(tool_name: str, e: Exception, ctx: str) -> ErrorTrace:
                       error_code=classify_exception(e).value, recoverable=True, details=traceback.format_exc())
 
 
+@typechecked
 def try_tool_operation(tool_name: str, operation: Callable[[], str], *, context: str = "") -> ToolResult:
     """Execute operation, catching exceptions and converting to Result."""
     try:
@@ -90,6 +95,7 @@ def try_tool_operation(tool_name: str, operation: Callable[[], str], *, context:
         return Result(_make_error_trace(tool_name, e, context), _ERR)
 
 
+@typechecked
 async def try_tool_operation_async(
     tool_name: str,
     operation: Callable[[], str] | Callable[[], Awaitable[str]],
@@ -109,11 +115,13 @@ async def try_tool_operation_async(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+@typechecked
 def result_to_string(result: ToolResult, tool_name: str) -> str:
     """Convert ToolResult to string. Ok returns value, Err renders as ToolError."""
     return result._value if result._is_ok else to_tool_error(result, tool_name).render()  # type: ignore[return-value]
 
 
+@typechecked
 def string_to_result(output: str, tool_name: str) -> ToolResult:
     """Parse string to ToolResult. Detects error strings by '**Tool Error' prefix."""
     if output.startswith("**Tool Error"):

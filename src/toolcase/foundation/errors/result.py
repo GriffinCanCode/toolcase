@@ -13,8 +13,10 @@ Type variance: Invariant TypeVars (T/E appear in covariant+contravariant positio
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
-from typing import Callable, Generic, TypeVar, final
+from collections.abc import Callable, Iterable, Iterator
+from typing import Generic, TypeVar, final
+
+from beartype import beartype as typechecked
 
 # Invariant TypeVars (T/E in covariant+contravariant positions)
 T, E, U, F = TypeVar("T"), TypeVar("E"), TypeVar("U"), TypeVar("F")
@@ -217,16 +219,19 @@ class Result(Generic[T, E]):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+@typechecked
 def Ok(value: T) -> Result[T, E]:  # noqa: N802
     """Construct Ok variant (success)."""
     return Result(value, _OK)
 
 
+@typechecked
 def Err(error: E) -> Result[T, E]:  # noqa: N802
     """Construct Err variant (failure)."""
     return Result(error, _ERR)
 
 
+@typechecked
 def try_fn(f: Callable[[], T]) -> Result[T, Exception]:
     """Execute f, catching exceptions as Err. try_fn(lambda: risky()) -> Result."""
     try:
@@ -240,6 +245,7 @@ def try_fn(f: Callable[[], T]) -> Result[T, Exception]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+@typechecked
 def sequence(results: Iterable[Result[T, E]]) -> Result[list[T], E]:
     """Iterable[Result[T,E]] → Result[List[T], E]. Fail-fast on first Err."""
     values: list[T] = []
@@ -250,6 +256,7 @@ def sequence(results: Iterable[Result[T, E]]) -> Result[list[T], E]:
     return Result(values, _OK)
 
 
+@typechecked
 def traverse(items: Iterable[T], f: Callable[[T], Result[U, E]]) -> Result[list[U], E]:
     """Map f over items, sequence results. Fail-fast on first Err."""
     values: list[U] = []
@@ -260,6 +267,7 @@ def traverse(items: Iterable[T], f: Callable[[T], Result[U, E]]) -> Result[list[
     return Result(values, _OK)
 
 
+@typechecked
 def collect_results(results: Iterable[Result[T, E]]) -> Result[list[T], list[E]]:
     """Collect all Results, accumulating ALL errors (not fail-fast)."""
     values: list[T] = []

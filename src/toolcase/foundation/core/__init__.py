@@ -15,6 +15,7 @@ This module provides the foundation for building type-safe, extensible tools:
 from .base import BaseTool, EmptyParams, ToolCapabilities, ToolMetadata
 from .decorator import (
     FunctionTool,
+    InjectedDeps,
     ResultStreamingFunctionTool,
     StreamingFunctionTool,
     clear_injected_deps,
@@ -32,6 +33,7 @@ __all__ = [
     "FunctionTool",
     "StreamingFunctionTool",
     "ResultStreamingFunctionTool",
+    "InjectedDeps",
     "set_injected_deps",
     "get_injected_deps",
     "clear_injected_deps",

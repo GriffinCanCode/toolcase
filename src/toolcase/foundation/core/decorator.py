@@ -31,6 +31,16 @@ Dependency Injection Example:
     >>> registry.provide("db", lambda: AsyncpgPool())
     >>> registry.provide("http_client", httpx.AsyncClient)
     >>> await registry.execute("fetch_user", {"user_id": "123"})
+
+Effect System Example:
+    >>> @tool(description="Fetch user from DB", effects=["db", "cache"])
+    ... async def fetch_user(user_id: str, db: Database) -> str:
+    ...     return await db.fetch_one("SELECT * FROM users WHERE id = $1", user_id)
+    ...
+    >>> # Test without mocks using pure handlers
+    >>> from toolcase.foundation.effects import test_effects, InMemoryDB
+    >>> async with test_effects(db=InMemoryDB()):
+    ...     result = await registry.execute("fetch_user", {"user_id": "123"})
 """
 
 from __future__ import annotations
@@ -49,7 +59,7 @@ from toolcase.runtime.concurrency import to_thread
 from toolcase.io.cache import DEFAULT_TTL
 from toolcase.foundation.errors import ToolResult, classify_exception, ErrorTrace, Result
 from toolcase.foundation.errors.result import _ERR, _OK
-from toolcase.foundation.errors.types import ErrorContext, JsonDict
+from toolcase.foundation.errors.types import ErrorContext, typechecked
 from .base import BaseTool, ToolCapabilities, ToolMetadata
 
 if TYPE_CHECKING:
@@ -59,24 +69,30 @@ if TYPE_CHECKING:
 
 P = ParamSpec("P")
 
+# Type for injected dependencies (can be any runtime objects, not JSON)
+InjectedDeps = dict[str, object]
+
 # Context variable for passing injected dependencies
 # Note: No default set to avoid mutable default dict shared across contexts
-_injected_deps: ContextVar[JsonDict] = ContextVar("injected_deps")
+_injected_deps: ContextVar[InjectedDeps] = ContextVar("injected_deps")
 
 # Empty dict singleton for clear operations (avoids allocations)
-_EMPTY_DEPS: JsonDict = {}
+_EMPTY_DEPS: InjectedDeps = {}
 
 
-def get_injected_deps() -> JsonDict:
+@typechecked
+def get_injected_deps() -> InjectedDeps:
     """Get dependencies for the current execution context. Returns empty dict if not set."""
     return _injected_deps.get(_EMPTY_DEPS)
 
 
-def set_injected_deps(deps: JsonDict) -> None:
+@typechecked
+def set_injected_deps(deps: InjectedDeps) -> None:
     """Set dependencies for the current execution context. Called by registry before tool execution."""
     _injected_deps.set(deps)
 
 
+@typechecked
 def clear_injected_deps() -> None:
     """Clear injected dependencies after execution."""
     _injected_deps.set(_EMPTY_DEPS)
@@ -121,9 +137,9 @@ def _generate_schema(func: Callable[..., str], model_name: str, exclude: list[st
 # ─────────────────────────────────────────────────────────────────────────────
 
 class FunctionTool(BaseTool[BaseModel]):
-    """BaseTool wrapper for decorated functions. Bridges function API with class-based system, supports DI via inject param."""
+    """BaseTool wrapper for decorated functions. Bridges function API with class-based system, supports DI via inject param and effect tracking."""
     
-    __slots__ = ("_func", "_is_async", "_original_func", "_inject", "_tool_ctx")
+    __slots__ = ("_func", "_is_async", "_original_func", "_inject", "_effects", "_tool_ctx")
     
     def __init__(
         self,
@@ -134,13 +150,20 @@ class FunctionTool(BaseTool[BaseModel]):
         cache_enabled: bool = True,
         cache_ttl: float = DEFAULT_TTL,
         inject: list[str] | None = None,
+        effects: frozenset[str] | None = None,
     ) -> None:
         self._func, self._original_func = func, func
         self._is_async = asyncio.iscoroutinefunction(func) or inspect.isasyncgenfunction(func)
         self._inject = inject or []
+        self._effects = effects or frozenset()
         self._tool_ctx = (ErrorContext(operation=f"tool:{metadata.name}", location="", metadata={}),)
         self.__class__ = type(f"{type(self).__name__}_{metadata.name}", (type(self),),
                               {"metadata": metadata, "params_schema": params_schema, "cache_enabled": cache_enabled, "cache_ttl": cache_ttl})
+    
+    @property
+    def declared_effects(self) -> frozenset[str]:
+        """Effects declared by this tool."""
+        return self._effects
     
     async def _async_run(self, params: BaseModel) -> str:
         """Execute the wrapped function. Async-first: sync funcs run via to_thread."""

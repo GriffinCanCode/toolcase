@@ -11,10 +11,8 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
-
-if TYPE_CHECKING:
-    from pydantic import ValidationError
+from beartype import beartype as typechecked
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, computed_field, field_validator
 
 
 class ErrorCode(StrEnum):
@@ -49,6 +47,7 @@ def _classify_cached(exc_key: str) -> ErrorCode:
     return next((code for pattern, code in _PATTERN_CODES if pattern in haystack), ErrorCode.EXTERNAL_SERVICE_ERROR)
 
 
+@typechecked
 def classify_exception(exc: Exception) -> ErrorCode:
     """Map exception to error code via pattern matching on name/message."""
     return _classify_cached(f"{type(exc).__name__} {exc}")
@@ -94,7 +93,8 @@ _ERROR_TYPE_MESSAGES: dict[str, tuple[str, str]] = {
 }
 
 
-def format_validation_error(exc: "ValidationError", *, tool_name: str | None = None) -> str:
+@typechecked
+def format_validation_error(exc: ValidationError, *, tool_name: str | None = None) -> str:
     """Format Pydantic ValidationError into LLM-friendly natural language.
     
     Converts raw validation errors into clear, actionable descriptions.
