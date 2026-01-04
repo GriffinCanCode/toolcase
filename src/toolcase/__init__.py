@@ -273,6 +273,15 @@ from .runtime.concurrency import (
     SyncAdapter,
 )
 
+# Runtime: Batch
+from .runtime.batch import (
+    BatchConfig,
+    BatchItem,
+    BatchResult,
+    batch_execute,
+    batch_execute_sync,
+)
+
 # Built-in tools
 from .tools import (
     ApiKeyAuth,
@@ -360,6 +369,9 @@ __all__ = [
     "TaskGroup", "TaskHandle", "CancelScope",
     "Lock", "Semaphore", "Event", "Barrier", "CapacityLimiter",
     "run_sync", "to_thread", "AsyncAdapter", "SyncAdapter",
+    # Batch
+    "BatchConfig", "BatchItem", "BatchResult",
+    "batch_execute", "batch_execute_sync",
     # Convenience
     "init_tools",
 ]

@@ -56,7 +56,7 @@ from toolcase.io.streaming import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from toolcase.runtime.batch import BatchConfig, BatchResult
 
 # Internal constants for fast Result construction
 from toolcase.foundation.errors.result import _ERR, _OK
@@ -235,32 +235,21 @@ class BaseTool(ABC, Generic[TParams]):
         ), _ERR)
     
     # ─────────────────────────────────────────────────────────────────
-    # Async/Sync Interop
+    # Core Execution (Async-First Design)
     # ─────────────────────────────────────────────────────────────────
-    
-    def _run_async_sync(self, coro: Coroutine[None, None, str]) -> str:
-        """Run async coroutine from sync context via run_sync (handles existing loops, clean shutdown)."""
-        return run_sync(coro)
-    
-    # ─────────────────────────────────────────────────────────────────
-    # Core Execution
-    # ─────────────────────────────────────────────────────────────────
-    
-    def _run_result(self, params: TParams) -> ToolResult:
-        """Execute with Result-based error handling. Override for monadic railway-oriented error propagation."""
-        try:
-            return Result(self._run(params), _OK)
-        except Exception as e:
-            return self._err_from_exc(e, "execution")
     
     @abstractmethod
-    def _run(self, params: TParams) -> str:
-        """Execute synchronously; return string for LLM. Override _run_result() for Result-based handling."""
+    async def _async_run(self, params: TParams) -> str:
+        """Primary execution method - implement async logic here.
+        
+        For sync-only operations, return directly (no await needed):
+            async def _async_run(self, params): return do_sync_work()
+        """
         ...
     
-    async def _async_run(self, params: TParams) -> str:
-        """Execute asynchronously. Default wraps _run in thread; override for native async (e.g., httpx)."""
-        return await to_thread(self._run, params)
+    def _run(self, params: TParams) -> str:
+        """Sync wrapper - calls _async_run via run_sync. Override only if needed."""
+        return run_sync(self._async_run(params))
     
     async def _async_run_result(self, params: TParams) -> ToolResult:
         """Execute asynchronously with Result-based error handling; catches exceptions as Err."""
@@ -268,6 +257,10 @@ class BaseTool(ABC, Generic[TParams]):
             return string_to_result(await self._async_run(params), self.metadata.name)
         except Exception as e:
             return self._err_from_exc(e, "async execution")
+    
+    def _run_result(self, params: TParams) -> ToolResult:
+        """Sync wrapper for Result-based execution."""
+        return run_sync(self._async_run_result(params))
     
     def run(self, params: TParams) -> str:
         """Execute with caching support. Checks cache first, caches successful results only."""
@@ -413,3 +406,42 @@ class BaseTool(ABC, Generic[TParams]):
         """Chain tools: self >> other creates a sequential pipeline."""
         from toolcase.runtime.pipeline import PipelineTool, Step
         return PipelineTool(steps=[Step(self), Step(other)])
+    
+    # ─────────────────────────────────────────────────────────────────
+    # Batch Execution
+    # ─────────────────────────────────────────────────────────────────
+    
+    async def batch_run(
+        self,
+        params_list: list[TParams],
+        config: BatchConfig | None = None,
+    ) -> BatchResult[TParams]:
+        """Execute tool against multiple parameter sets concurrently.
+        
+        Provides intelligent batching with configurable concurrency,
+        partial failure handling, and result aggregation.
+        
+        Args:
+            params_list: List of parameter objects to execute
+            config: Batch configuration (concurrency, fail_fast, etc.)
+        
+        Returns:
+            BatchResult with all outcomes, metrics, and convenience accessors
+        
+        Example:
+            >>> params = [SearchParams(q=q) for q in ["python", "rust", "go"]]
+            >>> results = await search_tool.batch_run(params, BatchConfig(concurrency=3))
+            >>> print(f"Success: {results.success_rate:.0%}")
+            >>> for item in results.successes:
+            ...     print(f"[{item.index}] {item.value[:50]}...")
+        """
+        from toolcase.runtime.batch import batch_execute
+        return await batch_execute(self, params_list, config)
+    
+    def batch_run_sync(
+        self,
+        params_list: list[TParams],
+        config: BatchConfig | None = None,
+    ) -> BatchResult[TParams]:
+        """Synchronous batch execution. Wraps batch_run for sync contexts."""
+        return run_sync(self.batch_run(params_list, config))

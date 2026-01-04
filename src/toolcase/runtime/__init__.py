@@ -1,6 +1,6 @@
 """Runtime - Execution flow, control, and monitoring.
 
-Contains: agents, middleware, retry, pipeline, observability, concurrency.
+Contains: agents, middleware, retry, pipeline, observability, concurrency, batch.
 """
 
 from __future__ import annotations
@@ -13,6 +13,9 @@ __all__ = [
     "QueueEscalation", "retry_with_escalation",
     "RaceTool", "race",
     "GateTool", "gate",
+    # Batch
+    "BatchConfig", "BatchItem", "BatchResult",
+    "batch_execute", "batch_execute_sync",
     # Middleware
     "Middleware", "Next", "Context", "compose",
     "StreamMiddleware", "StreamingAdapter", "StreamingChain", "compose_streaming",
@@ -68,6 +71,11 @@ def __getattr__(name: str):
     if name in agents_attrs:
         from . import agents
         return getattr(agents, name)
+    
+    batch_attrs = {"BatchConfig", "BatchItem", "BatchResult", "batch_execute", "batch_execute_sync"}
+    if name in batch_attrs:
+        from . import batch
+        return getattr(batch, name)
     
     middleware_attrs = {
         "Middleware", "Next", "Context", "compose",
