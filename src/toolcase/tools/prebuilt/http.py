@@ -29,26 +29,16 @@ Example:
 
 from __future__ import annotations
 
+import base64
 import fnmatch
 import json
+import time
 from typing import TYPE_CHECKING, Annotated, AsyncIterator, ClassVar, Literal
 from urllib.parse import urlparse
 
 from pydantic import (
-    BaseModel,
-    ByteSize,
-    ConfigDict,
-    Discriminator,
-    Field,
-    PositiveFloat,
-    PositiveInt,
-    SecretStr,
-    Tag,
-    TypeAdapter,
-    computed_field,
-    field_serializer,
-    field_validator,
-    model_validator,
+    BaseModel, ByteSize, ConfigDict, Discriminator, Field, PositiveFloat, PositiveInt,
+    SecretStr, Tag, TypeAdapter, computed_field, field_serializer, field_validator, model_validator,
 )
 
 from toolcase.foundation.core import ToolMetadata
@@ -61,7 +51,7 @@ if TYPE_CHECKING:
 
 # Type alias for HTTP methods
 HttpMethod = Literal["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
-ALL_METHODS: frozenset[HttpMethod] = frozenset(["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+ALL_METHODS: frozenset[HttpMethod] = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
 
 # Shared frozen model config for auth classes
 _FROZEN_CONFIG = ConfigDict(frozen=True, extra="forbid", revalidate_instances="never")
@@ -76,21 +66,17 @@ class NoAuth(BaseModel):
     model_config = _FROZEN_CONFIG
     auth_type: Literal["none"] = "none"
     
-    def apply(self, headers: dict[str, str]) -> dict[str, str]:
-        return headers
-    
-    def __hash__(self) -> int:
-        return hash(self.auth_type)
+    def apply(self, headers: dict[str, str]) -> dict[str, str]: return headers
+    def __hash__(self) -> int: return hash(self.auth_type)
 
 
 # Singleton NoAuth instance for reuse (most common case)
 _NO_AUTH: NoAuth | None = None
 
-
 def get_no_auth() -> NoAuth:
     """Get singleton NoAuth instance."""
     global _NO_AUTH
-    return _NO_AUTH if _NO_AUTH else (_NO_AUTH := NoAuth())
+    return _NO_AUTH or (_NO_AUTH := NoAuth())
 
 
 class BearerAuth(BaseModel):
@@ -105,11 +91,9 @@ class BearerAuth(BaseModel):
     @field_serializer("token", when_used="json")
     def _mask_token(self, v: SecretStr) -> str:
         """Mask token in JSON serialization for security."""
-        s = v.get_secret_value()
-        return f"{s[:4]}...{s[-4:]}" if len(s) > 8 else "***"
+        return f"{s[:4]}...{s[-4:]}" if len(s := v.get_secret_value()) > 8 else "***"
     
-    def __hash__(self) -> int:
-        return hash((self.auth_type, self.token.get_secret_value()))
+    def __hash__(self) -> int: return hash((self.auth_type, self.token.get_secret_value()))
 
 
 class BasicAuth(BaseModel):
@@ -120,17 +104,12 @@ class BasicAuth(BaseModel):
     password: SecretStr
     
     def apply(self, headers: dict[str, str]) -> dict[str, str]:
-        import base64
-        creds = base64.b64encode(f"{self.username}:{self.password.get_secret_value()}".encode()).decode()
-        return headers | {"Authorization": f"Basic {creds}"}
+        return headers | {"Authorization": f"Basic {base64.b64encode(f'{self.username}:{self.password.get_secret_value()}'.encode()).decode()}"}
     
     @field_serializer("password", when_used="json")
-    def _mask_password(self, v: SecretStr) -> str:
-        """Mask password in JSON serialization."""
-        return "***"
+    def _mask_password(self, v: SecretStr) -> str: return "***"
     
-    def __hash__(self) -> int:
-        return hash((self.auth_type, self.username))
+    def __hash__(self) -> int: return hash((self.auth_type, self.username))
 
 
 class ApiKeyAuth(BaseModel):
@@ -138,11 +117,7 @@ class ApiKeyAuth(BaseModel):
     model_config = ConfigDict(**_FROZEN_CONFIG, str_strip_whitespace=True)
     auth_type: Literal["api_key"] = "api_key"
     key: SecretStr = Field(..., description="API key value")
-    header_name: Annotated[str, Field(
-        default="X-API-Key",
-        pattern=r"^[A-Za-z][A-Za-z0-9-]*$",
-        description="HTTP header name for the key",
-    )]
+    header_name: Annotated[str, Field(default="X-API-Key", pattern=r"^[A-Za-z][A-Za-z0-9-]*$", description="HTTP header name for the key")]
     
     def apply(self, headers: dict[str, str]) -> dict[str, str]:
         return headers | {self.header_name: self.key.get_secret_value()}
@@ -150,11 +125,9 @@ class ApiKeyAuth(BaseModel):
     @field_serializer("key", when_used="json")
     def _mask_key(self, v: SecretStr) -> str:
         """Mask API key in JSON serialization."""
-        s = v.get_secret_value()
-        return f"{s[:4]}..." if len(s) > 4 else "***"
+        return f"{(s := v.get_secret_value())[:4]}..." if len(s) > 4 else "***"
     
-    def __hash__(self) -> int:
-        return hash((self.auth_type, self.header_name))
+    def __hash__(self) -> int: return hash((self.auth_type, self.header_name))
 
 
 class CustomAuth(BaseModel):
@@ -167,12 +140,9 @@ class CustomAuth(BaseModel):
         return headers | {k: v.get_secret_value() for k, v in self.headers.items()}
     
     @field_serializer("headers", when_used="json")
-    def _mask_headers(self, v: dict[str, SecretStr]) -> dict[str, str]:
-        """Mask all custom header values in JSON serialization."""
-        return dict.fromkeys(v, "***")
+    def _mask_headers(self, v: dict[str, SecretStr]) -> dict[str, str]: return dict.fromkeys(v, "***")
     
-    def __hash__(self) -> int:
-        return hash((self.auth_type, tuple(sorted(self.headers.keys()))))
+    def __hash__(self) -> int: return hash((self.auth_type, tuple(sorted(self.headers.keys()))))
 
 
 def _auth_discriminator(v: JsonDict | BaseModel) -> str:
@@ -196,10 +166,10 @@ AuthStrategy = Annotated[
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Default blocked hosts for SSRF protection
-_DEFAULT_BLOCKED_HOSTS: frozenset[str] = frozenset({
-    "localhost", "127.0.0.1", "0.0.0.0", "::1", "*.local", "169.254.*.*", "10.*.*.*",
-    *(f"172.{i}.*.*" for i in range(16, 32)), "192.168.*.*",
-})
+_DEFAULT_BLOCKED_HOSTS: frozenset[str] = frozenset(
+    {"localhost", "127.0.0.1", "0.0.0.0", "::1", "*.local", "169.254.*.*", "10.*.*.*", "192.168.*.*"}
+    | {f"172.{i}.*.*" for i in range(16, 32)}
+)
 
 
 class HttpConfig(ToolConfig):
@@ -266,17 +236,12 @@ class HttpConfig(ToolConfig):
         return int(self.max_response_size)
     
     @field_serializer("allowed_hosts", "blocked_hosts", when_used="json")
-    def _serialize_host_sets(self, v: frozenset[str]) -> list[str]:
-        """Serialize frozensets as sorted lists for consistent JSON."""
-        return sorted(v)
+    def _serialize_host_sets(self, v: frozenset[str]) -> list[str]: return sorted(v)
     
     @field_serializer("allowed_methods", when_used="json")
-    def _serialize_methods(self, v: frozenset[HttpMethod]) -> list[str]:
-        """Serialize methods as sorted list."""
-        return sorted(v)
+    def _serialize_methods(self, v: frozenset[HttpMethod]) -> list[str]: return sorted(v)
     
-    def __hash__(self) -> int:
-        return hash((self.default_timeout, self.verify_ssl, self.follow_redirects))
+    def __hash__(self) -> int: return hash((self.default_timeout, self.verify_ssl, self.follow_redirects))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -319,16 +284,13 @@ class HttpParams(BaseModel):
     @classmethod
     def _validate_url(cls, v: str) -> str:
         """Validate URL has proper scheme."""
-        if not isinstance(v, str):
-            return v
-        if not (v := v.strip()).startswith(("http://", "https://")):
-            raise ValueError("URL must start with http:// or https://")
+        if not isinstance(v, str): return v
+        if not (v := v.strip()).startswith(("http://", "https://")): raise ValueError("URL must start with http:// or https://")
         return v
     
     @field_validator("method", mode="before")
     @classmethod
-    def _upper_method(cls, v: str) -> str:
-        return v.upper() if isinstance(v, str) else v
+    def _upper_method(cls, v: str) -> str: return v.upper() if isinstance(v, str) else v
     
     @model_validator(mode="after")
     def _validate_body_exclusivity(self) -> "HttpParams":
@@ -362,58 +324,43 @@ class HttpResponse(BaseModel):
     url: str
     elapsed_ms: PositiveFloat
     
-    @computed_field
-    @property
-    def is_success(self) -> bool:
-        """Whether response indicates success (2xx)."""
-        return 200 <= self.status_code < 300
+    def _status_in(self, lo: int, hi: int) -> bool: return lo <= self.status_code < hi
     
     @computed_field
     @property
-    def is_redirect(self) -> bool:
-        """Whether response is a redirect (3xx)."""
-        return 300 <= self.status_code < 400
+    def is_success(self) -> bool: return self._status_in(200, 300)
     
     @computed_field
     @property
-    def is_client_error(self) -> bool:
-        """Whether response indicates client error (4xx)."""
-        return 400 <= self.status_code < 500
+    def is_redirect(self) -> bool: return self._status_in(300, 400)
     
     @computed_field
     @property
-    def is_server_error(self) -> bool:
-        """Whether response indicates server error (5xx)."""
-        return 500 <= self.status_code < 600
+    def is_client_error(self) -> bool: return self._status_in(400, 500)
+    
+    @computed_field
+    @property
+    def is_server_error(self) -> bool: return self._status_in(500, 600)
     
     def _header_value(self, key: str) -> str | None:
         """Get header value case-insensitively (O(n) but headers are small)."""
-        key_lower = key.lower()
-        return next((v for k, v in self.headers.items() if k.lower() == key_lower), None)
+        return next((v for k, v in self.headers.items() if k.lower() == key.lower()), None)
     
     @computed_field
     @property
-    def content_type(self) -> str | None:
-        """Extract Content-Type header (case-insensitive)."""
-        return ct.split(";")[0].strip() if (ct := self._header_value("content-type")) else None
+    def content_type(self) -> str | None: return ct.split(";")[0].strip() if (ct := self._header_value("content-type")) else None
     
     @computed_field
     @property
-    def content_length(self) -> int | None:
-        """Extract Content-Length header."""
-        return int(cl) if (cl := self._header_value("content-length")) else None
+    def content_length(self) -> int | None: return int(cl) if (cl := self._header_value("content-length")) else None
     
-    def __hash__(self) -> int:
-        return hash((self.status_code, self.url, self.elapsed_ms))
+    def __hash__(self) -> int: return hash((self.status_code, self.url, self.elapsed_ms))
     
     def to_output(self) -> str:
         """Format as tool output string."""
-        emoji = "✓" if self.is_success else "✗" if self.status_code >= 400 else "→"
-        lines = [f"**HTTP {self.status_code}** {emoji} ({self.elapsed_ms:.0f}ms)", f"URL: {self.url}", ""]
-        # Include relevant headers
-        lines.extend(f"{k}: {v}" for k in ("Content-Type", "Content-Length", "Date", "Server") if (v := self._header_value(k)))
-        lines.extend(["", "**Response:**", self.body])
-        return "\n".join(lines)
+        emoji = "✓" if self.is_success else ("✗" if self.status_code >= 400 else "→")
+        header_lines = [f"{k}: {v}" for k in ("Content-Type", "Content-Length", "Date", "Server") if (v := self._header_value(k))]
+        return "\n".join([f"**HTTP {self.status_code}** {emoji} ({self.elapsed_ms:.0f}ms)", f"URL: {self.url}", "", *header_lines, "", "**Response:**", self.body])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -490,28 +437,21 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
         if parsed.scheme not in ("http", "https"):
             return _err(f"Invalid scheme '{parsed.scheme}'. Use http or https.", ErrorCode.INVALID_PARAMS, "url_validation")
         
-        host = parsed.hostname or ""
-        host_lower = host.lower()
+        host, host_lower = parsed.hostname or "", (parsed.hostname or "").lower()
+        matches = lambda h, patterns: any(fnmatch.fnmatch(h, p) or fnmatch.fnmatch(host_lower, p.lower()) for p in patterns)
         
         # Check blocked hosts first (SSRF protection)
-        if any(fnmatch.fnmatch(host, p) or fnmatch.fnmatch(host_lower, p.lower()) for p in self.config.blocked_hosts):
+        if matches(host, self.config.blocked_hosts):
             return _err(f"Host '{host}' is blocked for security reasons.", ErrorCode.PERMISSION_DENIED, "host_validation")
-        
         # Check allowed hosts (if configured)
-        if self.config.allowed_hosts and not any(
-            fnmatch.fnmatch(host, p) or fnmatch.fnmatch(host_lower, p.lower()) for p in self.config.allowed_hosts
-        ):
+        if self.config.allowed_hosts and not matches(host, self.config.allowed_hosts):
             return _err(f"Host '{host}' not in allowed list.", ErrorCode.PERMISSION_DENIED, "host_validation")
-        
         return Ok(url)
     
     def _validate_method(self, method: HttpMethod) -> ToolResult:
         """Validate HTTP method against allowed list."""
         if method not in self.config.allowed_methods:
-            return _err(
-                f"Method '{method}' not allowed. Allowed: {', '.join(sorted(self.config.allowed_methods))}",
-                ErrorCode.PERMISSION_DENIED, "method_validation"
-            )
+            return _err(f"Method '{method}' not allowed. Allowed: {', '.join(sorted(self.config.allowed_methods))}", ErrorCode.PERMISSION_DENIED, "method_validation")
         return Ok(method)
     
     # ─────────────────────────────────────────────────────────────────
@@ -534,20 +474,15 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
     
     async def _close_client(self) -> None:
         """Close the httpx client."""
-        if self._client:
-            await self._client.aclose()
-            self._client = None
+        if self._client: await self._client.aclose(); self._client = None
     
     def _build_request(self, params: HttpParams) -> tuple[dict[str, str], str | bytes | None]:
         """Build headers and content for a request."""
-        headers = self.config.auth.apply({**self.config.default_headers, **params.headers})
-        content: str | bytes | None = None
+        headers = self.config.auth.apply(self.config.default_headers | params.headers)
         if params.json_body is not None:
-            content = json.dumps(params.json_body)
             headers.setdefault("Content-Type", "application/json")
-        elif params.body is not None:
-            content = params.body
-        return headers, content
+            return headers, json.dumps(params.json_body)
+        return headers, params.body
     
     # ─────────────────────────────────────────────────────────────────
     # Execution
@@ -559,8 +494,6 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
     
     async def _async_run_result(self, params: HttpParams) -> ToolResult:
         """Execute HTTP request with Result-based error handling."""
-        import time
-        
         if (r := self._validate_url(params.url)).is_err():
             return r
         if (r := self._validate_method(params.method)).is_err():
@@ -572,12 +505,10 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
             return _err("httpx not installed. Run: pip install httpx", ErrorCode.EXTERNAL_SERVICE_ERROR, "import")
         
         headers, content = self._build_request(params)
-        max_size = self.config.max_response_size_bytes
-        start = time.perf_counter()
+        max_size, start = self.config.max_response_size_bytes, time.perf_counter()
         
         try:
-            client = await self._get_client()
-            response = await client.request(
+            response = await (await self._get_client()).request(
                 method=params.method, url=params.url, headers=headers,
                 params=params.query_params or None, content=content,
                 timeout=params.timeout or self.config.default_timeout,
@@ -589,16 +520,13 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
                 return _err(f"Response too large: {cl} bytes (max: {max_size})", ErrorCode.INVALID_PARAMS, "response_size_check")
             
             # Read body with size limit
-            body_bytes = await response.aread()
-            if len(body_bytes) > max_size:
+            if len(body_bytes := await response.aread()) > max_size:
                 return _err(f"Response body exceeded max size: {len(body_bytes)} bytes (max: {max_size})", ErrorCode.INVALID_PARAMS, "body_read")
             
             return Ok(HttpResponse(
                 status_code=response.status_code, headers=dict(response.headers),
-                body=body_bytes.decode("utf-8", errors="replace"),
-                url=str(response.url), elapsed_ms=elapsed_ms,
+                body=body_bytes.decode("utf-8", errors="replace"), url=str(response.url), elapsed_ms=elapsed_ms,
             ).to_output())
-            
         except httpx.TimeoutException:
             return _err(f"Request timed out after {params.timeout or self.config.default_timeout}s", ErrorCode.TIMEOUT, "request", recoverable=True)
         except httpx.NetworkError as e:
@@ -616,29 +544,19 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
     # ─────────────────────────────────────────────────────────────────
     
     @property
-    def supports_result_streaming(self) -> bool:
-        return True
+    def supports_result_streaming(self) -> bool: return True
     
     async def stream_result(self, params: HttpParams) -> AsyncIterator[str]:
         """Stream HTTP response body in chunks. Useful for large responses or real-time data feeds."""
         import time
-        
-        if (r := self._validate_url(params.url)).is_err():
-            yield f"**Error:** {r.unwrap_err().message}"
-            return
-        if (r := self._validate_method(params.method)).is_err():
-            yield f"**Error:** {r.unwrap_err().message}"
-            return
-        
+        for r in (self._validate_url(params.url), self._validate_method(params.method)):
+            if r.is_err(): yield f"**Error:** {r.unwrap_err().message}"; return
         try:
             import httpx
-        except ImportError:
-            yield "**Error:** httpx not installed. Run: pip install httpx"
-            return
+        except ImportError: yield "**Error:** httpx not installed. Run: pip install httpx"; return
         
         headers, content = self._build_request(params)
-        start, total_bytes = time.perf_counter(), 0
-        
+        start, total_bytes, max_size = time.perf_counter(), 0, self.config.max_response_size_bytes
         try:
             async with (await self._get_client()).stream(
                 method=params.method, url=params.url, headers=headers,
@@ -646,14 +564,10 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
                 timeout=params.timeout or self.config.default_timeout,
             ) as response:
                 yield f"**HTTP {response.status_code}** - streaming response...\n\n"
-                
                 async for chunk in response.aiter_bytes(chunk_size=8192):
-                    total_bytes += len(chunk)
-                    if total_bytes > self.config.max_response_size_bytes:
-                        yield f"\n\n**Error:** Response exceeded max size ({self.config.max_response_size_bytes} bytes)"
-                        return
+                    if (total_bytes := total_bytes + len(chunk)) > max_size:
+                        yield f"\n\n**Error:** Response exceeded max size ({max_size} bytes)"; return
                     yield chunk.decode("utf-8", errors="replace")
-            
             yield f"\n\n---\n_Received {total_bytes} bytes in {(time.perf_counter() - start) * 1000:.0f}ms_"
         except Exception as e:
             yield f"\n\n**Error:** {type(e).__name__}: {e}"

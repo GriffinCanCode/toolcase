@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from functools import reduce
 from typing import Protocol, runtime_checkable
 
 
@@ -23,14 +24,7 @@ class Backoff(Protocol):
     """
     
     def delay(self, attempt: int) -> float:
-        """Calculate delay in seconds for given attempt number.
-        
-        Args:
-            attempt: 0-indexed retry attempt number
-            
-        Returns:
-            Delay in seconds before next retry
-        """
+        """Calculate delay in seconds for given attempt number."""
         ...
 
 
@@ -55,7 +49,7 @@ class ExponentialBackoff:
     jitter: bool = True
     
     def delay(self, attempt: int) -> float:
-        d = min(self.base * (self.multiplier ** attempt), self.max_delay)
+        d = min(self.base * self.multiplier ** attempt, self.max_delay)
         return d * (0.5 + random.random()) if self.jitter else d
 
 
@@ -76,7 +70,7 @@ class LinearBackoff:
     max_delay: float = 30.0
     
     def delay(self, attempt: int) -> float:
-        return min(self.base + (self.increment * attempt), self.max_delay)
+        return min(self.base + self.increment * attempt, self.max_delay)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,11 +105,11 @@ class DecorrelatedJitter:
     
     base: float = 1.0
     max_delay: float = 30.0
-    _prev: float = 0.0  # Not actually used in frozen, computed fresh
     
     def delay(self, attempt: int) -> float:
         # Compute chain from start for determinism given attempt
-        prev = self.base
-        for _ in range(attempt):
-            prev = min(self.max_delay, random.uniform(self.base, prev * 3))
-        return prev
+        return reduce(
+            lambda prev, _: min(self.max_delay, random.uniform(self.base, prev * 3)),
+            range(attempt),
+            self.base,
+        )

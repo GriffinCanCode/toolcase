@@ -14,16 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING, Annotated, Callable
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    computed_field,
-    field_serializer,
-    field_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_serializer, field_validator
 
 from toolcase.foundation.errors import ErrorCode
 from toolcase.runtime.concurrency import checkpoint
@@ -40,13 +34,8 @@ logger = logging.getLogger("toolcase.retry")
 
 # Default retryable error codes - transient errors that may succeed on retry
 DEFAULT_RETRYABLE: frozenset[ErrorCode] = frozenset({
-    ErrorCode.RATE_LIMITED,
-    ErrorCode.TIMEOUT,
-    ErrorCode.NETWORK_ERROR,
+    ErrorCode.RATE_LIMITED, ErrorCode.TIMEOUT, ErrorCode.NETWORK_ERROR,
 })
-
-# Pre-computed set of retryable code values for fast string lookup
-_DEFAULT_RETRYABLE_VALUES: frozenset[str] = frozenset(c.value for c in DEFAULT_RETRYABLE)
 
 
 class RetryPolicy(BaseModel):
@@ -83,10 +72,7 @@ class RetryPolicy(BaseModel):
         json_schema_extra={
             "title": "Retry Policy",
             "description": "Configuration for automatic retry behavior",
-            "examples": [{
-                "max_retries": 3,
-                "retryable_codes": ["RATE_LIMITED", "TIMEOUT", "NETWORK_ERROR"],
-            }],
+            "examples": [{"max_retries": 3, "retryable_codes": ["RATE_LIMITED", "TIMEOUT", "NETWORK_ERROR"]}],
         },
     )
     
@@ -94,9 +80,7 @@ class RetryPolicy(BaseModel):
     backoff: Backoff = Field(default_factory=ExponentialBackoff, repr=False)
     retryable_codes: frozenset[ErrorCode] = DEFAULT_RETRYABLE
     on_retry: Callable[[int, ErrorCode, float], None] | None = Field(default=None, exclude=True, repr=False)
-    
-    # Cached string values for fast lookup (computed once)
-    _code_values: frozenset[str] | None = None
+    _code_values: frozenset[str] | None = None  # Cached string values for fast lookup
     
     @field_validator("retryable_codes", mode="before")
     @classmethod
@@ -119,29 +103,18 @@ class RetryPolicy(BaseModel):
     
     def _get_code_values(self) -> frozenset[str]:
         """Get cached set of code string values for fast lookup."""
-        cached = object.__getattribute__(self, "_code_values")
-        if cached is None:
+        if (cached := object.__getattribute__(self, "_code_values")) is None:
             values = frozenset(c.value for c in self.retryable_codes)
             object.__setattr__(self, "_code_values", values)
             return values
         return cached
     
     def should_retry(self, code: ErrorCode | str, attempt: int) -> bool:
-        """Determine if retry should be attempted.
-        
-        Args:
-            code: Error code from failed result
-            attempt: Current attempt number (0-indexed, after first failure)
-        
-        Returns:
-            True if retry should be attempted
-        """
+        """Determine if retry should be attempted."""
         if attempt >= self.max_retries:
             return False
-        
         # Fast path: string lookup without enum conversion
-        code_str = code.value if isinstance(code, ErrorCode) else code
-        return code_str in self._get_code_values()
+        return (code.value if isinstance(code, ErrorCode) else code) in self._get_code_values()
     
     def get_delay(self, attempt: int) -> float:
         """Get delay before next retry attempt."""
@@ -156,6 +129,13 @@ class RetryPolicy(BaseModel):
 NO_RETRY = RetryPolicy(max_retries=0, retryable_codes=frozenset())
 
 
+def _log_and_callback(policy: RetryPolicy, tool_name: str, attempt: int, code: str, delay: float) -> None:
+    """Shared logging and callback logic for retry attempts."""
+    logger.info(f"[{tool_name}] Retry {attempt + 1}/{policy.max_retries} after {delay:.1f}s (code: {code})")
+    if policy.on_retry:
+        policy.on_retry(attempt, ErrorCode(code) if code else ErrorCode.UNKNOWN, delay)
+
+
 async def execute_with_retry(
     operation: Callable[[], Awaitable[ToolResult]],
     policy: RetryPolicy,
@@ -165,41 +145,19 @@ async def execute_with_retry(
     
     Retries on retryable error codes up to max_retries times.
     Uses cooperative cancellation for clean shutdown.
-    
-    Args:
-        operation: Async callable returning ToolResult
-        policy: Retry policy configuration
-        tool_name: Tool name for logging
-    
-    Returns:
-        ToolResult from successful attempt or last failed attempt
     """
-    result = await operation()
-    attempt = 0
+    result, attempt = await operation(), 0
     
     while result.is_err() and attempt < policy.max_retries:
         await checkpoint()  # Cooperative cancellation point
-        
-        trace = result.unwrap_err()
-        code = trace.error_code
-        
+        code = result.unwrap_err().error_code
         if not policy.should_retry(code, attempt):
             break
-        
         delay = policy.get_delay(attempt)
-        
-        logger.info(
-            f"[{tool_name}] Retry {attempt + 1}/{policy.max_retries} "
-            f"after {delay:.1f}s (code: {code})"
-        )
-        
-        if policy.on_retry:
-            policy.on_retry(attempt, ErrorCode(code) if code else ErrorCode.UNKNOWN, delay)
-        
+        _log_and_callback(policy, tool_name, attempt, code, delay)
         await asyncio.sleep(delay)
         await checkpoint()  # Check cancellation after sleep
-        result = await operation()
-        attempt += 1
+        result, attempt = await operation(), attempt + 1
     
     return result
 
@@ -209,34 +167,16 @@ def execute_with_retry_sync(
     policy: RetryPolicy,
     tool_name: str,
 ) -> ToolResult:
-    """Execute sync operation with retry policy.
-    
-    Synchronous version for non-async tool implementations.
-    """
-    import time
-    
-    result = operation()
-    attempt = 0
+    """Execute sync operation with retry policy. Synchronous version for non-async tool implementations."""
+    result, attempt = operation(), 0
     
     while result.is_err() and attempt < policy.max_retries:
-        trace = result.unwrap_err()
-        code = trace.error_code
-        
+        code = result.unwrap_err().error_code
         if not policy.should_retry(code, attempt):
             break
-        
         delay = policy.get_delay(attempt)
-        
-        logger.info(
-            f"[{tool_name}] Retry {attempt + 1}/{policy.max_retries} "
-            f"after {delay:.1f}s (code: {code})"
-        )
-        
-        if policy.on_retry:
-            policy.on_retry(attempt, ErrorCode(code) if code else ErrorCode.UNKNOWN, delay)
-        
+        _log_and_callback(policy, tool_name, attempt, code, delay)
         time.sleep(delay)
-        result = operation()
-        attempt += 1
+        result, attempt = operation(), attempt + 1
     
     return result
