@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from toolcase.foundation.errors import ErrorCode, Result
 from toolcase.foundation.errors.result import _ERR, _OK
-from toolcase.io.cache import MemoryCache, ToolCache, get_cache
+from toolcase.io.cache import ToolCache, get_cache
 from toolcase.runtime.concurrency import run_sync
 from toolcase.runtime.retry import Backoff, ExponentialBackoff
 
@@ -49,21 +49,10 @@ _IDEM_SEP = "\x00\x01"
 class IdempotencyStore(Protocol):
     """Protocol for idempotency key storage backends."""
     
-    def get(self, key: str) -> tuple[str, bool] | None:
-        """Get (result, is_ok) by idempotency key. Returns None if not found."""
-        ...
-    
-    def set(self, key: str, result: str, is_ok: bool, ttl: float) -> None:
-        """Store result with idempotency key."""
-        ...
-    
-    def delete(self, key: str) -> bool:
-        """Delete stored result. Returns True if existed."""
-        ...
-    
-    def clear(self, prefix: str | None = None) -> int:
-        """Clear stored results. Returns count deleted."""
-        ...
+    def get(self, key: str) -> tuple[str, bool] | None: ...  # (result, is_ok) or None
+    def set(self, key: str, result: str, is_ok: bool, ttl: float) -> None: ...
+    def delete(self, key: str) -> bool: ...  # True if existed
+    def clear(self, prefix: str | None = None) -> int: ...  # Count deleted
 
 
 class CacheIdempotencyAdapter:
@@ -88,32 +77,25 @@ class CacheIdempotencyAdapter:
     __slots__ = ("_cache", "_prefix")
     
     def __init__(self, cache: ToolCache | None = None, prefix: str = "idem") -> None:
-        self._cache = cache or get_cache()
-        self._prefix = prefix
+        self._cache, self._prefix = cache or get_cache(), prefix
     
-    def _encode(self, result: str, is_ok: bool) -> str:
-        """Encode result and status into single cache value."""
-        return f"{'1' if is_ok else '0'}{_IDEM_SEP}{result}"
-    
-    def _decode(self, value: str) -> tuple[str, bool]:
-        """Decode cache value into (result, is_ok)."""
-        flag, _, result = value.partition(_IDEM_SEP)
-        return result, flag == "1"
+    def _key_dict(self, key: str) -> dict[str, str]:
+        return {key: key}
     
     def get(self, key: str) -> tuple[str, bool] | None:
-        if (value := self._cache.get(self._prefix, {key: key})) is not None:
-            return self._decode(value)
-        return None
+        if (v := self._cache.get(self._prefix, self._key_dict(key))) is None:
+            return None
+        flag, _, result = v.partition(_IDEM_SEP)
+        return result, flag == "1"
     
     def set(self, key: str, result: str, is_ok: bool, ttl: float) -> None:
-        self._cache.set(self._prefix, {key: key}, self._encode(result, is_ok), ttl)
+        self._cache.set(self._prefix, self._key_dict(key), f"{'1' if is_ok else '0'}{_IDEM_SEP}{result}", ttl)
     
     def delete(self, key: str) -> bool:
-        return self._cache.invalidate(self._prefix, {key: key})
+        return self._cache.invalidate(self._prefix, self._key_dict(key))
     
     def clear(self, prefix: str | None = None) -> int:
-        # Clear all idempotency entries
-        return self._cache.invalidate_tool(self._prefix)
+        return self._cache.invalidate_tool(self._prefix)  # Clear all idempotency entries
     
     @classmethod
     def from_cache(cls, cache: ToolCache, prefix: str = "idem") -> CacheIdempotencyAdapter:
@@ -169,15 +151,11 @@ class BatchRetryPolicy(BaseModel):
     
     def should_retry_batch(self, result: BatchResult[BaseModel], attempt: int) -> bool:
         """Determine if batch should be retried based on failure pattern."""
-        if attempt >= self.max_retries or result.all_ok:
+        if attempt >= self.max_retries or result.all_ok or not result.items:
             return False
-        failure_rate = len(result.failures) / len(result.items) if result.items else 0.0
-        if failure_rate < self.failure_threshold:
-            return False
-        return any(
-            item.error and item.error.error_code in {c.value for c in self.retryable_codes}
-            for item in result.failures
-        )
+        codes = {c.value for c in self.retryable_codes}
+        return (len(result.failures) / len(result.items) >= self.failure_threshold
+                and any(item.error and item.error.error_code in codes for item in result.failures))
     
     def get_delay(self, attempt: int) -> float:
         """Get delay before next batch retry."""
@@ -254,6 +232,11 @@ class IdempotentBatchResult(BatchResult[BaseModel]):
         return self.batch_attempts > 1
 
 
+def _is_retryable_code(code: str | None, policy: BatchRetryPolicy) -> bool:
+    """Check if error code is retryable per policy."""
+    return bool(code and code in {c.value for c in policy.retryable_codes})
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Core Execution
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -299,16 +282,11 @@ async def batch_execute_idempotent(
     
     cfg = config or IdempotentBatchConfig()
     batch_id = cfg.batch_id or str(uuid.uuid4())[:8]
-    # Use provided store, or create adapter from cache
-    idem_store = store or CacheIdempotencyAdapter(cache)
-    tool_name = tool.metadata.name
-    
-    n = len(params_list)
+    idem_store = store or CacheIdempotencyAdapter(cache)  # Use provided store, or create adapter
+    tool_name, n = tool.metadata.name, len(params_list)
     items: list[BatchItem[BaseModel]] = [BatchItem(i, Result("", _OK), 0.0) for i in range(n)]
     from_cache: list[int] = []
     retry_history: list[dict[str, int | float]] = []
-    
-    # Generate idempotency keys
     keys = [_make_idempotency_key(batch_id, tool_name, p, i) for i, p in enumerate(params_list)]
     
     async def run_with_idempotency(idx: int, params: BaseModel, key: str, sem: asyncio.Semaphore, cancel: asyncio.Event) -> BatchItem[BaseModel]:
@@ -319,17 +297,13 @@ async def batch_execute_idempotent(
         # Check idempotency store
         if cfg.skip_cached and (cached := idem_store.get(key)):
             from_cache.append(idx)
-            result_str, is_ok = cached
-            result: ToolResult = Result(result_str, _OK if is_ok else _ERR)
-            return BatchItem(idx, result, 0.0)
+            return BatchItem(idx, Result(cached[0], _OK if cached[1] else _ERR), 0.0)
         
         async with sem:
             t0 = time.perf_counter()
             try:
-                result = await (
-                    asyncio.wait_for(tool._async_run_result(params), cfg.timeout_per_item)
-                    if cfg.timeout_per_item else tool._async_run_result(params)
-                )
+                coro = tool._async_run_result(params)
+                result = await (asyncio.wait_for(coro, cfg.timeout_per_item) if cfg.timeout_per_item else coro)
             except asyncio.TimeoutError:
                 result = _err_trace(f"Timeout after {cfg.timeout_per_item}s", ErrorCode.TIMEOUT)
             except asyncio.CancelledError:
@@ -340,13 +314,8 @@ async def batch_execute_idempotent(
             elapsed = (time.perf_counter() - t0) * 1000
             
             # Store in idempotency store (only successful or terminal failures)
-            if result.is_ok() or (result.is_err() and not _is_retryable_code(result.unwrap_err().error_code, cfg.retry_policy)):
-                idem_store.set(
-                    key,
-                    result.unwrap() if result.is_ok() else result.unwrap_err().message,
-                    result.is_ok(),
-                    cfg.idempotency_ttl,
-                )
+            if result.is_ok() or not _is_retryable_code(result.unwrap_err().error_code, cfg.retry_policy):
+                idem_store.set(key, result.unwrap() if result.is_ok() else result.unwrap_err().message, result.is_ok(), cfg.idempotency_ttl)
             
             item = BatchItem(idx, result, elapsed)
             if cfg.fail_fast and result.is_err():
@@ -356,19 +325,16 @@ async def batch_execute_idempotent(
             return item
     
     # Execute with batch-level retry
-    start = time.perf_counter()
-    batch_attempt = 0
-    policy = cfg.retry_policy
+    start, batch_attempt, policy = time.perf_counter(), 0, cfg.retry_policy
     
     while True:
-        sem = asyncio.Semaphore(cfg.concurrency or n)
-        cancel = asyncio.Event()
+        sem, cancel = asyncio.Semaphore(cfg.concurrency or n), asyncio.Event()
         
         # Determine which items to execute
-        indices_to_run = (
-            list(range(n)) if batch_attempt == 0 or policy.strategy == BatchRetryStrategy.ENTIRE_BATCH
-            else [i for i in range(n) if items[i].is_err and _is_retryable_code(items[i].error.error_code if items[i].error else None, policy)]
-        )
+        if batch_attempt == 0 or policy.strategy == BatchRetryStrategy.ENTIRE_BATCH:
+            indices_to_run = list(range(n))
+        else:
+            indices_to_run = [i for i in range(n) if items[i].is_err and _is_retryable_code(items[i].error.error_code if items[i].error else None, policy)]
         
         tasks = [asyncio.create_task(run_with_idempotency(i, params_list[i], keys[i], sem, cancel)) for i in indices_to_run]
         
@@ -384,26 +350,16 @@ async def batch_execute_idempotent(
             items[idx] = r if isinstance(r, BatchItem) else BatchItem(idx, _err_trace(str(r), ErrorCode.UNKNOWN), 0.0)
         
         batch_result = IdempotentBatchResult(
-            items=items,
-            total_ms=(time.perf_counter() - start) * 1000,
-            concurrency=cfg.concurrency or n,
-            batch_id=batch_id,
-            batch_attempts=batch_attempt + 1,
-            from_cache=from_cache.copy(),
-            retry_history=retry_history.copy(),
+            items=items, total_ms=(time.perf_counter() - start) * 1000, concurrency=cfg.concurrency or n,
+            batch_id=batch_id, batch_attempts=batch_attempt + 1, from_cache=from_cache.copy(), retry_history=retry_history.copy(),
         )
         
-        # Check if batch-level retry needed
         if not policy.should_retry_batch(batch_result, batch_attempt):
             return batch_result
         
         # Record retry and wait
         delay = policy.get_delay(batch_attempt)
-        retry_history.append({
-            "attempt": batch_attempt + 1,
-            "failures": len(batch_result.failures),
-            "delay": delay,
-        })
+        retry_history.append({"attempt": batch_attempt + 1, "failures": len(batch_result.failures), "delay": delay})
         batch_attempt += 1
         await asyncio.sleep(delay)
 
@@ -417,8 +373,3 @@ def batch_execute_idempotent_sync(
 ) -> IdempotentBatchResult:
     """Synchronous wrapper for batch_execute_idempotent."""
     return run_sync(batch_execute_idempotent(tool, params_list, config, store, cache))
-
-
-def _is_retryable_code(code: str | None, policy: BatchRetryPolicy) -> bool:
-    """Check if error code is retryable per policy."""
-    return code in {c.value for c in policy.retryable_codes} if code else False

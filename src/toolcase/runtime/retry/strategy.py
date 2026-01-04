@@ -293,54 +293,32 @@ class ResilientTool:
                 pass  # Unknown code, continue to next fallback
         return Err(last_error), last_error
     
-    async def _execute_escalate(
-        self,
-        input_dict: JsonDict,
-        handler: _EscalationHandlerProtocol,
-        last_error: ErrorTrace,
-    ) -> tuple[ToolResult, ErrorTrace]:
+    async def _execute_escalate(self, input_dict: JsonDict, handler: _EscalationHandlerProtocol, last_error: ErrorTrace) -> tuple[ToolResult, ErrorTrace]:
         """Execute escalation stage."""
-        from toolcase.runtime.agents.escalation import EscalationRequest, EscalationStatus
-        from toolcase.foundation.errors import Ok
         from datetime import datetime
+        from toolcase.foundation.errors import Ok
+        from toolcase.runtime.agents.escalation import EscalationRequest, EscalationStatus
         
         request = EscalationRequest(
-            tool_name=self._tool.metadata.name,
-            params=input_dict,
-            error=last_error,
-            attempt=0,
-            timestamp=datetime.utcnow(),
+            tool_name=self._tool.metadata.name, params=input_dict, error=last_error, attempt=0, timestamp=datetime.utcnow(),
         )
-        
         logger.info(f"[{self._meta.name}] Escalating to human: {last_error.message}")
-        
         esc = await handler.escalate(request)
         if esc.should_proceed:
             return Ok(esc.value or f"Approved by {esc.reviewer or 'human'}"), last_error
-        
-        return Err(ErrorTrace(
-            message=f"Escalation {esc.status.value}: {esc.reason or 'no reason'}",
-            error_code=ErrorCode.PERMISSION_DENIED.value if esc.status == EscalationStatus.REJECTED else ErrorCode.TIMEOUT.value,
-            recoverable=False,
-        )), last_error
+        code = ErrorCode.PERMISSION_DENIED.value if esc.status == EscalationStatus.REJECTED else ErrorCode.TIMEOUT.value
+        return Err(ErrorTrace(f"Escalation {esc.status.value}: {esc.reason or 'no reason'}", code, False)), last_error
     
     def __repr__(self) -> str:
         return f"ResilientTool({self._tool.metadata.name}, {self._strategy})"
 
 
 def resilient_tool(
-    tool: BaseModel,  # Actually BaseTool
-    *,
-    retry: RetryPolicy | int | None = None,
-    fallback: list[BaseModel] | None = None,  # Actually list[BaseTool]
-    fallback_timeout: float = 30.0,
-    escalate: _EscalationHandlerProtocol | str | None = None,
-    name: str | None = None,
-    description: str | None = None,
+    tool: BaseModel, *, retry: RetryPolicy | int | None = None, fallback: list[BaseModel] | None = None,
+    fallback_timeout: float = 30.0, escalate: _EscalationHandlerProtocol | str | None = None,
+    name: str | None = None, description: str | None = None,
 ) -> ResilientTool:
-    """Create a resilient tool with composed retry, fallback, and escalation.
-    
-    Convenience function for building common resilience patterns.
+    """Create resilient tool with composed retry, fallback, and escalation.
     
     Args:
         tool: Primary tool to wrap
@@ -351,31 +329,17 @@ def resilient_tool(
         name: Optional tool name
         description: Optional description
     
-    Returns:
-        ResilientTool with configured strategy
-    
     Example:
-        >>> # Simple retry
         >>> search = resilient_tool(GoogleAPI(), retry=3)
-        >>> 
-        >>> # Full strategy
         >>> search = resilient_tool(
-        ...     GoogleAPI(),
-        ...     retry=RetryPolicy(max_retries=3, backoff=ExponentialBackoff()),
-        ...     fallback=[BingAPI(), CacheAPI()],
-        ...     escalate="search_approvals",
+        ...     GoogleAPI(), retry=RetryPolicy(max_retries=3), fallback=[BingAPI()], escalate="approvals",
         ... )
     """
     strategy = RetryStrategy()
-    
     if retry is not None:
-        policy = retry if isinstance(retry, RetryPolicy) else RetryPolicy(max_retries=retry)
-        strategy = strategy.with_policy(policy)
-    
+        strategy = strategy.with_policy(retry if isinstance(retry, RetryPolicy) else RetryPolicy(max_retries=retry))
     if fallback:
         strategy = strategy.with_fallback(fallback, timeout=fallback_timeout)
-    
     if escalate is not None:
         strategy = strategy.with_escalation(escalate)
-    
     return strategy.wrap(tool, name=name, description=description)
