@@ -1,6 +1,6 @@
 """Runtime - Execution flow, control, and monitoring.
 
-Contains: agents, middleware, retry, pipeline, observability.
+Contains: agents, middleware, retry, pipeline, observability, concurrency.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ __all__ = [
     "GateTool", "gate",
     # Middleware
     "Middleware", "Next", "Context", "compose",
+    "StreamMiddleware", "StreamingAdapter", "StreamingChain", "compose_streaming",
+    "StreamLoggingMiddleware", "StreamMetricsMiddleware",
     "CircuitBreakerMiddleware", "LoggingMiddleware", "LogMetricsBackend", "MetricsBackend",
     "MetricsMiddleware", "RateLimitMiddleware", "RetryMiddleware", "TimeoutMiddleware",
     # Observability
@@ -35,6 +37,13 @@ __all__ = [
     "Backoff", "ExponentialBackoff", "LinearBackoff", "ConstantBackoff", "DecorrelatedJitter",
     "RetryPolicy", "DEFAULT_RETRYABLE", "NO_RETRY",
     "execute_with_retry", "execute_with_retry_sync",
+    # Concurrency
+    "TaskGroup", "TaskHandle", "TaskState", "CancelScope",
+    "Lock", "RLock", "Semaphore", "BoundedSemaphore", "Event", "Condition", "Barrier", "CapacityLimiter",
+    "ThreadPool", "ProcessPool", "run_in_thread", "run_in_process",
+    "race_async", "gather_async", "gather_settled", "first_success", "map_async", "all_settled",
+    "merge_streams", "interleave_streams_async", "buffer_stream", "throttle_stream", "batch_stream",
+    "run_sync", "run_async", "from_thread", "to_thread", "AsyncAdapter", "SyncAdapter",
 ]
 
 
@@ -54,6 +63,8 @@ def __getattr__(name: str):
     
     middleware_attrs = {
         "Middleware", "Next", "Context", "compose",
+        "StreamMiddleware", "StreamingAdapter", "StreamingChain", "compose_streaming",
+        "StreamLoggingMiddleware", "StreamMetricsMiddleware",
         "CircuitBreakerMiddleware", "LoggingMiddleware", "LogMetricsBackend", "MetricsBackend",
         "MetricsMiddleware", "RateLimitMiddleware", "RetryMiddleware", "TimeoutMiddleware",
     }
@@ -93,5 +104,23 @@ def __getattr__(name: str):
     if name in retry_attrs:
         from . import retry
         return getattr(retry, name)
+    
+    concurrency_attrs = {
+        "TaskGroup", "TaskHandle", "TaskState", "CancelScope",
+        "Lock", "RLock", "Semaphore", "BoundedSemaphore", "Event", "Condition", "Barrier", "CapacityLimiter",
+        "ThreadPool", "ProcessPool", "run_in_thread", "run_in_process",
+        "race_async", "gather_async", "gather_settled", "first_success", "map_async", "all_settled",
+        "merge_streams", "interleave_streams_async", "buffer_stream", "throttle_stream", "batch_stream",
+        "run_sync", "run_async", "from_thread", "to_thread", "AsyncAdapter", "SyncAdapter",
+    }
+    if name in concurrency_attrs:
+        from . import concurrency
+        # Map renamed exports
+        attr_map = {
+            "race_async": "race",
+            "gather_async": "gather",
+            "interleave_streams_async": "interleave_streams",
+        }
+        return getattr(concurrency, attr_map.get(name, name))
     
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
