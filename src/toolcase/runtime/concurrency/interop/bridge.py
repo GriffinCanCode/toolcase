@@ -32,7 +32,7 @@ import contextvars
 import functools
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Coroutine, Generic, ParamSpec, TypeVar
 
 if TYPE_CHECKING:
@@ -73,36 +73,27 @@ _semaphore_lock = threading.Lock()
 def _get_default_executor() -> ThreadPoolExecutor:
     """Get or create default thread pool executor."""
     global _default_executor
-    if _default_executor is None:
-        with _executor_lock:
-            if _default_executor is None:
-                _default_executor = ThreadPoolExecutor(thread_name_prefix="toolcase-interop-")
-    return _default_executor
+    if _default_executor is not None:
+        return _default_executor
+    with _executor_lock:
+        if _default_executor is None:
+            _default_executor = ThreadPoolExecutor(thread_name_prefix="toolcase-interop-")
+        return _default_executor
 
 
 def _get_thread_semaphore(limit: int = _DEFAULT_THREAD_LIMIT) -> asyncio.Semaphore:
-    """Get or create bounded concurrency semaphore for to_thread.
-    
-    The semaphore prevents thread pool exhaustion by limiting concurrent
-    thread operations. Created lazily on first use.
-    """
+    """Get or create bounded concurrency semaphore for to_thread. Prevents thread pool exhaustion by limiting concurrent operations."""
     global _thread_semaphore
-    if _thread_semaphore is None:
-        with _semaphore_lock:
-            if _thread_semaphore is None:
-                _thread_semaphore = asyncio.Semaphore(limit)
-    return _thread_semaphore
+    if _thread_semaphore is not None:
+        return _thread_semaphore
+    with _semaphore_lock:
+        if _thread_semaphore is None:
+            _thread_semaphore = asyncio.Semaphore(limit)
+        return _thread_semaphore
 
 
 def configure_thread_limit(limit: int) -> None:
-    """Configure the maximum concurrent thread operations.
-    
-    Must be called before any to_thread calls. Raises RuntimeError
-    if semaphore already created.
-    
-    Args:
-        limit: Maximum concurrent thread operations (default: 100)
-    """
+    """Configure max concurrent thread ops. Must be called before any to_thread calls. Raises RuntimeError if semaphore exists."""
     global _thread_semaphore
     with _semaphore_lock:
         if _thread_semaphore is not None:
@@ -142,50 +133,33 @@ def run_sync(
         >>> result = run_sync(async_operation())
     """
     if loop is not None:
-        # Use provided loop
         return loop.run_until_complete(coro)
-    
     try:
-        running_loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
+        # Inside running loop (FastAPI, Jupyter, nested async) - run in thread
+        return _run_in_thread_loop(coro)
     except RuntimeError:
-        # No running loop - simple case
         return asyncio.run(coro)
-    
-    # We're inside a running loop - need to run in thread
-    # This commonly happens in FastAPI, Jupyter, or nested async calls
-    return _run_in_thread_loop(coro)
 
 
 def _run_in_thread_loop(coro: Coroutine[object, object, T]) -> T:
-    """Run coroutine in a new thread with its own event loop.
-    
-    Propagates context variables to the new thread for tracing and DI continuity.
-    """
+    """Run coroutine in a new thread with its own event loop. Propagates context variables for tracing/DI continuity."""
     result: T | None = None
     error: BaseException | None = None
     done = threading.Event()
-    
-    # Capture context from current thread to propagate to the worker
     ctx = contextvars.copy_context()
     
     def runner() -> None:
         nonlocal result, error
-        
-        async def _run_with_context() -> T:
-            return await coro
-        
         try:
-            # Run within copied context so contextvars propagate
-            result = ctx.run(asyncio.run, _run_with_context())
+            result = ctx.run(asyncio.run, coro)
         except BaseException as e:
             error = e
         finally:
             done.set()
     
-    thread = threading.Thread(target=runner, daemon=True)
-    thread.start()
+    threading.Thread(target=runner, daemon=True).start()
     done.wait()
-    
     if error is not None:
         raise error
     return result  # type: ignore[return-value]
@@ -240,8 +214,7 @@ async def to_thread(
         func: Sync function to call
         *args: Positional arguments
         cancellable: Whether function should be interruptible (via threading)
-        limiter: Whether to use bounded concurrency (default: True).
-                 Set to False for critical operations that must not wait.
+        limiter: Whether to use bounded concurrency (default: True). Set False for critical ops that must not wait.
         **kwargs: Keyword arguments
     
     Returns:
@@ -252,23 +225,17 @@ async def to_thread(
         configure_thread_limit() before first call if needed.
     """
     loop = asyncio.get_running_loop()
-    
-    # Copy context for thread
     ctx = contextvars.copy_context()
+    wrapped = functools.partial(func, **kwargs) if kwargs else func
+    call = functools.partial(ctx.run, wrapped, *args)
     
-    if kwargs:
-        func = functools.partial(func, **kwargs)
+    async def _execute() -> T:
+        return await loop.run_in_executor(_get_default_executor(), call)
     
-    async def _run() -> T:
-        return await loop.run_in_executor(
-            _get_default_executor(),
-            functools.partial(ctx.run, func, *args),
-        )
-    
-    if limiter:
-        async with _get_thread_semaphore():
-            return await _run()
-    return await _run()
+    if not limiter:
+        return await _execute()
+    async with _get_thread_semaphore():
+        return await _execute()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -297,32 +264,18 @@ def from_thread(
         ...     result = from_thread(async_operation())
         ...     return result
     """
-    if loop is None:
-        # Try to get the loop from thread-local storage
-        loop = getattr(_thread_local, "loop", None)
-        if loop is None:
-            raise RuntimeError(
-                "No event loop available. Either pass loop explicitly "
-                "or call from within an async context."
-            )
-    
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result()
+    if loop is None and (loop := getattr(_thread_local, "loop", None)) is None:
+        raise RuntimeError("No event loop available. Either pass loop explicitly or call from within an async context.")
+    return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
 
 def from_thread_nowait(
     coro: Coroutine[object, object, T],
     loop: asyncio.AbstractEventLoop | None = None,
 ) -> Future[T]:
-    """Schedule async code from thread without waiting.
-    
-    Returns a Future that can be checked later.
-    """
-    if loop is None:
-        loop = getattr(_thread_local, "loop", None)
-        if loop is None:
-            raise RuntimeError("No event loop available")
-    
+    """Schedule async code from thread without waiting. Returns a Future that can be checked later."""
+    if loop is None and (loop := getattr(_thread_local, "loop", None)) is None:
+        raise RuntimeError("No event loop available")
     return asyncio.run_coroutine_threadsafe(coro, loop)
 
 
@@ -365,18 +318,10 @@ class AsyncAdapter(Generic[P, T]):
         """Call wrapped function asynchronously with context propagation."""
         loop = asyncio.get_running_loop()
         ctx = contextvars.copy_context()
-        executor = self.executor or _get_default_executor()
-        
-        if kwargs:
-            wrapped = functools.partial(self.func, **kwargs)  # type: ignore[arg-type]
-            return await loop.run_in_executor(
-                executor,
-                functools.partial(ctx.run, wrapped, *args),
-            )
-        
+        wrapped = functools.partial(self.func, **kwargs) if kwargs else self.func  # type: ignore[arg-type]
         return await loop.run_in_executor(
-            executor,
-            functools.partial(ctx.run, self.func, *args),  # type: ignore[arg-type]
+            self.executor or _get_default_executor(),
+            functools.partial(ctx.run, wrapped, *args),
         )
     
     def __repr__(self) -> str:
@@ -447,15 +392,10 @@ def sync_to_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
     async def wrapper(*args: object, **kwargs: object) -> T:
         loop = asyncio.get_running_loop()
         ctx = contextvars.copy_context()
-        if kwargs:
-            partial_func = functools.partial(func, **kwargs)
-            return await loop.run_in_executor(
-                _get_default_executor(),
-                functools.partial(ctx.run, partial_func, *args),
-            )
+        wrapped = functools.partial(func, **kwargs) if kwargs else func
         return await loop.run_in_executor(
             _get_default_executor(),
-            functools.partial(ctx.run, func, *args),
+            functools.partial(ctx.run, wrapped, *args),
         )
     return wrapper
 
@@ -504,13 +444,11 @@ class ThreadContext:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def shutdown_executor(wait: bool = True) -> None:
-    """Shut down the default interop executor.
-    
-    Call at application shutdown to clean up resources.
-    """
+    """Shut down the default interop executor. Call at application shutdown to clean up resources."""
     global _default_executor
-    if _default_executor is not None:
-        with _executor_lock:
-            if _default_executor is not None:
-                _default_executor.shutdown(wait=wait)
-                _default_executor = None
+    if _default_executor is None:
+        return
+    with _executor_lock:
+        if _default_executor is not None:
+            _default_executor.shutdown(wait=wait)
+            _default_executor = None

@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
@@ -70,8 +69,7 @@ class Lock:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._owner: asyncio.Task[object] | None = None
-        self._acquire_count = 0
-        self._contention_count = 0
+        self._acquire_count = self._contention_count = 0
     
     @property
     def locked(self) -> bool:
@@ -92,25 +90,15 @@ class Lock:
         }
     
     async def acquire(self, *, timeout: float | None = None) -> bool:
-        """Acquire the lock.
-        
-        Args:
-            timeout: Maximum time to wait (None = wait forever)
-        
-        Returns:
-            True if lock acquired, False if timeout expired
-        """
+        """Acquire the lock. Returns True if acquired, False on timeout."""
         if self._lock.locked():
             self._contention_count += 1
         
-        if timeout is None:
-            await self._lock.acquire()
-            self._owner = asyncio.current_task()
-            self._acquire_count += 1
-            return True
-        
         try:
-            await asyncio.wait_for(self._lock.acquire(), timeout=timeout)
+            if timeout is None:
+                await self._lock.acquire()
+            else:
+                await asyncio.wait_for(self._lock.acquire(), timeout=timeout)
             self._owner = asyncio.current_task()
             self._acquire_count += 1
             return True
@@ -159,9 +147,7 @@ class RLock:
     __slots__ = ("_lock", "_owner", "_count")
     
     def __init__(self) -> None:
-        self._lock = asyncio.Lock()
-        self._owner: asyncio.Task[object] | None = None
-        self._count = 0
+        self._lock, self._owner, self._count = asyncio.Lock(), None, 0
     
     @property
     def locked(self) -> bool:
@@ -170,28 +156,21 @@ class RLock:
     async def acquire(self, *, timeout: float | None = None) -> bool:
         """Acquire the lock (reentrant)."""
         current = asyncio.current_task()
-        
         if self._owner == current:
             self._count += 1
             return True
         
-        if timeout is None:
-            await self._lock.acquire()
-        else:
-            try:
-                await asyncio.wait_for(self._lock.acquire(), timeout=timeout)
-            except asyncio.TimeoutError:
-                return False
-        
-        self._owner = current
-        self._count = 1
+        try:
+            await self._lock.acquire() if timeout is None else await asyncio.wait_for(self._lock.acquire(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        self._owner, self._count = current, 1
         return True
     
     def release(self) -> None:
         """Release the lock once."""
         if self._owner != asyncio.current_task():
             raise RuntimeError("Cannot release lock not owned by current task")
-        
         self._count -= 1
         if self._count == 0:
             self._owner = None
@@ -229,9 +208,7 @@ class Semaphore:
     def __init__(self, value: int = 1) -> None:
         if value < 0:
             raise ValueError("Semaphore value must be >= 0")
-        self._semaphore = asyncio.Semaphore(value)
-        self._initial_value = value
-        self._acquire_count = 0
+        self._semaphore, self._initial_value, self._acquire_count = asyncio.Semaphore(value), value, 0
     
     @property
     def value(self) -> int:
@@ -239,21 +216,9 @@ class Semaphore:
         return self._semaphore._value  # type: ignore[attr-defined]
     
     async def acquire(self, *, timeout: float | None = None) -> bool:
-        """Acquire a slot.
-        
-        Args:
-            timeout: Max wait time (None = forever)
-        
-        Returns:
-            True if acquired, False on timeout
-        """
-        if timeout is None:
-            await self._semaphore.acquire()
-            self._acquire_count += 1
-            return True
-        
+        """Acquire a slot. Returns True if acquired, False on timeout."""
         try:
-            await asyncio.wait_for(self._semaphore.acquire(), timeout=timeout)
+            await self._semaphore.acquire() if timeout is None else await asyncio.wait_for(self._semaphore.acquire(), timeout=timeout)
             self._acquire_count += 1
             return True
         except asyncio.TimeoutError:
@@ -330,20 +295,9 @@ class Event:
         self._event.clear()
     
     async def wait(self, *, timeout: float | None = None) -> bool:
-        """Wait for event to be set.
-        
-        Args:
-            timeout: Max wait time
-        
-        Returns:
-            True if event was set, False on timeout
-        """
-        if timeout is None:
-            await self._event.wait()
-            return True
-        
+        """Wait for event to be set. Returns True if set, False on timeout."""
         try:
-            await asyncio.wait_for(self._event.wait(), timeout=timeout)
+            await self._event.wait() if timeout is None else await asyncio.wait_for(self._event.wait(), timeout=timeout)
             return True
         except asyncio.TimeoutError:
             return False
@@ -389,16 +343,9 @@ class Condition:
         self._condition.release()
     
     async def wait(self, *, timeout: float | None = None) -> bool:
-        """Wait for notification.
-        
-        Must hold the lock. Releases lock while waiting, reacquires before return.
-        """
-        if timeout is None:
-            await self._condition.wait()
-            return True
-        
+        """Wait for notification. Must hold lock. Releases while waiting, reacquires before return."""
         try:
-            await asyncio.wait_for(self._condition.wait(), timeout=timeout)
+            await self._condition.wait() if timeout is None else await asyncio.wait_for(self._condition.wait(), timeout=timeout)
             return True
         except asyncio.TimeoutError:
             return False
@@ -410,15 +357,8 @@ class Condition:
         timeout: float | None = None,
     ) -> bool:
         """Wait until predicate returns True."""
-        if timeout is None:
-            await self._condition.wait_for(predicate)
-            return True
-        
         try:
-            await asyncio.wait_for(
-                self._condition.wait_for(predicate),
-                timeout=timeout,
-            )
+            await self._condition.wait_for(predicate) if timeout is None else await asyncio.wait_for(self._condition.wait_for(predicate), timeout=timeout)
             return True
         except asyncio.TimeoutError:
             return False
@@ -510,21 +450,15 @@ class Barrier:
         else:
             deadline = time.monotonic() + timeout
             while self._generation == gen:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                if (remaining := deadline - time.monotonic()) <= 0:
                     raise asyncio.TimeoutError()
-                try:
-                    await asyncio.wait_for(self._event.wait(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    raise
-        
+                await asyncio.wait_for(self._event.wait(), timeout=remaining)
         return index
     
     async def reset(self) -> None:
         """Reset the barrier, releasing any waiting tasks."""
         async with self._lock:
-            self._count = 0
-            self._generation += 1
+            self._count, self._generation = 0, self._generation + 1
             self._event.set()
             self._event = asyncio.Event()
 
@@ -552,9 +486,7 @@ class CapacityLimiter:
     def __init__(self, total: int) -> None:
         if total < 1:
             raise ValueError("CapacityLimiter total must be >= 1")
-        self._total = total
-        self._semaphore = asyncio.Semaphore(total)
-        self._borrowed = 0
+        self._total, self._semaphore, self._borrowed = total, asyncio.Semaphore(total), 0
         self._borrowers: set[asyncio.Task[object]] = set()
     
     @property
@@ -583,49 +515,31 @@ class CapacityLimiter:
         }
     
     async def acquire(self, *, timeout: float | None = None) -> bool:
-        """Borrow capacity.
-        
-        Returns:
-            True if acquired, False on timeout
-        """
-        task = asyncio.current_task()
-        
-        if timeout is None:
-            await self._semaphore.acquire()
-        else:
-            try:
-                await asyncio.wait_for(self._semaphore.acquire(), timeout=timeout)
-            except asyncio.TimeoutError:
-                return False
-        
+        """Borrow capacity. Returns True if acquired, False on timeout."""
+        try:
+            await self._semaphore.acquire() if timeout is None else await asyncio.wait_for(self._semaphore.acquire(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
         self._borrowed += 1
-        if task:
+        if task := asyncio.current_task():
             self._borrowers.add(task)
         return True
     
     def release(self) -> None:
         """Return borrowed capacity."""
-        task = asyncio.current_task()
-        if task:
+        if task := asyncio.current_task():
             self._borrowers.discard(task)
         self._borrowed -= 1
         self._semaphore.release()
     
     def set_total(self, new_total: int) -> None:
-        """Adjust total capacity dynamically.
-        
-        If increasing: immediately releases additional slots.
-        If decreasing: new limit takes effect as slots are naturally released.
-        """
+        """Adjust total capacity dynamically. Increasing releases slots immediately; decreasing takes effect as slots are released."""
         if new_total < 1:
             raise ValueError("Total must be >= 1")
-        
         delta = new_total - self._total
         self._total = new_total
-        
-        if delta > 0:
-            for _ in range(delta):
-                self._semaphore.release()
+        for _ in range(max(0, delta)):
+            self._semaphore.release()
     
     async def __aenter__(self) -> CapacityLimiter:
         await self.acquire()

@@ -23,6 +23,7 @@ Example:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import sys
 from collections.abc import Awaitable, Coroutine
@@ -97,8 +98,6 @@ class TaskHandle(Generic[T]):
     
     name: str | None = None
     _task: asyncio.Task[T] | None = field(default=None, repr=False)
-    _result: T | None = field(default=None, repr=False)
-    _exception: BaseException | None = field(default=None, repr=False)
     
     @property
     def state(self) -> TaskState:
@@ -107,9 +106,9 @@ class TaskHandle(Generic[T]):
             return TaskState.PENDING
         if self._task.cancelled():
             return TaskState.CANCELLED
-        if self._task.done():
-            return TaskState.FAILED if self._task.exception() else TaskState.COMPLETED
-        return TaskState.RUNNING
+        if not self._task.done():
+            return TaskState.RUNNING
+        return TaskState.FAILED if self._task.exception() else TaskState.COMPLETED
     
     @property
     def done(self) -> bool:
@@ -130,13 +129,9 @@ class TaskHandle(Generic[T]):
     
     def exception(self) -> BaseException | None:
         """Get task exception, or None if successful."""
-        if self._task is None or not self._task.done():
+        if self._task is None or not self._task.done() or self._task.cancelled():
             return None
-        try:
-            self._task.result()
-            return None
-        except BaseException as e:
-            return e
+        return self._task.exception()
     
     def cancel(self, msg: str | None = None) -> bool:
         """Request task cancellation.
@@ -182,8 +177,7 @@ class CancelScope:
         """Cancel all tasks in this scope."""
         self._cancel_called = True
         for task in self._tasks:
-            if not task.done():
-                task.cancel()
+            task.cancel() if not task.done() else None
     
     async def __aenter__(self) -> CancelScope:
         if self.timeout is not None:
@@ -198,29 +192,19 @@ class CancelScope:
     ) -> bool:
         if self._timeout_task:
             self._timeout_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._timeout_task
-            except asyncio.CancelledError:
-                pass
-        
         # Suppress CancelledError if we initiated the cancellation
-        if exc_type is asyncio.CancelledError and self._cancel_called:
-            return True
-        return False
+        return exc_type is asyncio.CancelledError and self._cancel_called
     
     async def _timeout_handler(self) -> None:
         """Internal timeout trigger."""
-        assert self.timeout is not None
-        await asyncio.sleep(self.timeout)
+        await asyncio.sleep(self.timeout)  # type: ignore[arg-type]
         self.cancel()
 
 
 class _LegacyTaskGroup:
-    """Legacy TaskGroup implementation for Python < 3.11.
-    
-    Manages multiple concurrent tasks as a unit. When exiting the
-    context, waits for all tasks. If any task fails, cancels siblings.
-    """
+    """Legacy TaskGroup implementation for Python < 3.11. Manages multiple concurrent tasks as a unit."""
     
     __slots__ = ("_tasks", "_handles", "_host_task", "_started", "_exiting")
     
@@ -228,8 +212,7 @@ class _LegacyTaskGroup:
         self._tasks: set[asyncio.Task[object]] = set()
         self._handles: list[TaskHandle[object]] = []
         self._host_task: asyncio.Task[object] | None = None
-        self._started = False
-        self._exiting = False
+        self._started = self._exiting = False
     
     def spawn(
         self,
@@ -244,13 +227,10 @@ class _LegacyTaskGroup:
             raise RuntimeError("Cannot spawn tasks while exiting TaskGroup")
         
         task = asyncio.create_task(coro, name=name)
-        handle: TaskHandle[T] = TaskHandle(name=name)
-        handle._task = task
-        
+        handle: TaskHandle[T] = TaskHandle(name=name, _task=task)
         self._tasks.add(task)
         self._handles.append(handle)  # type: ignore[arg-type]
         task.add_done_callback(self._tasks.discard)
-        
         return handle
     
     def spawn_soon(
@@ -263,7 +243,6 @@ class _LegacyTaskGroup:
         async def deferred() -> T:
             await asyncio.sleep(0)
             return await coro
-        
         return self.spawn(deferred(), name=name)
     
     @property
@@ -283,19 +262,13 @@ class _LegacyTaskGroup:
         exc_tb: TracebackType | None,
     ) -> bool:
         self._exiting = True
-        
         if exc_val is not None:
             for task in self._tasks:
                 task.cancel()
         
         exceptions: list[BaseException] = []
-        
         while self._tasks:
-            done, _ = await asyncio.wait(
-                self._tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            
+            done, _ = await asyncio.wait(self._tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 try:
                     task.result()
@@ -312,15 +285,11 @@ class _LegacyTaskGroup:
             if len(exceptions) == 1:
                 raise exceptions[0]
             raise _ExceptionGroup("TaskGroup errors", [e for e in exceptions if isinstance(e, Exception)])
-        
         return False
 
 
 class _NativeTaskGroup:
-    """TaskGroup using Python 3.11+ native asyncio.TaskGroup.
-    
-    Wraps the native implementation while providing TaskHandle interface.
-    """
+    """TaskGroup using Python 3.11+ native asyncio.TaskGroup. Wraps native impl with TaskHandle interface."""
     
     __slots__ = ("_tg", "_handles", "_started")
     
@@ -338,12 +307,9 @@ class _NativeTaskGroup:
         """Spawn a task using native TaskGroup."""
         if not self._started or self._tg is None:
             raise RuntimeError("TaskGroup must be used as context manager")
-        
         task = self._tg.create_task(coro, name=name)
-        handle: TaskHandle[T] = TaskHandle(name=name)
-        handle._task = task
+        handle: TaskHandle[T] = TaskHandle(name=name, _task=task)
         self._handles.append(handle)  # type: ignore[arg-type]
-        
         return handle
     
     def spawn_soon(
@@ -356,7 +322,6 @@ class _NativeTaskGroup:
         async def deferred() -> T:
             await asyncio.sleep(0)
             return await coro
-        
         return self.spawn(deferred(), name=name)
     
     @property
@@ -376,9 +341,7 @@ class _NativeTaskGroup:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> bool:
-        if self._tg is None:
-            return False
-        return await self._tg.__aexit__(exc_type, exc_val, exc_tb)  # type: ignore[return-value]
+        return await self._tg.__aexit__(exc_type, exc_val, exc_tb) if self._tg else False  # type: ignore[return-value]
 
 
 # Choose implementation based on Python version
@@ -436,48 +399,17 @@ async def shield(coro: Awaitable[T]) -> T:
 
 
 async def checkpoint() -> None:
-    """Cooperative cancellation checkpoint.
-    
-    Yields control to the event loop, allowing pending cancellations
-    to be processed. Call periodically in long-running sync code.
-    
-    Example:
-        >>> async def process_many(items):
-        ...     for item in items:
-        ...         process_sync(item)
-        ...         await checkpoint()  # Allow cancellation here
-    """
+    """Cooperative cancellation checkpoint. Yields control to event loop, allowing pending cancellations to be processed."""
     await asyncio.sleep(0)
 
 
 async def shielded_checkpoint() -> None:
-    """Checkpoint that handles cancellation gracefully.
-    
-    Like checkpoint(), but catches CancelledError and re-raises it,
-    allowing cleanup code to run. Use in critical sections where you
-    want to yield but ensure cleanup happens.
-    
-    Example:
-        >>> async def critical_operation():
-        ...     try:
-        ...         await shielded_checkpoint()
-        ...         # Critical work here
-        ...     finally:
-        ...         await cleanup()  # Will run even if cancelled
-    """
-    try:
-        await asyncio.sleep(0)
-    except asyncio.CancelledError:
-        # Re-raise to allow proper cancellation propagation
-        raise
+    """Checkpoint that handles cancellation gracefully. Like checkpoint() but re-raises CancelledError for cleanup."""
+    await asyncio.sleep(0)
 
 
 def current_task() -> asyncio.Task[object] | None:
-    """Get the currently running task.
-    
-    Returns:
-        Current asyncio.Task or None if not in async context
-    """
+    """Get the currently running task. Returns None if not in async context."""
     try:
         return asyncio.current_task()
     except RuntimeError:
@@ -501,24 +433,12 @@ def spawn(
     Returns:
         TaskHandle for the spawned task
     """
-    task = asyncio.create_task(coro, name=name)
-    handle: TaskHandle[T] = TaskHandle(name=name)
-    handle._task = task
-    return handle
+    return TaskHandle(name=name, _task=asyncio.create_task(coro, name=name))
 
 
 # Decorator for making functions checkpoint-aware
 def cancellable(func: Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[T]]:
-    """Decorator that adds automatic checkpoints.
-    
-    Wraps an async function to check for cancellation before and after.
-    
-    Example:
-        >>> @cancellable
-        ... async def long_operation():
-        ...     # Will check cancellation on entry and exit
-        ...     return await do_work()
-    """
+    """Decorator that adds automatic checkpoints. Wraps async function to check cancellation before/after."""
     @functools.wraps(func)
     async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         await checkpoint()
