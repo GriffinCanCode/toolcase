@@ -3,42 +3,52 @@
 This module provides a comprehensive toolkit for managing concurrent
 operations with proper cancellation, resource cleanup, and error propagation.
 
-Key Components:
-    - TaskGroup: Structured task management with automatic cancellation
-    - Synchronization primitives: Lock, Semaphore, Event, Barrier
-    - Pool executors: ThreadPool, ProcessPool for CPU-bound work
-    - Wait strategies: race, gather_all, map_async, first_success
-    - Stream utilities: merge, interleave, buffer, throttle
-    - Sync/async interop: run_sync, run_async, from_thread
+Organization:
+    - primitives/: Task management and synchronization (TaskGroup, Lock, etc.)
+    - execution/: Pools and wait strategies (ThreadPool, race, gather, etc.)
+    - streams/: Async stream combinators (merge, buffer, throttle, etc.)
+    - interop/: Sync/async bridging (run_sync, run_async, adapters)
+    - facade.py: Unified Concurrency class for easy access
 
-Design Philosophy:
-    - Structured concurrency: Tasks don't outlive their scope
-    - Fail-fast: First exception cancels sibling tasks
-    - Cancellation-safe: Proper cleanup on cancellation
-    - Type-safe: Full typing support with generics
-    - Zero external dependencies: Pure asyncio (Python 3.11+)
-
-Example:
-    >>> from toolcase.runtime.concurrency import TaskGroup, gather, race
+Primary Usage:
+    >>> from toolcase.runtime.concurrency import Concurrency
     >>> 
     >>> # Structured task group
-    >>> async with TaskGroup() as tg:
+    >>> async with Concurrency.task_group() as tg:
     ...     tg.spawn(fetch_data, "url1")
     ...     tg.spawn(fetch_data, "url2")
-    ...     tg.spawn(fetch_data, "url3")
-    >>> # All tasks complete or all cancelled on error
     >>> 
     >>> # Race multiple operations
-    >>> result = await race(provider_a(), provider_b(), provider_c())
+    >>> result = await Concurrency.race(provider_a(), provider_b())
     >>> 
-    >>> # Parallel map with concurrency limit
-    >>> results = await map_async(process, items, limit=10)
+    >>> # Parallel map with limit
+    >>> results = await Concurrency.map(process, items, limit=10)
+    >>> 
+    >>> # Run blocking code from async
+    >>> data = await Concurrency.to_thread(blocking_io)
+
+Direct Imports (when you need specific primitives):
+    >>> from toolcase.runtime.concurrency import TaskGroup, Lock, race, map_async
 """
 
 from __future__ import annotations
 
-# Task management
-from .task import (
+# Unified facade - primary import
+from .facade import (
+    Concurrency,
+    ConcurrencyConfig,
+    # Convenience aliases
+    task_group,
+    race,
+    gather,
+    first_success,
+    map_async,
+    to_thread,
+    run_sync,
+)
+
+# Primitives - task management
+from .primitives import (
     TaskGroup,
     TaskHandle,
     TaskState,
@@ -47,10 +57,11 @@ from .task import (
     checkpoint,
     current_task,
     spawn,
+    cancellable,
 )
 
-# Synchronization primitives
-from .sync import (
+# Primitives - synchronization
+from .primitives import (
     Lock,
     RLock,
     Semaphore,
@@ -61,49 +72,85 @@ from .sync import (
     CapacityLimiter,
 )
 
-# Pool executors
-from .pool import (
+# Execution - pools
+from .execution import (
     ThreadPool,
     ProcessPool,
     run_in_thread,
     run_in_process,
+    shutdown_default_pools,
+    threadpool,
+    processpool,
 )
 
-# Wait strategies
-from .wait import (
-    race,
-    gather,
+# Execution - wait strategies
+from .execution import (
+    race as race_coros,  # Aliased to avoid conflict with facade.race
+    race_with_index,
+    gather as gather_coros,
     gather_settled,
-    first_success,
-    map_async,
     all_settled,
-    WaitResult,
+    first_success as first_success_coros,
+    map_async as map_async_coros,
+    map_async_unordered,
+    wait_any,
+    wait_all,
+    retry_until_success,
+    SettledStatus,
     Settled,
+    WaitResult,
 )
 
-# Stream utilities
-from .stream import (
+# Streams
+from .streams import (
     merge_streams,
     interleave_streams,
     buffer_stream,
     throttle_stream,
     batch_stream,
     timeout_stream,
+    take_stream,
+    skip_stream,
+    filter_stream,
+    map_stream,
+    flatten_stream,
+    enumerate_stream,
+    zip_streams,
+    chain_streams,
     StreamMerger,
 )
 
-# Sync/async interop
+# Interop
 from .interop import (
-    run_sync,
-    run_async,
+    run_sync as run_sync_coro,
+    run_async as run_async_func,
     from_thread,
-    to_thread,
+    from_thread_nowait,
+    set_thread_loop,
+    clear_thread_loop,
+    to_thread as to_thread_func,
     AsyncAdapter,
     SyncAdapter,
+    async_to_sync,
+    sync_to_async,
+    ThreadContext,
+    shutdown_executor,
 )
 
 __all__ = [
-    # Task management
+    # === Unified Facade (PRIMARY IMPORT) ===
+    "Concurrency",
+    "ConcurrencyConfig",
+    # Facade convenience aliases
+    "task_group",
+    "race",
+    "gather",
+    "first_success",
+    "map_async",
+    "to_thread",
+    "run_sync",
+    
+    # === Primitives: Task Management ===
     "TaskGroup",
     "TaskHandle",
     "TaskState",
@@ -112,7 +159,9 @@ __all__ = [
     "checkpoint",
     "current_task",
     "spawn",
-    # Sync primitives
+    "cancellable",
+    
+    # === Primitives: Synchronization ===
     "Lock",
     "RLock",
     "Semaphore",
@@ -121,33 +170,61 @@ __all__ = [
     "Condition",
     "Barrier",
     "CapacityLimiter",
-    # Pools
+    
+    # === Execution: Pools ===
     "ThreadPool",
     "ProcessPool",
     "run_in_thread",
     "run_in_process",
-    # Wait strategies
-    "race",
-    "gather",
+    "shutdown_default_pools",
+    "threadpool",
+    "processpool",
+    
+    # === Execution: Wait Strategies ===
+    "race_coros",
+    "race_with_index",
+    "gather_coros",
     "gather_settled",
-    "first_success",
-    "map_async",
     "all_settled",
-    "WaitResult",
+    "first_success_coros",
+    "map_async_coros",
+    "map_async_unordered",
+    "wait_any",
+    "wait_all",
+    "retry_until_success",
+    "SettledStatus",
     "Settled",
-    # Streams
+    "WaitResult",
+    
+    # === Streams ===
     "merge_streams",
     "interleave_streams",
     "buffer_stream",
     "throttle_stream",
     "batch_stream",
     "timeout_stream",
+    "take_stream",
+    "skip_stream",
+    "filter_stream",
+    "map_stream",
+    "flatten_stream",
+    "enumerate_stream",
+    "zip_streams",
+    "chain_streams",
     "StreamMerger",
-    # Interop
-    "run_sync",
-    "run_async",
+    
+    # === Interop ===
+    "run_sync_coro",
+    "run_async_func",
     "from_thread",
-    "to_thread",
+    "from_thread_nowait",
+    "set_thread_loop",
+    "clear_thread_loop",
+    "to_thread_func",
     "AsyncAdapter",
     "SyncAdapter",
+    "async_to_sync",
+    "sync_to_async",
+    "ThreadContext",
+    "shutdown_executor",
 ]

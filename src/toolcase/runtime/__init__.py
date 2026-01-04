@@ -37,7 +37,8 @@ __all__ = [
     "Backoff", "ExponentialBackoff", "LinearBackoff", "ConstantBackoff", "DecorrelatedJitter",
     "RetryPolicy", "DEFAULT_RETRYABLE", "NO_RETRY",
     "execute_with_retry", "execute_with_retry_sync",
-    # Concurrency
+    # Concurrency (unified facade + direct exports)
+    "Concurrency",  # Primary unified facade
     "TaskGroup", "TaskHandle", "TaskState", "CancelScope",
     "Lock", "RLock", "Semaphore", "BoundedSemaphore", "Event", "Condition", "Barrier", "CapacityLimiter",
     "ThreadPool", "ProcessPool", "run_in_thread", "run_in_process",
@@ -106,6 +107,7 @@ def __getattr__(name: str):
         return getattr(retry, name)
     
     concurrency_attrs = {
+        "Concurrency",  # Unified facade
         "TaskGroup", "TaskHandle", "TaskState", "CancelScope",
         "Lock", "RLock", "Semaphore", "BoundedSemaphore", "Event", "Condition", "Barrier", "CapacityLimiter",
         "ThreadPool", "ProcessPool", "run_in_thread", "run_in_process",

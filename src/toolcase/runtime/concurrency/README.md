@@ -2,484 +2,252 @@
 
 Structured concurrency primitives for async/parallel operations with proper cancellation, resource cleanup, and error propagation.
 
-## Design Philosophy
-
-- **Structured Concurrency**: Tasks don't outlive their scope
-- **Fail-Fast**: First exception cancels sibling tasks  
-- **Cancellation-Safe**: Proper cleanup on cancellation
-- **Type-Safe**: Full typing support with generics
-- **Zero External Dependencies**: Pure Python 3.11+ asyncio
-
 ## Quick Start
 
 ```python
-from toolcase.runtime.concurrency import (
-    TaskGroup, race, gather, map_async,
-    Lock, Semaphore, CapacityLimiter,
-    ThreadPool, run_in_thread,
-)
+from toolcase.runtime.concurrency import Concurrency
 
-# Structured task management
-async with TaskGroup() as tg:
-    tg.spawn(fetch_data, "url1")
-    tg.spawn(fetch_data, "url2")
-    tg.spawn(fetch_data, "url3")
-# All tasks complete or all cancelled on error
+# Structured task group - tasks auto-cancel on failure
+async with Concurrency.task_group() as tg:
+    tg.spawn(fetch_data("url1"))
+    tg.spawn(fetch_data("url2"))
 
-# Race multiple operations
-result = await race(provider_a(), provider_b(), provider_c())
+# Race - first to complete wins
+result = await Concurrency.race(api_a(), api_b(), cache())
 
 # Parallel map with concurrency limit
-results = await map_async(process, items, limit=10)
+results = await Concurrency.map(process, items, limit=10)
+
+# Run blocking code from async
+data = await Concurrency.to_thread(blocking_io)
+
+# Run async from sync context
+result = Concurrency.run_sync(async_operation())
 ```
 
-## Module Overview
+## Module Structure
 
-| Module | Purpose | Key Classes/Functions |
-|--------|---------|----------------------|
-| `task` | Task lifecycle management | `TaskGroup`, `TaskHandle`, `CancelScope` |
-| `sync` | Synchronization primitives | `Lock`, `Semaphore`, `Event`, `Barrier` |
-| `pool` | Thread/process execution | `ThreadPool`, `ProcessPool`, `run_in_thread` |
-| `wait` | Wait strategies | `race`, `gather`, `first_success`, `map_async` |
-| `stream` | Async iterator utilities | `merge_streams`, `throttle_stream`, `batch_stream` |
-| `interop` | Sync/async bridging | `run_sync`, `to_thread`, `AsyncAdapter` |
-
----
-
-## Task Management (`task.py`)
-
-### TaskGroup
-
-Manages multiple concurrent tasks as a unit with automatic cancellation.
-
-```python
-async with TaskGroup() as tg:
-    # Spawn tasks that are managed together
-    handle1 = tg.spawn(fetch_user, user_id)
-    handle2 = tg.spawn(fetch_orders, user_id)
-    handle3 = tg.spawn(fetch_preferences, user_id)
-# All complete, or if one fails, all are cancelled
-
-# Access results via handles
-user = handle1.result()
-orders = handle2.result()
+```
+concurrency/
+├── __init__.py          # Re-exports everything
+├── facade.py            # Unified Concurrency class (PRIMARY IMPORT)
+├── primitives/          # Core building blocks
+│   ├── task.py          # TaskGroup, TaskHandle, CancelScope
+│   └── sync.py          # Lock, Semaphore, Event, Barrier
+├── execution/           # Execution patterns
+│   ├── pool.py          # ThreadPool, ProcessPool
+│   └── wait.py          # race, gather, map_async, first_success
+├── streams/             # Async stream utilities
+│   └── combinators.py   # merge, buffer, throttle, batch
+└── interop/             # Sync/async bridging
+    └── bridge.py        # run_sync, run_async, adapters
 ```
 
-### TaskHandle
+## Import Patterns
 
-Handle to a spawned task with state access:
+### Primary: Unified Facade (Recommended)
 
 ```python
-handle = tg.spawn(long_operation())
+from toolcase.runtime.concurrency import Concurrency
 
-# Check state
-print(handle.state)  # PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
-print(handle.done)   # True/False
-
-# Wait for completion
-result = await handle.wait()
-
-# Cancel if needed
-handle.cancel()
+# All operations via class methods
+async with Concurrency.task_group() as tg: ...
+await Concurrency.race(op1(), op2())
+await Concurrency.map(fn, items, limit=10)
+await Concurrency.to_thread(blocking)
+Concurrency.run_sync(async_coro())
 ```
 
-### CancelScope
-
-Fine-grained cancellation control with timeouts:
+### Direct Imports (When needed)
 
 ```python
-async with CancelScope(timeout=5.0) as scope:
+from toolcase.runtime.concurrency import (
+    # Primitives
+    TaskGroup, Lock, Semaphore, Event, Barrier, CapacityLimiter,
+    # Wait strategies
+    race, gather, first_success, map_async,
+    # Pools
+    ThreadPool, ProcessPool, run_in_thread,
+    # Streams  
+    merge_streams, buffer_stream, throttle_stream,
+    # Interop
+    run_sync, to_thread, AsyncAdapter,
+)
+```
+
+## Feature Reference
+
+### Task Management
+
+```python
+# Structured task group
+async with Concurrency.task_group() as tg:
+    h1 = tg.spawn(fetch_user(1))
+    h2 = tg.spawn(fetch_user(2))
+# All tasks complete or cancelled together
+
+# Cancel scope with timeout
+async with Concurrency.cancel_scope(timeout=5.0) as scope:
     await long_operation()
     if scope.cancel_called:
         print("Timed out!")
+
+# Shield from cancellation
+result = await Concurrency.shield(critical_operation())
+
+# Checkpoints for cooperative cancellation
+async def process_many(items):
+    for item in items:
+        process(item)
+        await Concurrency.checkpoint()
 ```
 
-### Utilities
+### Wait Strategies
 
 ```python
-# Shield from cancellation (use sparingly!)
-result = await shield(critical_operation())
-
-# Cooperative cancellation checkpoint
-await checkpoint()  # Allow pending cancellations
-
-# Get current task
-task = current_task()
-```
-
----
-
-## Synchronization Primitives (`sync.py`)
-
-### Lock
-
-Mutual exclusion with timeout support:
-
-```python
-lock = Lock()
-
-async with lock:
-    # Exclusive access
-    await modify_shared_state()
-
-# With timeout
-if await lock.acquire(timeout=5.0):
-    try:
-        await work()
-    finally:
-        lock.release()
-```
-
-### RLock
-
-Reentrant lock for recursive operations:
-
-```python
-lock = RLock()
-
-async def recursive_op():
-    async with lock:
-        # Can acquire again in same task
-        async with lock:
-            await do_work()
-```
-
-### Semaphore
-
-Control concurrent access to limited resources:
-
-```python
-# Max 5 concurrent database connections
-db_pool = Semaphore(5)
-
-async with db_pool:
-    conn = await get_connection()
-    await query(conn)
-```
-
-### Event
-
-One-shot signaling between tasks:
-
-```python
-ready = Event()
-
-async def waiter():
-    await ready.wait()
-    print("Ready!")
-
-async def signaler():
-    await do_initialization()
-    ready.set()  # Release all waiters
-```
-
-### Barrier
-
-Synchronization point for multiple tasks:
-
-```python
-barrier = Barrier(3)  # Wait for 3 tasks
-
-async def worker(id: int):
-    print(f"Worker {id} starting")
-    await barrier.wait()  # Wait for all
-    print(f"Worker {id} proceeding")
-```
-
-### CapacityLimiter
-
-Limit concurrent access with usage tracking:
-
-```python
-limiter = CapacityLimiter(10)
-
-async with limiter:
-    await process_request()
-
-# Check usage
-print(f"Active: {limiter.borrowed}/{limiter.total}")
-```
-
----
-
-## Pool Executors (`pool.py`)
-
-### ThreadPool
-
-For blocking I/O and sync operations:
-
-```python
-async with ThreadPool(max_workers=4) as pool:
-    # Run blocking function in thread
-    data = await pool.run(read_large_file, path)
-    
-    # Multiple in parallel
-    results = await asyncio.gather(
-        *(pool.run(process, item) for item in items)
-    )
-```
-
-### ProcessPool
-
-For CPU-bound work (bypasses GIL):
-
-```python
-async with ProcessPool(4) as pool:
-    # Heavy computation in separate process
-    result = await pool.run(heavy_computation, data)
-```
-
-### Convenience Functions
-
-```python
-# One-off thread execution
-data = await run_in_thread(blocking_io_function, arg1)
-
-# One-off process execution  
-result = await run_in_process(cpu_intensive_function, data)
-```
-
-### Decorators
-
-```python
-@threadpool
-def blocking_operation(x: int) -> int:
-    time.sleep(1)
-    return x * 2
-
-# Now callable as async
-result = await blocking_operation(5)
-
-@processpool
-def cpu_intensive(data: bytes) -> bytes:
-    return expensive_computation(data)
-```
-
----
-
-## Wait Strategies (`wait.py`)
-
-### race
-
-First to complete wins, others cancelled:
-
-```python
-result = await race(
+# Race - first to complete wins, others cancelled
+result = await Concurrency.race(
     fetch_from_api_a(),
     fetch_from_api_b(),
     fetch_from_cache(),
     timeout=5.0,
 )
-```
 
-### gather / gather_settled
+# Gather - wait for all
+results = await Concurrency.gather(op1(), op2(), op3())
 
-Wait for all operations:
-
-```python
-# Standard gather (raises on first error)
-results = await gather(op1(), op2(), op3())
-
-# Settled (never raises, returns status)
-results = await gather_settled(op1(), op2(), op3())
-for r in results:
-    if r.is_fulfilled:
-        print(f"Success: {r.value}")
-    else:
-        print(f"Failed: {r.error}")
-```
-
-### first_success
-
-First successful result, ignoring failures:
-
-```python
-result = await first_success(
+# First success - skip failures
+result = await Concurrency.first_success(
     unreliable_api_a(),
     unreliable_api_b(),
     fallback_api(),
 )
-```
 
-### map_async
+# Parallel map with limit
+results = await Concurrency.map(
+    process_item, items, limit=10
+)
 
-Parallel map with concurrency limit:
-
-```python
-# Process 100 items, max 10 concurrent
-results = await map_async(
-    fetch_data,
-    urls,
-    limit=10,
+# Retry with backoff
+result = await Concurrency.retry(
+    lambda: fetch_data(),
+    max_attempts=3,
+    delay=1.0,
+    backoff=2.0,
 )
 ```
 
----
-
-## Stream Utilities (`stream.py`)
-
-### merge_streams
-
-Combine multiple streams into one:
+### Thread/Process Pools
 
 ```python
-async for item in merge_streams(source1, source2, source3):
-    process(item)  # Items arrive as available
+# Run blocking code in thread
+data = await Concurrency.to_thread(read_file, path)
+
+# Run CPU-bound in process
+result = await Concurrency.to_process(heavy_compute, data)
+
+# Managed thread pool
+async with Concurrency.thread_pool(max_workers=4) as pool:
+    result = await pool.run(blocking_function)
+
+# Managed process pool
+async with Concurrency.process_pool(max_workers=4) as pool:
+    result = await pool.run(cpu_intensive)
 ```
 
-### throttle_stream
-
-Rate limit stream consumption:
+### Synchronization
 
 ```python
-# Max 10 items per second
-async for item in throttle_stream(fast_source, rate=10.0):
-    await api_call(item)
+# Mutex lock
+lock = Concurrency.lock()
+async with lock:
+    await modify_shared_resource()
+
+# Semaphore for resource limiting
+sem = Concurrency.semaphore(5)  # Max 5 concurrent
+async with sem:
+    await use_resource()
+
+# Capacity limiter (friendlier API)
+limiter = Concurrency.limiter(10)
+async with limiter:
+    await api_call()
+
+# Event for signaling
+ready = Concurrency.event()
+ready.set()  # Signal
+await ready.wait()  # Wait for signal
+
+# Barrier for synchronization
+barrier = Concurrency.barrier(3)
+await barrier.wait()  # Wait for 3 tasks
 ```
 
-### batch_stream
-
-Group items into batches:
+### Stream Utilities
 
 ```python
-# Process in batches of 100
-async for batch in batch_stream(items, size=100, timeout=5.0):
-    await bulk_insert(batch)
+# Merge multiple streams
+async for item in Concurrency.merge(stream1, stream2):
+    process(item)
+
+# Buffer for smoothing
+async for item in Concurrency.buffer(slow_producer, maxsize=100):
+    fast_consumer(item)
+
+# Rate limit
+async for item in Concurrency.throttle(fast_source, rate=10):
+    api_call(item)  # Max 10/second
+
+# Batch processing
+async for batch in Concurrency.batch(items, size=100, timeout=5.0):
+    bulk_insert(batch)
 ```
 
-### buffer_stream
-
-Pre-fetch items for smoother consumption:
+### Sync/Async Interop
 
 ```python
-async for item in buffer_stream(slow_producer, maxsize=100):
-    fast_process(item)
+# Async from sync context
+result = Concurrency.run_sync(async_operation())
+
+# Sync from async (in thread)
+result = await Concurrency.run_async(blocking_function)
+
+# Adapters
+async_fn = Concurrency.async_adapter(sync_function)
+result = await async_fn(args)
+
+sync_fn = Concurrency.sync_adapter(async_function)
+result = sync_fn(args)
+
+# Thread context for worker threads
+async with Concurrency.thread_context():
+    # Worker threads can now use from_thread()
+    await run_threaded_work()
 ```
 
-### Other Operations
+## Configuration
 
 ```python
-# Take first n
-async for x in take_stream(stream, 10): ...
-
-# Skip first n  
-async for x in skip_stream(stream, 5): ...
-
-# Filter
-async for x in filter_stream(stream, lambda x: x > 0): ...
-
-# Map
-async for x in map_stream(stream, transform): ...
-
-# Enumerate
-async for i, x in enumerate_stream(stream): ...
-```
-
----
-
-## Sync/Async Interop (`interop.py`)
-
-### run_sync
-
-Run async code from sync context:
-
-```python
-# From sync code
-result = run_sync(async_operation())
-
-# Handles nested loops (FastAPI, Jupyter)
-```
-
-### to_thread / run_async
-
-Run sync code from async context:
-
-```python
-# From async code
-result = await to_thread(blocking_io)
-result = await run_async(sync_function, arg1, arg2)
-```
-
-### Adapters
-
-```python
-# Wrap sync as async
-async_io = AsyncAdapter(sync_io_function)
-content = await async_io("/etc/hosts")
-
-# Wrap async as sync
-sync_fetch = SyncAdapter(async_fetch_function)
-content = sync_fetch("https://example.com")
-```
-
-### Decorators
-
-```python
-@sync_to_async
-def blocking_operation(data: bytes) -> bytes:
-    return expensive_sync_process(data)
-
-# Now callable as async
-result = await blocking_operation(data)
-
-@async_to_sync  
-async def fetch_data(url: str) -> dict:
-    ...
-
-# Now callable as sync
-data = fetch_data("https://api.example.com")
-```
-
-### Thread Context
-
-Enable async calls from worker threads:
-
-```python
-async def main():
-    async with ThreadContext():
-        # Worker threads can now use from_thread()
-        await run_threaded_work()
-
-def worker_thread():
-    # Inside thread pool
-    result = from_thread(async_operation())
-```
-
----
-
-## Integration with Toolcase
-
-The concurrency module integrates with existing toolcase patterns:
-
-```python
-from toolcase.runtime import TaskGroup, map_async, CapacityLimiter
-from toolcase.runtime.pipeline import parallel
-
-# Use with pipeline tools
-async with TaskGroup() as tg:
-    tg.spawn(tool1.arun_result, params1)
-    tg.spawn(tool2.arun_result, params2)
-
-# Rate-limited tool execution
-limiter = CapacityLimiter(10)
-
-async def limited_call(tool, params):
-    async with limiter:
-        return await tool.arun_result(params)
-
-results = await map_async(
-    lambda p: limited_call(my_tool, p),
-    param_list,
-    limit=20,
+# Configure global defaults
+Concurrency.configure(
+    default_timeout=30.0,
+    default_pool_size=10,
+    default_thread_workers=8,
+    default_process_workers=4,
 )
 ```
 
----
+## Cleanup
 
-## Best Practices
+```python
+# At application shutdown
+Concurrency.shutdown()
+```
 
-1. **Use TaskGroup for related tasks**: Ensures proper cleanup and cancellation
-2. **Set concurrency limits**: Avoid overwhelming resources with `map_async(limit=N)` or `CapacityLimiter`
-3. **Handle cancellation**: Use `checkpoint()` in long-running operations
-4. **Choose the right pool**: `ThreadPool` for I/O, `ProcessPool` for CPU
-5. **Prefer structured concurrency**: Avoid bare `asyncio.create_task()` when possible
+## Design Philosophy
+
+- **Structured concurrency**: Tasks don't outlive their scope
+- **Fail-fast**: First exception cancels sibling tasks
+- **Cancellation-safe**: Proper cleanup on cancellation
+- **Type-safe**: Full typing support with generics
+- **Zero external dependencies**: Pure asyncio (Python 3.11+)
