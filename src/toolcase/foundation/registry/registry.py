@@ -11,33 +11,20 @@ The registry provides:
 
 from __future__ import annotations
 
-import asyncio
 import time
-from collections.abc import AsyncIterator, Awaitable, Iterator
-from typing import TYPE_CHECKING, Callable, TypeVar
+from collections.abc import AsyncIterator, Iterator
 
 from pydantic import BaseModel, ValidationError
 
 from toolcase.foundation.core import BaseTool, ToolMetadata
-from toolcase.foundation.di import Container, Factory, Scope, ScopedContext
+from toolcase.foundation.di import Container, Factory, Scope
 from toolcase.foundation.errors import ErrorCode, ToolError, ToolException, format_validation_error
 from toolcase.runtime.middleware import Context, Middleware, Next, compose, compose_streaming, StreamMiddleware
 from toolcase.runtime.concurrency import run_sync
 from toolcase.io.streaming import (
-    StreamChunk,
-    StreamEvent,
-    StreamEventKind,
-    StreamResult,
-    stream_complete,
-    stream_error,
-    stream_start,
+    StreamChunk, StreamEvent, StreamEventKind, StreamResult,
+    stream_complete, stream_error, stream_start,
 )
-
-if TYPE_CHECKING:
-    pass
-
-
-T = TypeVar("T", bound=BaseTool[BaseModel])
 
 
 class ToolRegistry:
@@ -79,10 +66,7 @@ class ToolRegistry:
     
     def unregister(self, name: str) -> bool:
         """Remove a tool by name. Returns True if found."""
-        if name in self._tools:
-            del self._tools[name]
-            return True
-        return False
+        return self._tools.pop(name, None) is not None
     
     def get(self, name: str) -> BaseTool[BaseModel] | None:
         """Get tool by name."""
@@ -154,19 +138,16 @@ class ToolRegistry:
             >>> registry.use(RateLimitMiddleware(max_calls=10, window_seconds=60))
         """
         self._middleware.append(middleware)
-        self._chain = None  # Invalidate cached chain
-        self._stream_chain = None  # Invalidate streaming chain
+        self._chain = self._stream_chain = None  # Invalidate cached chains
     
     def _get_chain(self) -> Next:
         """Get or compile the middleware chain."""
-        if self._chain is None:
-            self._chain = compose(self._middleware)  # type: ignore[arg-type]
+        self._chain = self._chain or compose(self._middleware)  # type: ignore[arg-type]
         return self._chain
     
     def _get_stream_chain(self) -> object:
         """Get or compile the streaming middleware chain."""
-        if self._stream_chain is None:
-            self._stream_chain = compose_streaming(self._middleware)
+        self._stream_chain = self._stream_chain or compose_streaming(self._middleware)
         return self._stream_chain
     
     async def execute(
@@ -198,22 +179,14 @@ class ToolRegistry:
             >>> result = await registry.execute("search", {"query": "python"})
         """
         # Tool not found
-        if name not in self._tools:
-            return ToolError.create(
-                name, f"Tool '{name}' not found in registry",
-                ErrorCode.NOT_FOUND, recoverable=False
-            ).render()
-        
-        tool = self._tools[name]
+        if (tool := self._tools.get(name)) is None:
+            return ToolError.create(name, f"Tool '{name}' not found in registry", ErrorCode.NOT_FOUND, recoverable=False).render()
         
         # Validate params if dict
         try:
             validated = tool.params_schema(**params) if isinstance(params, dict) else params
         except ValidationError as e:
-            return ToolError.create(
-                name, format_validation_error(e, tool_name=name),
-                ErrorCode.INVALID_PARAMS, recoverable=False
-            ).render()
+            return ToolError.create(name, format_validation_error(e, tool_name=name), ErrorCode.INVALID_PARAMS, recoverable=False).render()
         
         # Build context
         context = ctx or Context()
@@ -227,18 +200,13 @@ class ToolRegistry:
             # Resolve declared dependencies if tool has them
             if hasattr(tool, "_inject") and tool._inject:
                 try:
-                    injected = await self._container.resolve_many(tool._inject, di_ctx)
-                    context["injected"] = injected
+                    context["injected"] = await self._container.resolve_many(tool._inject, di_ctx)
                 except KeyError as e:
-                    return ToolError.create(
-                        name, f"Missing dependency: {e}",
-                        ErrorCode.INVALID_PARAMS, recoverable=False
-                    ).render()
+                    return ToolError.create(name, f"Missing dependency: {e}", ErrorCode.INVALID_PARAMS, recoverable=False).render()
             
             # Execute through chain with exception handling
             try:
-                chain = self._get_chain()
-                return await chain(tool, validated, context)
+                return await self._get_chain()(tool, validated, context)
             except ToolException as e:
                 return e.error.render()
             except Exception as e:
@@ -298,23 +266,15 @@ class ToolRegistry:
         from toolcase.runtime.middleware.streaming import StreamingChain
         
         # Tool not found
-        if name not in self._tools:
-            yield ToolError.create(
-                name, f"Tool '{name}' not found in registry",
-                ErrorCode.NOT_FOUND, recoverable=False
-            ).render()
+        if (tool := self._tools.get(name)) is None:
+            yield ToolError.create(name, f"Tool '{name}' not found in registry", ErrorCode.NOT_FOUND, recoverable=False).render()
             return
-        
-        tool = self._tools[name]
         
         # Validate params
         try:
             validated = tool.params_schema(**params) if isinstance(params, dict) else params
         except ValidationError as e:
-            yield ToolError.create(
-                name, format_validation_error(e, tool_name=name),
-                ErrorCode.INVALID_PARAMS, recoverable=False
-            ).render()
+            yield ToolError.create(name, format_validation_error(e, tool_name=name), ErrorCode.INVALID_PARAMS, recoverable=False).render()
             return
         
         # Build context
@@ -329,13 +289,9 @@ class ToolRegistry:
             # Resolve dependencies if needed
             if hasattr(tool, "_inject") and tool._inject:
                 try:
-                    injected = await self._container.resolve_many(tool._inject, di_ctx)
-                    context["injected"] = injected
+                    context["injected"] = await self._container.resolve_many(tool._inject, di_ctx)
                 except KeyError as e:
-                    yield ToolError.create(
-                        name, f"Missing dependency: {e}",
-                        ErrorCode.INVALID_PARAMS, recoverable=False
-                    ).render()
+                    yield ToolError.create(name, f"Missing dependency: {e}", ErrorCode.INVALID_PARAMS, recoverable=False).render()
                     return
             
             try:
@@ -379,21 +335,13 @@ class ToolRegistry:
             ...     await websocket.send(event.to_json())
         """
         yield stream_start(name)
-        
         accumulated: list[str] = []
-        index = 0
-        
+        idx = 0
         try:
             async for content in self.stream_execute(name, params, ctx=ctx):
                 accumulated.append(content)
-                chunk = StreamChunk(content=content, index=index)
-                yield StreamEvent(
-                    kind=StreamEventKind.CHUNK,
-                    tool_name=name,
-                    data=chunk,
-                )
-                index += 1
-            
+                yield StreamEvent(kind=StreamEventKind.CHUNK, tool_name=name, data=StreamChunk(content=content, index=idx))
+                idx += 1
             yield stream_complete(name, "".join(accumulated))
         except Exception as e:
             yield stream_error(name, str(e))
@@ -406,32 +354,13 @@ class ToolRegistry:
         ctx: Context | None = None,
         timeout: float = 60.0,
     ) -> StreamResult[str]:
-        """Stream and collect full result with metadata.
-        
-        Useful when you want streaming behavior but also need final stats.
-        
-        Returns:
-            StreamResult with accumulated content and timing metadata
-        """
-        start = time.time()
-        parts: list[str] = []
-        chunk_count = 0
-        
-        async def collect() -> StreamResult[str]:
-            nonlocal parts, chunk_count
+        """Stream and collect full result with metadata. Returns StreamResult with accumulated content and timing metadata."""
+        from toolcase.runtime.concurrency import CancelScope
+        start, parts = time.time(), []
+        async with CancelScope(timeout=timeout):
             async for content in self.stream_execute(name, params, ctx=ctx):
                 parts.append(content)
-                chunk_count += 1
-            return StreamResult(
-                value="".join(parts),
-                chunks=chunk_count,
-                duration_ms=(time.time() - start) * 1000,
-                tool_name=name,
-            )
-        
-        from toolcase.runtime.concurrency import CancelScope
-        async with CancelScope(timeout=timeout):
-            return await collect()
+            return StreamResult(value="".join(parts), chunks=len(parts), duration_ms=(time.time() - start) * 1000, tool_name=name)
     
     # ─────────────────────────────────────────────────────────────────
     # Querying
@@ -439,17 +368,11 @@ class ToolRegistry:
     
     def list_tools(self, *, enabled_only: bool = True) -> list[ToolMetadata]:
         """List metadata for all registered tools."""
-        return [
-            t.metadata for t in self._tools.values()
-            if not enabled_only or t.metadata.enabled
-        ]
+        return [t.metadata for t in self._tools.values() if not enabled_only or t.metadata.enabled]
     
     def list_by_category(self, category: str, *, enabled_only: bool = True) -> list[ToolMetadata]:
         """List tools filtered by category."""
-        return [
-            t.metadata for t in self._tools.values()
-            if t.metadata.category == category and (not enabled_only or t.metadata.enabled)
-        ]
+        return [t.metadata for t in self._tools.values() if t.metadata.category == category and (not enabled_only or t.metadata.enabled)]
     
     def categories(self) -> set[str]:
         """Get all unique categories."""
@@ -466,18 +389,9 @@ class ToolRegistry:
             if enabled_only and not tool.metadata.enabled:
                 continue
             m = tool.metadata
-            flags = []
-            if m.requires_api_key:
-                flags.append("⚡")
-            if m.streaming:
-                flags.append("📡")
-            flag_str = " ".join(flags)
-            lines.append(f"- **{m.name}** ({m.category}){' ' + flag_str if flag_str else ''}: {m.description}")
-        
-        if lines:
-            lines.append("\n_⚡ = requires API key | 📡 = supports streaming_")
-        
-        return "\n".join(lines)
+            flags = " ".join(f for f, c in [("⚡", m.requires_api_key), ("📡", m.streaming)] if c)
+            lines.append(f"- **{m.name}** ({m.category}){' ' + flags if flags else ''}: {m.description}")
+        return "\n".join(lines + (["\n_⚡ = requires API key | 📡 = supports streaming_"] if lines else []))
     
     # ─────────────────────────────────────────────────────────────────
     # Bulk Operations
@@ -492,8 +406,7 @@ class ToolRegistry:
         """Remove all registered tools, middleware, and providers."""
         self._tools.clear()
         self._middleware.clear()
-        self._chain = None
-        self._stream_chain = None
+        self._chain = self._stream_chain = None
         self._container.clear()
     
     async def dispose(self) -> None:
@@ -511,9 +424,7 @@ _registry: ToolRegistry | None = None
 def get_registry() -> ToolRegistry:
     """Get the global tool registry instance."""
     global _registry
-    if _registry is None:
-        _registry = ToolRegistry()
-    return _registry
+    return _registry if _registry else (_registry := ToolRegistry())
 
 
 def set_registry(registry: ToolRegistry) -> None:
@@ -525,6 +436,5 @@ def set_registry(registry: ToolRegistry) -> None:
 def reset_registry() -> None:
     """Reset the global registry (useful for testing)."""
     global _registry
-    if _registry is not None:
-        _registry.clear()
+    _registry and _registry.clear()
     _registry = None
