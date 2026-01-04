@@ -47,10 +47,28 @@ KEY OPERATIONS:
     map(fn)           Transform Ok value
     flat_map(fn)      Chain operations that return Result
     map_err(fn)       Transform Err value
+    bimap(ok_fn, err_fn)  Transform both variants
     unwrap()          Get Ok value (raises on Err)
     unwrap_or(val)    Get Ok value or default
+    unwrap_or_else(fn)  Get Ok or compute from Err
     or_else(fn)       Try alternative on Err
+    and_then(fn)      Alias for flat_map
     match(ok, err)    Pattern match both cases
+    inspect(fn)       Side effects on Ok, return self
+    inspect_err(fn)   Side effects on Err, return self
+
+COLLECTION OPERATIONS:
+    from toolcase import sequence, traverse, collect_results
+    
+    # Sequence: fail-fast, first Err stops
+    results = [Ok(1), Ok(2), Ok(3)]
+    combined = sequence(results)  # Ok([1, 2, 3])
+    
+    # Traverse: map + sequence
+    combined = traverse(items, lambda x: validate(x))
+    
+    # Collect: accumulate ALL errors (not fail-fast)
+    combined = collect_results(results)  # Collects all errors
 
 EXCEPTION HANDLING:
     from toolcase import try_tool_operation

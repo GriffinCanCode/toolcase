@@ -48,7 +48,7 @@ TIMING DECORATOR:
     # Output: 10:30:45.123 [info] data fetched function=fetch_data duration_ms=45.2
 
 MIDDLEWARE:
-    from toolcase import LoggingMiddleware, StructuredLoggingMiddleware
+    from toolcase import LoggingMiddleware
     
     # Structured logging for all tool executions
     registry.use(LoggingMiddleware())

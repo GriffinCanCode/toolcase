@@ -19,7 +19,7 @@ TWO APPROACHES:
         '''
         return str(a + b)
 
-2. CLASS-BASED (Complex tools):
+2. CLASS-BASED (Complex tools - async-first design):
     from toolcase import BaseTool, ToolMetadata
     from pydantic import BaseModel, Field
     
@@ -35,20 +35,32 @@ TWO APPROACHES:
         )
         params_schema = SearchParams
         
-        def _run(self, params: SearchParams) -> str:
+        async def _async_run(self, params: SearchParams) -> str:
             return f"Found {params.limit} results for: {params.query}"
 
 KEY ATTRIBUTES:
-    metadata        ToolMetadata with name, description, category
+    metadata        ToolMetadata with name, description, category, tags
     params_schema   Pydantic model for parameter validation
     cache_enabled   Enable/disable caching (default: True)
     cache_ttl       Cache time-to-live in seconds (default: 300)
+    retry_policy    Optional RetryPolicy for automatic retries
 
-KEY METHODS:
-    _run(params)           Sync execution (required)
-    _async_run(params)     Async execution (optional)
-    stream_run(params)     Streaming execution (optional)
-    _run_result(params)    Result-based execution (recommended)
+KEY METHODS (Async-First Design):
+    _async_run(params)         Primary execution method (implement this)
+    _run(params)               Sync wrapper (auto-calls _async_run)
+    arun(params, timeout)      Async with caching and timeout
+    run(params)                Sync with caching
+    arun_result(params)        Async returning Result type
+    run_result(params)         Sync returning Result type
+    batch_run(params_list)     Execute multiple params concurrently
+    stream_run(params)         Progress streaming (AsyncIterator)
+    stream_result(params)      Result streaming for incremental output
+
+BATCH EXECUTION:
+    # Run tool against multiple parameter sets concurrently
+    params = [SearchParams(query=q) for q in ["python", "rust", "go"]]
+    results = await search_tool.batch_run(params, BatchConfig(concurrency=3))
+    print(f"Success rate: {results.success_rate:.0%}")
 
 RELATED TOPICS:
     toolcase help result      Error handling with Result types
