@@ -18,6 +18,14 @@ from .errors import (
     classify_exception,
     format_validation_error,
 )
+from .factory import (
+    component_err,
+    exc_err,
+    make_trace,
+    tool_err,
+    trace_from_exception,
+    validation_err,
+)
 from .result import Err, Ok, Result, collect_results, sequence, traverse, try_fn
 from .tool import (
     ToolResult,
@@ -75,6 +83,8 @@ __all__ = [
     # Tool integration
     "ToolResult", "tool_result", "ok_result", "try_tool_operation", "try_tool_operation_async",
     "batch_results", "from_tool_error", "to_tool_error", "result_to_string", "string_to_result",
+    # Error factories (DRY error creation)
+    "tool_err", "component_err", "validation_err", "exc_err", "make_trace", "trace_from_exception",
     # Error context
     "ErrorContext", "ErrorTrace", "context", "trace", "trace_from_exc",
     # TypeAdapter validation utilities

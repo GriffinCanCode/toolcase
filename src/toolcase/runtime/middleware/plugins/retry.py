@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import stamina
 from pydantic import BaseModel
 
-from toolcase.foundation.errors import ErrorCode, ErrorTrace, JsonDict, ToolError, ToolException, classify_exception
+from toolcase.foundation.errors import ErrorCode, ErrorTrace, JsonDict, ToolError, ToolException, classify_exception, make_trace
 from toolcase.runtime.middleware import Context, Next
 
 if TYPE_CHECKING:
@@ -76,9 +76,9 @@ class RetryMiddleware:
     def _make_trace(self, exc: Exception, tool_name: str, attempt: int) -> ErrorTrace:
         """Create ErrorTrace from exception with retry context."""
         code = classify_exception(exc)
-        return ErrorTrace(
-            message=str(exc), error_code=code.value, recoverable=code in self.retryable_codes,
-        ).with_operation("middleware:retry", tool=tool_name, attempt=attempt + 1, max_attempts=self.max_attempts)
+        return make_trace(str(exc), code, recoverable=code in self.retryable_codes).with_operation(
+            "middleware:retry", tool=tool_name, attempt=attempt + 1, max_attempts=self.max_attempts
+        )
     
     async def __call__(
         self,

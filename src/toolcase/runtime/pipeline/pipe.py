@@ -18,7 +18,7 @@ from typing import Callable
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult, collect_results, format_validation_error, sequence
+from toolcase.foundation.errors import ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult, collect_results, component_err, format_validation_error, sequence, validation_err
 from toolcase.io.streaming import StreamChunk, StreamEvent, StreamEventKind, stream_error
 from toolcase.runtime.concurrency import Concurrency
 
@@ -171,17 +171,17 @@ class PipelineTool(BaseTool[PipelineParams]):
     
     async def _async_run_result(self, params: PipelineParams) -> ToolResult:
         """Execute with Result-based error handling."""
-        current_params, output, op = params.input, "", f"pipeline:{self._meta.name}"
+        current_params, output = params.input, ""
         for i, step in enumerate(self._steps):
             try: step_params = step.tool.params_schema(**current_params)
             except ValidationError as e:
-                return Err(ErrorTrace(message=format_validation_error(e, tool_name=step.tool.metadata.name), error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False).with_operation(op))
+                return validation_err(e, tool_name=step.tool.metadata.name)
             if (result := await step.execute(step_params)).is_err():
-                return result.map_err(lambda e: e.with_operation(op))
+                return result.map_err(lambda e: e.with_operation(f"pipeline:{self._meta.name}"))
             output = result.unwrap()
             try: current_params = step.prepare_next(output)
             except Exception as e:
-                return Err(ErrorTrace(message=f"Transform after step {i+1} failed: {e}", error_code=ErrorCode.PARSE_ERROR.value, recoverable=False).with_operation(op))
+                return component_err("pipeline", self._meta.name, f"Transform after step {i+1} failed: {e}", ErrorCode.PARSE_ERROR)
         return Ok(output)
     
     def __rshift__(self, other: BaseTool[BaseModel] | Step) -> PipelineTool:
@@ -341,18 +341,20 @@ class ParallelTool(BaseTool[ParallelParams]):
         async def run_tool(tool: BaseTool[BaseModel]) -> ToolResult:
             try: return await tool.arun_result(tool.params_schema(**params.input))
             except ValidationError as e:
-                return Err(ErrorTrace(message=format_validation_error(e, tool_name=tool.metadata.name), error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False))
+                return validation_err(e, tool_name=tool.metadata.name)
         
         results, name = await Concurrency.gather(*[run_tool(t) for t in self._tools]), self._meta.name
         def merge_safe(values: list[str]) -> ToolResult:
             try: return Ok(self._merge(values))
-            except Exception as e: return Err(ErrorTrace(message=f"Merge failed in {name}: {e}", error_code=ErrorCode.PARSE_ERROR.value, recoverable=False))
+            except Exception as e: return component_err("parallel", name, f"Merge failed: {e}", ErrorCode.PARSE_ERROR)
         
         if self._fail_fast:
-            return merge_safe((seq := sequence(list(results))).unwrap()) if seq.is_ok() else Err(seq.unwrap_err().with_operation(f"parallel:{name}"))
+            seq = sequence(list(results))
+            return merge_safe(seq.unwrap()) if seq.is_ok() else component_err("parallel", name, seq.unwrap_err().message, ErrorCode(seq.unwrap_err().error_code) if seq.unwrap_err().error_code else ErrorCode.UNKNOWN)
         if (collected := collect_results(list(results))).is_err():
             errs = collected.unwrap_err()
-            return Err(ErrorTrace(message=f"Multiple failures in {name}", contexts=[], error_code=errs[0].error_code if errs else None, recoverable=any(e.recoverable for e in errs)))
+            code = ErrorCode(errs[0].error_code) if errs and errs[0].error_code else ErrorCode.UNKNOWN
+            return component_err("parallel", name, f"Multiple failures", code, recoverable=any(e.recoverable for e in errs))
         return merge_safe(collected.unwrap())
 
 

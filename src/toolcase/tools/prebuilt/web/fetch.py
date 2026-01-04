@@ -14,13 +14,12 @@ Example:
 
 from __future__ import annotations
 
-import asyncio
 from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 from toolcase.foundation.core import ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult
+from toolcase.foundation.errors import ErrorCode, Ok, ToolResult, tool_err
 
 from ...core.base import ConfigurableTool, ToolConfig
 
@@ -54,10 +53,6 @@ class UrlFetchParams(BaseModel):
     headers: dict[str, str] | None = Field(default=None, description="Additional HTTP headers")
 
 
-def _err(msg: str, code: ErrorCode, op: str, recoverable: bool = False) -> ToolResult:
-    return Err(ErrorTrace(message=msg, error_code=code.value, recoverable=recoverable).with_operation(op))
-
-
 class UrlFetchTool(ConfigurableTool[UrlFetchParams, UrlFetchConfig]):
     """Fetch web page content with smart extraction.
     
@@ -82,7 +77,7 @@ class UrlFetchTool(ConfigurableTool[UrlFetchParams, UrlFetchConfig]):
         try:
             import httpx
         except ImportError:
-            return _err("httpx required: pip install httpx", ErrorCode.INVALID_PARAMS, "import")
+            return tool_err(self.metadata.name, "httpx required: pip install httpx", ErrorCode.INVALID_PARAMS)
         
         mode = params.mode or self.config.default_mode
         headers = {"User-Agent": self.config.user_agent, **(params.headers or {})}
@@ -96,18 +91,15 @@ class UrlFetchTool(ConfigurableTool[UrlFetchParams, UrlFetchConfig]):
                 resp.raise_for_status()
                 
                 if len(resp.content) > self.config.max_content_length:
-                    return _err(f"Content exceeds {self.config.max_content_length} bytes", ErrorCode.RATE_LIMITED, "fetch")
+                    return tool_err(self.metadata.name, f"Content exceeds {self.config.max_content_length} bytes", ErrorCode.RATE_LIMITED)
                 
-                html = resp.text
-                content = self._extract_content(html, mode)
-                
-                return Ok(self._format_result(str(resp.url), resp.status_code, mode, content))
+                return Ok(self._format_result(str(resp.url), resp.status_code, mode, self._extract_content(resp.text, mode)))
         except httpx.TimeoutException:
-            return _err(f"Request timed out after {self.config.timeout}s", ErrorCode.TIMEOUT, "fetch", recoverable=True)
+            return tool_err(self.metadata.name, f"Request timed out after {self.config.timeout}s", ErrorCode.TIMEOUT, recoverable=True)
         except httpx.HTTPStatusError as e:
-            return _err(f"HTTP {e.response.status_code}: {e.response.reason_phrase}", ErrorCode.EXTERNAL_SERVICE_ERROR, "fetch")
+            return tool_err(self.metadata.name, f"HTTP {e.response.status_code}: {e.response.reason_phrase}", ErrorCode.EXTERNAL_SERVICE_ERROR)
         except Exception as e:
-            return _err(f"Fetch failed: {e}", ErrorCode.EXTERNAL_SERVICE_ERROR, "fetch", recoverable=True)
+            return tool_err(self.metadata.name, f"Fetch failed: {e}", ErrorCode.EXTERNAL_SERVICE_ERROR, recoverable=True)
     
     def _format_result(self, url: str, status: int, mode: ContentMode, content: str) -> str:
         """Format result as readable string."""
@@ -117,53 +109,29 @@ class UrlFetchTool(ConfigurableTool[UrlFetchParams, UrlFetchConfig]):
     def _extract_content(self, html: str, mode: ContentMode) -> str:
         if mode == "html":
             return html
-        
         try:
             from bs4 import BeautifulSoup
         except ImportError:
-            return html if mode == "html" else f"[beautifulsoup4 required for {mode} mode]\n{html[:2000]}"
+            return f"[beautifulsoup4 required for {mode} mode]\n{html[:2000]}"
         
         soup = BeautifulSoup(html, "html.parser")
-        
-        # Remove script/style elements
-        for tag in soup(["script", "style", "noscript", "header", "footer", "nav"]):
-            tag.decompose()
-        
-        if mode == "text":
-            return soup.get_text(separator="\n", strip=True)
-        
-        # Markdown mode
-        return self._html_to_markdown(soup)
+        [tag.decompose() for tag in soup(["script", "style", "noscript", "header", "footer", "nav"])]
+        return soup.get_text(separator="\n", strip=True) if mode == "text" else self._html_to_markdown(soup)
     
     def _html_to_markdown(self, soup) -> str:
         """Convert BeautifulSoup element to markdown."""
-        lines = []
-        
-        # Title
-        if title := soup.find("title"):
-            lines.extend([f"# {title.get_text(strip=True)}", ""])
-        
-        # Process main content
+        lines = [f"# {title.get_text(strip=True)}", ""] if (title := soup.find("title")) else []
         main = soup.find("main") or soup.find("article") or soup.find("body") or soup
         
+        tag_fmt = {"h1": "# {}", "h2": "## {}", "h3": "### {}", "h4": "#### {}", "p": "{}", "li": "- {}", "pre": "```\n{}\n```", "code": "```\n{}\n```"}
         for elem in main.find_all(["h1", "h2", "h3", "h4", "p", "li", "a", "pre", "code"]):
-            text = elem.get_text(strip=True)
-            if not text:
+            if not (text := elem.get_text(strip=True)):
                 continue
-            
-            match elem.name:
-                case "h1": lines.append(f"# {text}")
-                case "h2": lines.append(f"## {text}")
-                case "h3": lines.append(f"### {text}")
-                case "h4": lines.append(f"#### {text}")
-                case "p": lines.append(text)
-                case "li": lines.append(f"- {text}")
-                case "a": 
-                    href = elem.get("href", "")
-                    if href and not href.startswith("#"):
-                        lines.append(f"[{text}]({href})")
-                case "pre" | "code": lines.append(f"```\n{text}\n```")
-        
+            if elem.name == "a":
+                if (href := elem.get("href", "")) and not href.startswith("#"):
+                    lines.append(f"[{text}]({href})")
+            elif fmt := tag_fmt.get(elem.name):
+                lines.append(fmt.format(text))
         return "\n\n".join(lines)
     
     async def _async_run(self, params: UrlFetchParams) -> str:

@@ -21,7 +21,7 @@ from urllib.parse import urljoin
 from pydantic import BaseModel, ConfigDict, Field
 
 from toolcase.foundation.core import ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult
+from toolcase.foundation.errors import ErrorCode, Ok, ToolResult, tool_err
 
 from ...core.base import ConfigurableTool, ToolConfig
 
@@ -47,10 +47,6 @@ class HtmlParseParams(BaseModel):
     extract: ExtractMode = Field(default="text", description="What to extract")
     selector: str | None = Field(default=None, description="CSS selector (required for 'selector' mode)")
     base_url: str | None = Field(default=None, description="Base URL for resolving relative links")
-
-
-def _err(msg: str, code: ErrorCode, op: str) -> ToolResult:
-    return Err(ErrorTrace(message=msg, error_code=code.value).with_operation(op))
 
 
 class HtmlParseTool(ConfigurableTool[HtmlParseParams, HtmlParseConfig]):
@@ -79,7 +75,7 @@ class HtmlParseTool(ConfigurableTool[HtmlParseParams, HtmlParseConfig]):
         try:
             from bs4 import BeautifulSoup
         except ImportError:
-            return _err("beautifulsoup4 required: pip install beautifulsoup4", ErrorCode.INVALID_PARAMS, "import")
+            return tool_err(self.metadata.name, "beautifulsoup4 required: pip install beautifulsoup4", ErrorCode.INVALID_PARAMS)
         
         soup = BeautifulSoup(params.html, "html.parser")
         
@@ -94,79 +90,48 @@ class HtmlParseTool(ConfigurableTool[HtmlParseParams, HtmlParseConfig]):
                 return Ok(self._format_metadata(self._extract_metadata(soup)))
             case "selector":
                 if not params.selector:
-                    return _err("selector required for 'selector' mode", ErrorCode.INVALID_PARAMS, "parse")
+                    return tool_err(self.metadata.name, "selector required for 'selector' mode", ErrorCode.INVALID_PARAMS)
                 return Ok(self._format_selector(self._extract_selector(soup, params.selector)))
     
     def _extract_text(self, soup) -> dict:
         # Remove noise
-        for tag in soup(["script", "style", "noscript"]):
-            tag.decompose()
-        
+        [tag.decompose() for tag in soup(["script", "style", "noscript"])]
         text = soup.get_text(separator="\n", strip=self.config.strip_whitespace)
         lines = [l.strip() for l in text.split("\n") if l.strip()] if self.config.strip_whitespace else text.split("\n")
-        
         return {"text": "\n".join(lines), "line_count": len(lines), "char_count": len(text)}
     
     def _extract_links(self, soup, base_url: str | None) -> dict:
-        links = []
-        for a in soup.find_all("a", href=True)[: self.config.max_links]:
-            href = a["href"]
-            if base_url:
-                href = urljoin(base_url, href)
-            
-            text = a.get_text(strip=True) or "[no text]"
-            links.append({"text": text, "href": href, "title": a.get("title")})
-        
-        # Categorize
-        internal = [l for l in links if not l["href"].startswith(("http://", "https://", "//"))]
-        external = [l for l in links if l["href"].startswith(("http://", "https://", "//"))]
-        
-        return {"links": links, "total": len(links), "internal": len(internal), "external": len(external)}
+        links = [{"text": a.get_text(strip=True) or "[no text]", 
+                  "href": urljoin(base_url, a["href"]) if base_url else a["href"], 
+                  "title": a.get("title")} 
+                 for a in soup.find_all("a", href=True)[:self.config.max_links]]
+        external_prefixes = ("http://", "https://", "//")
+        internal = sum(1 for l in links if not l["href"].startswith(external_prefixes))
+        return {"links": links, "total": len(links), "internal": internal, "external": len(links) - internal}
     
     def _extract_tables(self, soup) -> dict:
         tables = []
-        for table in soup.find_all("table")[: self.config.max_tables]:
-            rows = []
-            headers = []
-            
-            # Extract headers
-            if thead := table.find("thead"):
-                headers = [th.get_text(strip=True) for th in thead.find_all(["th", "td"])]
-            elif first_row := table.find("tr"):
-                if first_row.find("th"):
-                    headers = [th.get_text(strip=True) for th in first_row.find_all("th")]
-            
-            # Extract rows
-            for tr in table.find_all("tr"):
-                cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-                if cells and cells != headers:
-                    rows.append(dict(zip(headers, cells)) if headers else cells)
-            
+        for table in soup.find_all("table")[:self.config.max_tables]:
+            thead = table.find("thead")
+            fr = table.find("tr")
+            headers = ([th.get_text(strip=True) for th in thead.find_all(["th", "td"])] if thead
+                       else [th.get_text(strip=True) for th in fr.find_all("th")] if fr and fr.find("th") else [])
+            rows = [dict(zip(headers, cells)) if headers else cells
+                    for tr in table.find_all("tr")
+                    if (cells := [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]) and cells != headers]
             if rows:
                 tables.append({"headers": headers, "rows": rows, "row_count": len(rows)})
-        
         return {"tables": tables, "total": len(tables)}
     
     def _extract_metadata(self, soup) -> dict:
-        meta = {"title": None, "description": None, "og": {}, "twitter": {}, "meta_tags": []}
-        
-        if title := soup.find("title"):
-            meta["title"] = title.get_text(strip=True)
-        
+        meta = {"title": soup.find("title").get_text(strip=True) if soup.find("title") else None,
+                "description": None, "og": {}, "twitter": {}, "meta_tags": []}
         for tag in soup.find_all("meta"):
-            name = tag.get("name", "").lower()
-            prop = tag.get("property", "").lower()
-            content = tag.get("content", "")
-            
-            if name == "description":
-                meta["description"] = content
-            elif prop.startswith("og:"):
-                meta["og"][prop[3:]] = content
-            elif name.startswith("twitter:"):
-                meta["twitter"][name[8:]] = content
-            elif name or prop:
-                meta["meta_tags"].append({"name": name or prop, "content": content})
-        
+            name, prop, content = tag.get("name", "").lower(), tag.get("property", "").lower(), tag.get("content", "")
+            if name == "description": meta["description"] = content
+            elif prop.startswith("og:"): meta["og"][prop[3:]] = content
+            elif name.startswith("twitter:"): meta["twitter"][name[8:]] = content
+            elif name or prop: meta["meta_tags"].append({"name": name or prop, "content": content})
         return meta
     
     def _extract_selector(self, soup, selector: str) -> dict:
@@ -174,16 +139,8 @@ class HtmlParseTool(ConfigurableTool[HtmlParseParams, HtmlParseConfig]):
             elements = soup.select(selector)
         except Exception as e:
             return {"error": f"Invalid selector: {e}", "matches": []}
-        
-        matches = []
-        for el in elements[:50]:  # Limit results
-            matches.append({
-                "tag": el.name,
-                "text": el.get_text(strip=True),
-                "attrs": dict(el.attrs),
-                "html": str(el)[:500],
-            })
-        
+        matches = [{"tag": el.name, "text": el.get_text(strip=True), "attrs": dict(el.attrs), "html": str(el)[:500]}
+                   for el in elements[:50]]
         return {"selector": selector, "matches": matches, "total": len(elements)}
     
     # Format methods for string output
@@ -191,40 +148,30 @@ class HtmlParseTool(ConfigurableTool[HtmlParseParams, HtmlParseConfig]):
         return f"**Extracted Text** ({data['line_count']} lines, {data['char_count']} chars)\n\n{data['text']}"
     
     def _format_links(self, data: dict) -> str:
-        lines = [f"**Links:** {data['total']} total ({data['internal']} internal, {data['external']} external)\n"]
-        for i, link in enumerate(data["links"][:50], 1):
-            lines.append(f"{i}. [{link['text']}]({link['href']})")
-        return "\n".join(lines)
+        header = f"**Links:** {data['total']} total ({data['internal']} internal, {data['external']} external)\n"
+        return "\n".join([header] + [f"{i}. [{l['text']}]({l['href']})" for i, l in enumerate(data["links"][:50], 1)])
     
     def _format_tables(self, data: dict) -> str:
         if not data["tables"]:
             return "**Tables:** None found"
         lines = [f"**Tables:** {data['total']} found\n"]
-        for i, table in enumerate(data["tables"], 1):
-            lines.append(f"\n### Table {i} ({table['row_count']} rows)")
-            if table["headers"]:
-                lines.append(f"Headers: {', '.join(table['headers'])}")
-            for row in table["rows"][:5]:
-                lines.append(f"  - {row}")
+        for i, t in enumerate(data["tables"], 1):
+            lines.extend([f"\n### Table {i} ({t['row_count']} rows)"] + 
+                         ([f"Headers: {', '.join(t['headers'])}"] if t["headers"] else []) +
+                         [f"  - {row}" for row in t["rows"][:5]])
         return "\n".join(lines)
     
     def _format_metadata(self, data: dict) -> str:
         lines = ["**Page Metadata:**"]
-        if data["title"]:
-            lines.append(f"- Title: {data['title']}")
-        if data["description"]:
-            lines.append(f"- Description: {data['description']}")
-        if data["og"]:
-            lines.append(f"- OpenGraph: {data['og']}")
-        if data["twitter"]:
-            lines.append(f"- Twitter: {data['twitter']}")
+        if data["title"]: lines.append(f"- Title: {data['title']}")
+        if data["description"]: lines.append(f"- Description: {data['description']}")
+        if data["og"]: lines.append(f"- OpenGraph: {data['og']}")
+        if data["twitter"]: lines.append(f"- Twitter: {data['twitter']}")
         return "\n".join(lines)
     
     def _format_selector(self, data: dict) -> str:
-        lines = [f"**CSS Selector:** `{data['selector']}` - {data['total']} matches\n"]
-        for i, match in enumerate(data["matches"][:20], 1):
-            lines.append(f"{i}. <{match['tag']}> {match['text'][:100]}")
-        return "\n".join(lines)
+        header = f"**CSS Selector:** `{data['selector']}` - {data['total']} matches\n"
+        return "\n".join([header] + [f"{i}. <{m['tag']}> {m['text'][:100]}" for i, m in enumerate(data["matches"][:20], 1)])
     
     async def _async_run(self, params: HtmlParseParams) -> str:
         from toolcase.foundation.errors import result_to_string

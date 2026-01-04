@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, JsonMapping, Ok, ToolResult, format_validation_error
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, JsonMapping, Ok, ToolResult, component_err, validation_err
 from toolcase.runtime.concurrency import to_thread, checkpoint
 
 if TYPE_CHECKING:
@@ -219,10 +219,7 @@ class EscalationTool(BaseTool[EscalationParams]):
         try:
             tool_params = self._tool.params_schema(**params.input)
         except ValidationError as e:
-            return Err(ErrorTrace(
-                message=format_validation_error(e, tool_name=self._tool.metadata.name),
-                error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False,
-            ))
+            return validation_err(e, tool_name=self._tool.metadata.name)
         
         attempt, last_error = 0, None
         while True:
@@ -246,11 +243,8 @@ class EscalationTool(BaseTool[EscalationParams]):
         if (esc := await self._handler.escalate(request)).should_proceed:
             return Ok(esc.value or f"Approved by {esc.reviewer or 'human'}")
         
-        return Err(ErrorTrace(
-            message=f"Escalation {esc.status.value}: {esc.reason or 'no reason'}",
-            error_code=ErrorCode.PERMISSION_DENIED.value if esc.status == EscalationStatus.REJECTED else ErrorCode.TIMEOUT.value,
-            recoverable=False,
-        ).with_operation(f"escalation:{self._meta.name}"))
+        code = ErrorCode.PERMISSION_DENIED if esc.status == EscalationStatus.REJECTED else ErrorCode.TIMEOUT
+        return component_err("escalation", self._meta.name, f"Escalation {esc.status.value}: {esc.reason or 'no reason'}", code)
 
 
 def retry_with_escalation(

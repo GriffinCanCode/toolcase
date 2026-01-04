@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Callable, Protocol, TypeVar, runtime_checkable
 import msgpack
 import orjson
 
-from toolcase.foundation.errors import CacheStatsDict, Err, ErrorTrace, JsonDict, JsonMapping, Ok, Result
+from toolcase.foundation.errors import CacheStatsDict, Err, JsonDict, JsonMapping, Ok, Result, exc_err
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -329,12 +329,7 @@ def cache_through(
     try:
         result = operation()
     except Exception as e:
-        from toolcase.foundation.errors import classify_exception
-        return Err(ErrorTrace(
-            message=str(e),
-            error_code=classify_exception(e).value,
-            recoverable=True,
-        ).with_operation(f"cache_through:{tool_name}"))
+        return exc_err(e, f"cache_through:{tool_name}")
     if isinstance(result, str):
         cache.set(tool_name, params, result, ttl)
     return Ok(result)
@@ -368,12 +363,7 @@ async def cache_through_async(
     try:
         result = await operation() if asyncio.iscoroutinefunction(operation) else await asyncio.to_thread(operation)  # type: ignore[misc]
     except Exception as e:
-        from toolcase.foundation.errors import classify_exception
-        return Err(ErrorTrace(
-            message=str(e),
-            error_code=classify_exception(e).value,
-            recoverable=True,
-        ).with_operation(f"cache_through:{tool_name}"))
+        return exc_err(e, f"cache_through:{tool_name}")
     if isinstance(result, str):
         cache.set(tool_name, params, result, ttl)
     return Ok(result)

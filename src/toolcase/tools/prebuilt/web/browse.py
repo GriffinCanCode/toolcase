@@ -28,7 +28,7 @@ from typing import ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from toolcase.foundation.core import ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult
+from toolcase.foundation.errors import ErrorCode, Ok, ToolResult, tool_err
 
 from ...core.base import ConfigurableTool, ToolConfig
 from .backends import (
@@ -42,16 +42,7 @@ from .backends import (
 
 
 class WebSearchConfig(ToolConfig):
-    """Configuration for WebSearchTool.
-    
-    Attributes:
-        backend: Search backend to use (tavily, perplexity, duckduckgo)
-        max_results: Maximum results per search
-        include_answer: Request AI-generated answer by default
-        tavily_api_key: Explicit Tavily API key (or use TAVILY_API_KEY env var)
-        perplexity_api_key: Explicit Perplexity API key (or use PERPLEXITY_API_KEY env var)
-        perplexity_model: Perplexity model tier (sonar or sonar-pro)
-    """
+    """Configuration for WebSearchTool with backend, result limits, and API keys."""
     
     model_config = ConfigDict(
         frozen=True, extra="forbid", validate_default=True,
@@ -61,7 +52,6 @@ class WebSearchConfig(ToolConfig):
     backend: SearchBackendType = Field(default="duckduckgo", description="Search backend (tavily, perplexity, duckduckgo)")
     max_results: int = Field(default=10, ge=1, le=25, description="Max results per search")
     include_answer: bool = Field(default=False, description="Request AI-generated answer by default")
-    
     # Backend-specific config
     tavily_api_key: str | None = Field(default=None, description="Tavily API key (or set TAVILY_API_KEY)")
     perplexity_api_key: str | None = Field(default=None, description="Perplexity API key (or set PERPLEXITY_API_KEY)")
@@ -72,33 +62,19 @@ class WebSearchConfig(ToolConfig):
 
 
 class WebSearchParams(BaseModel):
-    """Parameters for web search.
-    
-    Attributes:
-        query: Search query string
-        max_results: Override max results for this search
-        include_answer: Request AI-generated answer (if backend supports it)
-    """
+    """Parameters for web search: query, max_results override, and answer toggle."""
     
     model_config = ConfigDict(
         str_strip_whitespace=True, extra="forbid",
         json_schema_extra={
             "title": "Web Search Parameters",
-            "examples": [
-                {"query": "latest developments in AI"},
-                {"query": "how does async/await work", "include_answer": True},
-            ],
+            "examples": [{"query": "latest developments in AI"}, {"query": "how does async/await work", "include_answer": True}],
         },
     )
     
     query: str = Field(..., min_length=1, max_length=500, description="Search query")
     max_results: int | None = Field(default=None, ge=1, le=25, description="Override max results")
     include_answer: bool | None = Field(default=None, description="Request AI answer (if supported)")
-
-
-def _err(msg: str, code: ErrorCode, op: str, recoverable: bool = False, **kw: str) -> ToolResult:
-    """Create error result."""
-    return Err(ErrorTrace(message=msg, error_code=code.value, recoverable=recoverable, **kw).with_operation(op))
 
 
 class WebSearchTool(ConfigurableTool[WebSearchParams, WebSearchConfig]):
@@ -142,45 +118,28 @@ class WebSearchTool(ConfigurableTool[WebSearchParams, WebSearchConfig]):
     def _get_backend(self) -> SearchBackend:
         """Get or create backend instance."""
         if self._backend is None:
-            match self.config.backend:
-                case "tavily":
-                    self._backend = TavilyBackend(api_key=self.config.tavily_api_key)
-                case "perplexity":
-                    self._backend = PerplexityBackend(
-                        api_key=self.config.perplexity_api_key,
-                        model=self.config.perplexity_model,
-                    )
-                case "duckduckgo":
-                    self._backend = DuckDuckGoBackend()
+            cfg = self.config
+            self._backend = {"tavily": lambda: TavilyBackend(api_key=cfg.tavily_api_key),
+                             "perplexity": lambda: PerplexityBackend(api_key=cfg.perplexity_api_key, model=cfg.perplexity_model),
+                             "duckduckgo": DuckDuckGoBackend}[cfg.backend]()
         return self._backend
     
     async def _async_run_result(self, params: WebSearchParams) -> ToolResult:
         """Execute search with Result-based error handling."""
         backend = self._get_backend()
-        
-        # Validate backend config
         if err := backend.validate_config():
-            return _err(err, ErrorCode.API_KEY_MISSING, "backend_validation")
+            return tool_err(self.metadata.name, err, ErrorCode.API_KEY_MISSING)
         
         max_results = params.max_results or self.config.max_results
-        include_answer = params.include_answer if params.include_answer is not None else self.config.include_answer
-        
-        # Skip answer request if backend doesn't support it
-        if include_answer and not backend.supports_answer:
-            include_answer = False
+        include_answer = (params.include_answer if params.include_answer is not None else self.config.include_answer) and backend.supports_answer
         
         try:
-            response = await backend.search(
-                query=params.query,
-                max_results=max_results,
-                include_answer=include_answer,
-                timeout=self.config.timeout,
-            )
+            response = await backend.search(query=params.query, max_results=max_results, include_answer=include_answer, timeout=self.config.timeout)
             return Ok(response.format(include_answer=include_answer))
         except ValueError as e:
-            return _err(str(e), ErrorCode.INVALID_PARAMS, "search")
+            return tool_err(self.metadata.name, str(e), ErrorCode.INVALID_PARAMS)
         except Exception as e:
-            return _err(f"Search failed: {e}", ErrorCode.EXTERNAL_SERVICE_ERROR, "search", recoverable=True)
+            return tool_err(self.metadata.name, f"Search failed: {e}", ErrorCode.EXTERNAL_SERVICE_ERROR, recoverable=True)
     
     async def _async_run(self, params: WebSearchParams) -> str:
         """Execute search."""
@@ -190,21 +149,12 @@ class WebSearchTool(ConfigurableTool[WebSearchParams, WebSearchConfig]):
 
 # Convenience factory functions
 def tavily_search(api_key: str | None = None) -> WebSearchTool:
-    """Create WebSearchTool with Tavily backend.
-    
-    Args:
-        api_key: Explicit API key (or set TAVILY_API_KEY env var)
-    """
+    """Create WebSearchTool with Tavily backend (or set TAVILY_API_KEY env var)."""
     return WebSearchTool(WebSearchConfig(backend="tavily", tavily_api_key=api_key))
 
 
 def perplexity_search(api_key: str | None = None, model: Literal["sonar", "sonar-pro"] = "sonar") -> WebSearchTool:
-    """Create WebSearchTool with Perplexity backend.
-    
-    Args:
-        api_key: Explicit API key (or set PERPLEXITY_API_KEY env var)
-        model: Model tier (sonar or sonar-pro)
-    """
+    """Create WebSearchTool with Perplexity backend (or set PERPLEXITY_API_KEY env var)."""
     return WebSearchTool(WebSearchConfig(backend="perplexity", perplexity_api_key=api_key, perplexity_model=model))
 
 

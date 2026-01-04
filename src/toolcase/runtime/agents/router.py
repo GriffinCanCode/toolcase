@@ -22,7 +22,7 @@ from typing import Callable
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, JsonMapping, ToolResult, format_validation_error
+from toolcase.foundation.errors import ErrorCode, JsonDict, JsonMapping, ToolResult, validation_err
 
 # Type alias for condition predicate (read-only input)
 Predicate = Callable[[JsonMapping], bool]
@@ -114,10 +114,7 @@ class RouterTool(BaseTool[RouterParams]):
         try:
             tool_params = tool.params_schema(**params.input)
         except ValidationError as e:
-            return Err(ErrorTrace(
-                message=format_validation_error(e, tool_name=tool.metadata.name),
-                error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False,
-            ).with_operation(f"router:{self._meta.name}"))
+            return validation_err(e, tool_name=tool.metadata.name)
         
         return (await tool.arun_result(tool_params)).map_err(
             lambda e: e.with_operation(f"router:{self._meta.name}", route=route_name)

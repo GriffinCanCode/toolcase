@@ -49,7 +49,7 @@ from pydantic import (
 )
 
 from toolcase.foundation.core import ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult
+from toolcase.foundation.errors import ErrorCode, JsonDict, Ok, ToolResult, tool_err
 
 from ..core.base import ConfigurableTool, ToolConfig
 
@@ -393,11 +393,6 @@ class HttpResponse(BaseModel):
 # HTTP Tool
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _err(msg: str, code: ErrorCode, op: str, recoverable: bool = False, **kw: str) -> ToolResult:
-    """Helper to create error results."""
-    return Err(ErrorTrace(message=msg, error_code=code.value, recoverable=recoverable, **kw).with_operation(op))
-
-
 class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
     """HTTP request tool with security controls and streaming support.
     
@@ -455,19 +450,19 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
     def _validate_url(self, url: str) -> ToolResult:
         """Validate URL against security constraints."""
         try: parsed = urlparse(url)
-        except Exception as e: return _err(f"Invalid URL: {e}", ErrorCode.INVALID_PARAMS, "url_validation")
-        if parsed.scheme not in ("http", "https"): return _err(f"Invalid scheme '{parsed.scheme}'. Use http or https.", ErrorCode.INVALID_PARAMS, "url_validation")
+        except Exception as e: return tool_err(self.metadata.name, f"Invalid URL: {e}", ErrorCode.INVALID_PARAMS)
+        if parsed.scheme not in ("http", "https"): return tool_err(self.metadata.name, f"Invalid scheme '{parsed.scheme}'. Use http or https.", ErrorCode.INVALID_PARAMS)
         host, host_lower = parsed.hostname or "", (parsed.hostname or "").lower()
         matches = lambda h, patterns: any(fnmatch.fnmatch(h, p) or fnmatch.fnmatch(host_lower, p.lower()) for p in patterns)
         # Check blocked hosts first (SSRF protection)
-        if matches(host, self.config.blocked_hosts): return _err(f"Host '{host}' is blocked for security reasons.", ErrorCode.PERMISSION_DENIED, "host_validation")
+        if matches(host, self.config.blocked_hosts): return tool_err(self.metadata.name, f"Host '{host}' is blocked for security reasons.", ErrorCode.PERMISSION_DENIED)
         # Check allowed hosts (if configured)
-        if self.config.allowed_hosts and not matches(host, self.config.allowed_hosts): return _err(f"Host '{host}' not in allowed list.", ErrorCode.PERMISSION_DENIED, "host_validation")
+        if self.config.allowed_hosts and not matches(host, self.config.allowed_hosts): return tool_err(self.metadata.name, f"Host '{host}' not in allowed list.", ErrorCode.PERMISSION_DENIED)
         return Ok(url)
     
     def _validate_method(self, method: HttpMethod) -> ToolResult:
         """Validate HTTP method against allowed list."""
-        return _err(f"Method '{method}' not allowed. Allowed: {', '.join(sorted(self.config.allowed_methods))}", ErrorCode.PERMISSION_DENIED, "method_validation") if method not in self.config.allowed_methods else Ok(method)
+        return tool_err(self.metadata.name, f"Method '{method}' not allowed. Allowed: {', '.join(sorted(self.config.allowed_methods))}", ErrorCode.PERMISSION_DENIED) if method not in self.config.allowed_methods else Ok(method)
     
     # ─────────────────────────────────────────────────────────────────
     # HTTP Client
@@ -504,12 +499,12 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
         try:
             response = await (await self._get_client()).request(method=params.method, url=params.url, headers=headers, params=params.query_params or None, content=content, timeout=params.timeout or self.config.default_timeout)
             elapsed_ms = (time.perf_counter() - start) * 1000
-            if (cl := int(response.headers.get("content-length", 0))) > max_size: return _err(f"Response too large: {cl} bytes (max: {max_size})", ErrorCode.INVALID_PARAMS, "response_size_check")  # Check response size
-            if len(body_bytes := await response.aread()) > max_size: return _err(f"Response body exceeded max size: {len(body_bytes)} bytes (max: {max_size})", ErrorCode.INVALID_PARAMS, "body_read")  # Read body with size limit
+            if (cl := int(response.headers.get("content-length", 0))) > max_size: return tool_err(self.metadata.name, f"Response too large: {cl} bytes (max: {max_size})", ErrorCode.INVALID_PARAMS)
+            if len(body_bytes := await response.aread()) > max_size: return tool_err(self.metadata.name, f"Response body exceeded max size: {len(body_bytes)} bytes (max: {max_size})", ErrorCode.INVALID_PARAMS)
             return Ok(HttpResponse(status_code=response.status_code, headers=dict(response.headers), body=body_bytes.decode("utf-8", errors="replace"), url=str(response.url), elapsed_ms=elapsed_ms).to_output())
-        except httpx.TimeoutException: return _err(f"Request timed out after {params.timeout or self.config.default_timeout}s", ErrorCode.TIMEOUT, "request", recoverable=True)
-        except httpx.NetworkError as e: return _err(f"Network error: {e}", ErrorCode.NETWORK_ERROR, "request", recoverable=True)
-        except Exception as e: return _err(f"Request failed: {e}", ErrorCode.EXTERNAL_SERVICE_ERROR, "request", recoverable=True, details=type(e).__name__)
+        except httpx.TimeoutException: return tool_err(self.metadata.name, f"Request timed out after {params.timeout or self.config.default_timeout}s", ErrorCode.TIMEOUT, recoverable=True)
+        except httpx.NetworkError as e: return tool_err(self.metadata.name, f"Network error: {e}", ErrorCode.NETWORK_ERROR, recoverable=True)
+        except Exception as e: return tool_err(self.metadata.name, f"Request failed: {e}", ErrorCode.EXTERNAL_SERVICE_ERROR, recoverable=True, details=type(e).__name__)
     
     async def _async_run(self, params: HttpParams) -> str:
         """Execute HTTP request."""

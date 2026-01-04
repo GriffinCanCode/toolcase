@@ -20,7 +20,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, JsonMapping, ToolResult, format_validation_error
+from toolcase.foundation.errors import ErrorCode, ErrorTrace, JsonDict, JsonMapping, ToolResult, component_err, make_trace, validation_err
 from toolcase.runtime.concurrency import CancelScope
 
 
@@ -105,20 +105,14 @@ class FallbackTool(BaseTool[FallbackParams]):
             try:
                 tool_params = tool.params_schema(**params.input)
             except ValidationError as e:
-                errors.append(ErrorTrace(
-                    message=format_validation_error(e, tool_name=tool.metadata.name),
-                    error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False,
-                ))
+                errors.append(make_trace(str(e), ErrorCode.INVALID_PARAMS))
                 continue
             
             async with CancelScope(timeout=self._timeout) as scope:
                 result = await tool.arun_result(tool_params)
             
             if scope.cancel_called:
-                last_error = ErrorTrace(
-                    message=f"Tool {tool.metadata.name} timed out after {self._timeout}s",
-                    error_code=ErrorCode.TIMEOUT.value, recoverable=True,
-                )
+                last_error = make_trace(f"Tool {tool.metadata.name} timed out after {self._timeout}s", ErrorCode.TIMEOUT, recoverable=True)
                 errors.append(last_error)
                 continue
             
@@ -131,11 +125,11 @@ class FallbackTool(BaseTool[FallbackParams]):
             if not self._should_fallback(trace):
                 return result.map_err(lambda e: e.with_operation(f"fallback:{self._meta.name}", tool=tool.metadata.name))
         
-        return Err(ErrorTrace(
-            message=f"All {len(self._tools)} fallback tools failed",
-            error_code=last_error.error_code if last_error else ErrorCode.UNKNOWN.value,
-            recoverable=False, details="\n".join(f"- {e.message}" for e in errors),
-        ).with_operation(f"fallback:{self._meta.name}"))
+        return component_err(
+            "fallback", self._meta.name, f"All {len(self._tools)} fallback tools failed",
+            ErrorCode(last_error.error_code) if last_error and last_error.error_code else ErrorCode.UNKNOWN,
+            details="\n".join(f"- {e.message}" for e in errors),
+        )
 
 
 def fallback(

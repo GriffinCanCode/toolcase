@@ -24,7 +24,7 @@ import asyncio
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, ToolResult, format_validation_error
+from toolcase.foundation.errors import ErrorCode, ErrorTrace, JsonDict, ToolResult, component_err, make_trace, validation_err
 from toolcase.runtime.concurrency import checkpoint
 
 
@@ -90,10 +90,7 @@ class RaceTool(BaseTool[RaceParams]):
             try:
                 tool_params = tool.params_schema(**input_dict)
             except ValidationError as e:
-                return idx, Err(ErrorTrace(
-                    message=format_validation_error(e, tool_name=tool.metadata.name),
-                    error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False,
-                ))
+                return idx, validation_err(e, tool_name=tool.metadata.name)
             return idx, await tool.arun_result(tool_params)
         
         tasks = [asyncio.create_task(run_tool(i, t)) for i, t in enumerate(self._tools)]
@@ -128,16 +125,18 @@ class RaceTool(BaseTool[RaceParams]):
         n = len(self._tools)
         
         if timed_out and not valid_errors:
-            trace = ErrorTrace(message=f"All {n} racing tools timed out", error_code=ErrorCode.TIMEOUT.value, recoverable=True)
+            trace = make_trace(f"All {n} racing tools timed out", ErrorCode.TIMEOUT, recoverable=True)
         elif not valid_errors:
-            trace = ErrorTrace(message=f"All {n} racing tools failed", error_code=ErrorCode.UNKNOWN.value, recoverable=True)
+            trace = make_trace(f"All {n} racing tools failed", ErrorCode.UNKNOWN, recoverable=True)
         else:
-            trace = ErrorTrace(
-                message=f"All {n} racing tools failed", error_code=valid_errors[0].error_code,
+            trace = ErrorTrace.model_construct(
+                message=f"All {n} racing tools failed",
+                contexts=(),
+                error_code=valid_errors[0].error_code,
                 recoverable=any(e.recoverable for e in valid_errors),
                 details="\n".join(f"- [{self._tools[i].metadata.name}] {e.message}" for i, e in enumerate(errors) if e),
             )
-        return Err(trace.with_operation(f"race:{self._meta.name}"))
+        return component_err("race", self._meta.name, trace.message, ErrorCode(trace.error_code) if trace.error_code else ErrorCode.UNKNOWN, recoverable=trace.recoverable, details=trace.details)
 
 
 def race(

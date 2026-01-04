@@ -22,7 +22,7 @@ from typing import Callable
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, JsonMapping, Ok, Result, ToolResult, format_validation_error
+from toolcase.foundation.errors import ErrorCode, JsonDict, JsonMapping, Ok, Result, ToolResult, component_err, validation_err
 
 
 # Type aliases for gate functions (read-only input views)
@@ -88,10 +88,8 @@ class GateTool(BaseTool[GateParams]):
         """Interpret check function output. Returns None to proceed, Err to block."""
         match check_output:
             case True: return None
-            case False:
-                return Err(ErrorTrace(message=self._block_msg, error_code=ErrorCode.PERMISSION_DENIED.value, recoverable=False).with_operation(f"gate:{self._meta.name}", phase=phase))
-            case str() as msg:
-                return Err(ErrorTrace(message=msg, error_code=ErrorCode.PERMISSION_DENIED.value, recoverable=False).with_operation(f"gate:{self._meta.name}", phase=phase))
+            case False: return component_err("gate", self._meta.name, self._block_msg, ErrorCode.PERMISSION_DENIED, phase=phase)
+            case str() as msg: return component_err("gate", self._meta.name, msg, ErrorCode.PERMISSION_DENIED, phase=phase)
             case Result() as r if r.is_err(): return r
             case _: return None
     
@@ -108,9 +106,7 @@ class GateTool(BaseTool[GateParams]):
             try:
                 pre_result = self._pre(input_dict)
             except Exception as e:
-                return Err(ErrorTrace(
-                    message=f"Pre-check failed: {e}", error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False,
-                ).with_operation(f"gate:{self._meta.name}", phase="pre"))
+                return component_err("gate", self._meta.name, f"Pre-check failed: {e}", ErrorCode.INVALID_PARAMS, phase="pre")
             if (blocked := self._check_result(pre_result, "pre")) is not None:
                 return blocked
         
@@ -119,18 +115,13 @@ class GateTool(BaseTool[GateParams]):
             try:
                 input_dict = self._transform(input_dict)
             except Exception as e:
-                return Err(ErrorTrace(
-                    message=f"Transform failed: {e}", error_code=ErrorCode.PARSE_ERROR.value, recoverable=False,
-                ).with_operation(f"gate:{self._meta.name}", phase="transform"))
+                return component_err("gate", self._meta.name, f"Transform failed: {e}", ErrorCode.PARSE_ERROR, phase="transform")
         
         # Build params for underlying tool
         try:
             tool_params = self._tool.params_schema(**input_dict)
         except ValidationError as e:
-            return Err(ErrorTrace(
-                message=format_validation_error(e, tool_name=self._tool.metadata.name),
-                error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False,
-            ))
+            return validation_err(e, tool_name=self._tool.metadata.name)
         
         # Execute tool
         if (result := await self._tool.arun_result(tool_params)).is_err():
@@ -143,9 +134,7 @@ class GateTool(BaseTool[GateParams]):
             try:
                 post_result = self._post(output)
             except Exception as e:
-                return Err(ErrorTrace(
-                    message=f"Post-check failed: {e}", error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False,
-                ).with_operation(f"gate:{self._meta.name}", phase="post"))
+                return component_err("gate", self._meta.name, f"Post-check failed: {e}", ErrorCode.INVALID_PARAMS, phase="post")
             
             if (blocked := self._check_result(post_result, "post")) is not None:
                 return blocked

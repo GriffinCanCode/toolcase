@@ -20,7 +20,7 @@ from typing import ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from toolcase.foundation.core import ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult
+from toolcase.foundation.errors import ErrorCode, Ok, ToolResult, tool_err
 
 from ...core.base import ConfigurableTool, ToolConfig
 
@@ -58,10 +58,6 @@ class RegexExtractParams(BaseModel):
     with_context: bool = Field(default=False, description="Include surrounding context for matches")
 
 
-def _err(msg: str, code: ErrorCode, op: str) -> ToolResult:
-    return Err(ErrorTrace(message=msg, error_code=code.value).with_operation(op))
-
-
 class RegexExtractTool(ConfigurableTool[RegexExtractParams, RegexExtractConfig]):
     """Extract patterns from text using regex or common patterns.
     
@@ -88,43 +84,28 @@ class RegexExtractTool(ConfigurableTool[RegexExtractParams, RegexExtractConfig])
     
     async def _async_run_result(self, params: RegexExtractParams) -> ToolResult:
         # Determine pattern
-        if params.pattern:
-            pattern = params.pattern
-        elif params.common_pattern:
-            pattern = COMMON_PATTERNS[params.common_pattern]
-        else:
-            return _err("Either 'pattern' or 'common_pattern' required", ErrorCode.INVALID_PARAMS, "extract")
+        if not (pattern := params.pattern or (COMMON_PATTERNS.get(params.common_pattern) if params.common_pattern else None)):
+            return tool_err(self.metadata.name, "Either 'pattern' or 'common_pattern' required", ErrorCode.INVALID_PARAMS)
         
         # Compile regex
         flags = 0 if (params.case_sensitive if params.case_sensitive is not None else self.config.case_sensitive) else re.IGNORECASE
         try:
             regex = re.compile(pattern, flags)
         except re.error as e:
-            return _err(f"Invalid regex: {e}", ErrorCode.INVALID_PARAMS, "compile")
+            return tool_err(self.metadata.name, f"Invalid regex: {e}", ErrorCode.INVALID_PARAMS)
         
         # Extract matches
         matches = []
-        for i, match in enumerate(regex.finditer(params.text)):
+        for i, m in enumerate(regex.finditer(params.text)):
             if i >= self.config.max_matches:
                 break
-            
-            result = {
-                "match": match.group(),
-                "start": match.start(),
-                "end": match.end(),
-            }
-            
-            # Include named/numbered groups if present
-            if match.groups():
-                result["groups"] = match.groups()
-            if match.groupdict():
-                result["named_groups"] = {k: v for k, v in match.groupdict().items() if v is not None}
-            
+            result = {"match": m.group(), "start": m.start(), "end": m.end()}
+            if m.groups():
+                result["groups"] = m.groups()
+            if named := {k: v for k, v in m.groupdict().items() if v is not None}:
+                result["named_groups"] = named
             if params.with_context:
-                ctx_start = max(0, match.start() - 50)
-                ctx_end = min(len(params.text), match.end() + 50)
-                result["context"] = params.text[ctx_start:ctx_end]
-            
+                result["context"] = params.text[max(0, m.start() - 50):min(len(params.text), m.end() + 50)]
             matches.append(result)
         
         # For JSON pattern, try to parse matches
@@ -143,12 +124,8 @@ class RegexExtractTool(ConfigurableTool[RegexExtractParams, RegexExtractConfig])
         header = f"**Regex Extract:** `{pattern_name or pattern}`\n_Found {len(matches)} matches ({unique} unique)_\n"
         if not matches:
             return f"{header}\nNo matches found."
-        lines = [header]
-        for i, m in enumerate(matches[:30], 1):
-            lines.append(f"{i}. `{m['match'][:100]}`")
-        if len(matches) > 30:
-            lines.append(f"... and {len(matches) - 30} more")
-        return "\n".join(lines)
+        lines = [header] + [f"{i}. `{m['match'][:100]}`" for i, m in enumerate(matches[:30], 1)]
+        return "\n".join(lines + ([f"... and {len(matches) - 30} more"] if len(matches) > 30 else []))
     
     async def _async_run(self, params: RegexExtractParams) -> str:
         from toolcase.foundation.errors import result_to_string
@@ -176,41 +153,32 @@ class JsonExtractTool(ConfigurableTool[BaseModel, ToolConfig]):
     
     async def _async_run_result(self, params: Params) -> ToolResult:
         # Find JSON in text
-        json_pattern = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}|\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\]")
-        matches = json_pattern.findall(params.text)
-        
-        parsed = []
-        for m in matches:
-            try:
-                data = json.loads(m)
-                parsed.append(data)
-            except json.JSONDecodeError:
-                continue
+        matches = re.findall(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}|\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\]", params.text)
+        parsed = [obj for m in matches if (obj := self._try_parse(m)) is not None]
         
         if not parsed:
-            return _err("No valid JSON found in text", ErrorCode.INVALID_PARAMS, "extract")
+            return tool_err(self.metadata.name, "No valid JSON found in text", ErrorCode.INVALID_PARAMS)
         
         result = parsed[0] if len(parsed) == 1 else parsed
-        
-        # Apply path query if provided
         if params.path:
             try:
                 result = self._query_path(result, params.path)
             except (KeyError, IndexError, TypeError) as e:
-                return _err(f"Path query failed: {e}", ErrorCode.INVALID_PARAMS, "query")
+                return tool_err(self.metadata.name, f"Path query failed: {e}", ErrorCode.INVALID_PARAMS)
         
         return Ok(f"**JSON Extract:** Found {len(parsed)} JSON object(s)\n\n```json\n{json.dumps(result, indent=2)[:2000]}\n```")
     
+    @staticmethod
+    def _try_parse(text: str):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
+    
     def _query_path(self, data, path: str):
         """Simple JSONPath-like query."""
-        parts = re.split(r"\.|\[|\]", path)
-        for part in parts:
-            if not part:
-                continue
-            if part.isdigit():
-                data = data[int(part)]
-            else:
-                data = data[part]
+        for part in (p for p in re.split(r"\.|\[|\]", path) if p):
+            data = data[int(part)] if part.isdigit() else data[part]
         return data
     
     async def _async_run(self, params: Params) -> str:

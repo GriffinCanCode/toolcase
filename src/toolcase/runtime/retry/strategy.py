@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import stamina
 from pydantic import BaseModel, Field, ValidationError
 
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, ToolResult, format_validation_error
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, ToolResult, component_err, make_trace, validation_err
 from toolcase.runtime.concurrency import CancelScope, checkpoint
 
 from .policy import DEFAULT_RETRYABLE, RetryPolicy
@@ -221,7 +221,7 @@ class ResilientTool:
         try:
             tool_params = self._tool.params_schema(**params.input)
         except ValidationError as e:
-            return Err(ErrorTrace(format_validation_error(e, tool_name=self._tool.metadata.name), ErrorCode.INVALID_PARAMS.value, False))
+            return validation_err(e, tool_name=self._tool.metadata.name)
         
         if (result := await self._tool.arun_result(tool_params)).is_ok():
             return result
@@ -300,7 +300,7 @@ class ResilientTool:
                 result = await tool.arun_result(tool_params)
             
             if scope.cancel_called:
-                last_error = ErrorTrace(f"Fallback {tool.metadata.name} timed out after {timeout}s", ErrorCode.TIMEOUT.value, True)
+                last_error = make_trace(f"Fallback {tool.metadata.name} timed out after {timeout}s", ErrorCode.TIMEOUT, recoverable=True)
                 continue
             if result.is_ok():
                 return result, last_error
@@ -325,8 +325,8 @@ class ResilientTool:
         esc = await handler.escalate(request)
         if esc.should_proceed:
             return Ok(esc.value or f"Approved by {esc.reviewer or 'human'}"), last_error
-        code = ErrorCode.PERMISSION_DENIED.value if esc.status == EscalationStatus.REJECTED else ErrorCode.TIMEOUT.value
-        return Err(ErrorTrace(f"Escalation {esc.status.value}: {esc.reason or 'no reason'}", code, False)), last_error
+        code = ErrorCode.PERMISSION_DENIED if esc.status == EscalationStatus.REJECTED else ErrorCode.TIMEOUT
+        return component_err("escalation", self._meta.name, f"Escalation {esc.status.value}: {esc.reason or 'no reason'}", code), last_error
     
     def __repr__(self) -> str:
         return f"ResilientTool({self._tool.metadata.name}, {self._strategy})"

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Callable, Generic, TypeVar
 from pydantic import BaseModel
 
 from toolcase.foundation.core import BaseTool
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult, classify_exception
+from toolcase.foundation.errors import ErrorCode, JsonDict, Ok, ToolResult, classify_exception, tool_err
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -77,7 +77,7 @@ class MockTool(Generic[T]):
     
     def _make_err(self, message: str, code: ErrorCode) -> ToolResult:
         """Create error result with trace."""
-        return Err(ErrorTrace(message=message, error_code=code.value, recoverable=True).with_operation(f"tool:{self._get_tool_name()}"))
+        return tool_err(self._get_tool_name(), message, code, recoverable=True)
     
     def _execute(self, params: JsonDict) -> ToolResult:
         exc: Exception | None = None
