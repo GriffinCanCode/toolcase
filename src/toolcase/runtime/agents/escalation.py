@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult
 from toolcase.runtime.concurrency import to_thread, checkpoint
 
 if TYPE_CHECKING:
@@ -78,11 +78,11 @@ class EscalationRequest:
     """
     
     tool_name: str
-    params: dict[str, object]
+    params: JsonDict
     error: ErrorTrace
     attempt: int
     timestamp: datetime = field(default_factory=datetime.utcnow)
-    metadata: dict[str, object] = field(default_factory=dict)
+    metadata: JsonDict = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -220,10 +220,14 @@ class CallbackEscalation:
 class EscalationParams(BaseModel):
     """Parameters for escalation tool execution."""
     
-    input: dict[str, object] = Field(
+    input: JsonDict = Field(
         default_factory=dict,
         description="Input parameters for the underlying tool",
     )
+
+
+# Rebuild model to resolve recursive JsonValue type
+EscalationParams.model_rebuild()
 
 
 class EscalationTool(BaseTool[EscalationParams]):

@@ -22,25 +22,29 @@ from typing import TYPE_CHECKING, Callable
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, Result, ToolResult
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, Result, ToolResult
 
 if TYPE_CHECKING:
     pass
 
 
 # Type aliases for gate functions
-PreCheck = Callable[[dict[str, object]], bool | str | ToolResult]
+PreCheck = Callable[[JsonDict], bool | str | ToolResult]
 PostCheck = Callable[[str], bool | str | ToolResult]
-ParamsTransform = Callable[[dict[str, object]], dict[str, object]]
+ParamsTransform = Callable[[JsonDict], JsonDict]
 
 
 class GateParams(BaseModel):
     """Parameters for gate execution."""
     
-    input: dict[str, object] = Field(
+    input: JsonDict = Field(
         default_factory=dict,
         description="Input parameters to validate and pass through",
     )
+
+
+# Rebuild model to resolve recursive JsonValue type
+GateParams.model_rebuild()
 
 
 class GateTool(BaseTool[GateParams]):

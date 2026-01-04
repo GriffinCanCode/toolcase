@@ -23,13 +23,13 @@ from typing import TYPE_CHECKING, Callable
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult
 
 if TYPE_CHECKING:
     pass
 
 # Type alias for condition predicate
-Predicate = Callable[[dict[str, object]], bool]
+Predicate = Callable[[JsonDict], bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +46,7 @@ class Route:
     tool: BaseTool[BaseModel]
     name: str = ""
     
-    def matches(self, input_dict: dict[str, object]) -> bool:
+    def matches(self, input_dict: JsonDict) -> bool:
         """Check if this route's condition matches the input."""
         try:
             return self.condition(input_dict)
@@ -57,10 +57,14 @@ class Route:
 class RouterParams(BaseModel):
     """Parameters for router execution."""
     
-    input: dict[str, object] = Field(
+    input: JsonDict = Field(
         default_factory=dict,
         description="Input parameters to route and pass to selected tool",
     )
+
+
+# Rebuild model to resolve recursive JsonValue type
+RouterParams.model_rebuild()
 
 
 class RouterTool(BaseTool[RouterParams]):
@@ -122,7 +126,7 @@ class RouterTool(BaseTool[RouterParams]):
     def default(self) -> BaseTool[BaseModel]:
         return self._default
     
-    def _select_tool(self, input_dict: dict[str, object]) -> tuple[BaseTool[BaseModel], str]:
+    def _select_tool(self, input_dict: JsonDict) -> tuple[BaseTool[BaseModel], str]:
         """Select tool based on input, returns (tool, route_name)."""
         for route in self._routes:
             if route.matches(input_dict):
@@ -208,7 +212,7 @@ def router(
             continue
         # Create predicate that checks for keyword in common fields
         def make_keyword_predicate(kw: str) -> Predicate:
-            def predicate(p: dict[str, object]) -> bool:
+            def predicate(p: JsonDict) -> bool:
                 # Check common field names
                 for key in ("query", "q", "input", "text", "content"):
                     val = p.get(key, "")

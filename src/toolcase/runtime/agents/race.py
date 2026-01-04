@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, ToolResult
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, ToolResult
 from toolcase.runtime.concurrency import CancelScope, checkpoint
 
 if TYPE_CHECKING:
@@ -35,10 +35,14 @@ if TYPE_CHECKING:
 class RaceParams(BaseModel):
     """Parameters for race execution."""
     
-    input: dict[str, object] = Field(
+    input: JsonDict = Field(
         default_factory=dict,
         description="Input parameters broadcasted to all racing tools",
     )
+
+
+# Rebuild model to resolve recursive JsonValue type
+RaceParams.model_rebuild()
 
 
 class RaceTool(BaseTool[RaceParams]):

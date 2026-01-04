@@ -18,7 +18,7 @@ CATEGORIES = {
     "Execution": ["middleware", "retry", "pipeline", "agents", "concurrency"],
     "Data Flow": ["cache", "streaming"],
     "Configuration": ["settings", "di"],
-    "Observability": ["tracing", "testing"],
+    "Observability": ["tracing", "logging", "testing"],
     "Integrations": ["formats", "http", "discovery"],
 }
 

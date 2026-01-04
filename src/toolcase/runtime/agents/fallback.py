@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, ToolResult
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, ToolResult
 from toolcase.runtime.concurrency import CancelScope
 
 if TYPE_CHECKING:
@@ -42,10 +42,14 @@ DEFAULT_FALLBACK_CODES: frozenset[ErrorCode] = frozenset({
 class FallbackParams(BaseModel):
     """Parameters for fallback execution."""
     
-    input: dict[str, object] = Field(
+    input: JsonDict = Field(
         default_factory=dict,
         description="Input parameters passed to each fallback tool",
     )
+
+
+# Rebuild model to resolve recursive JsonValue type
+FallbackParams.model_rebuild()
 
 
 class FallbackTool(BaseTool[FallbackParams]):

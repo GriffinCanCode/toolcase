@@ -220,14 +220,19 @@ from .runtime.pipeline import (
 
 # Runtime: Observability
 from .runtime.observability import (
+    BoundLogger,
     CorrelationMiddleware,
     Span,
     SpanKind,
     SpanStatus,
     Tracer,
     TracingMiddleware,
+    configure_logging,
     configure_tracing,
+    get_logger,
     get_tracer,
+    log_context,
+    timed,
     traced,
 )
 
@@ -331,6 +336,7 @@ __all__ = [
     "batch_results", "sequence", "traverse", "collect_results",
     # Observability
     "configure_tracing", "get_tracer", "traced",
+    "configure_logging", "get_logger", "log_context", "timed", "BoundLogger",
     "CorrelationMiddleware", "TracingMiddleware",
     "Span", "SpanKind", "SpanStatus", "Tracer",
     # Streaming (Result Streaming)

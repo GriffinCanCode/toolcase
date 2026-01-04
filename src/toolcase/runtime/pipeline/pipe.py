@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Callable, TypeVar
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult, collect_results, sequence
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult, collect_results, sequence
 from toolcase.io.streaming import StreamChunk, StreamEvent, StreamEventKind, stream_error
 from toolcase.runtime.concurrency import Concurrency
 
@@ -33,7 +33,7 @@ U = TypeVar("U", bound=BaseModel)
 # ═════════════════════════════════════════════════════════════════════════════
 
 # Transform: accumulated output → next tool's params dict
-Transform = Callable[[str], dict[str, object]]
+Transform = Callable[[str], JsonDict]
 
 # ChunkTransform: individual chunk → transformed chunk (in-flight)
 ChunkTransform = Callable[[str], str]
@@ -45,7 +45,7 @@ StreamTransform = Callable[[AsyncIterator[str]], AsyncIterator[str]]
 Merge = Callable[[list[str]], str]
 
 
-def identity_dict(s: str) -> dict[str, object]:
+def identity_dict(s: str) -> JsonDict:
     """Default transform: wrap result in 'input' key."""
     return {"input": s}
 
@@ -79,7 +79,7 @@ class Step:
         """Execute step and return Result."""
         return await self.tool.arun_result(params)
     
-    def prepare_next(self, output: str) -> dict[str, object]:
+    def prepare_next(self, output: str) -> JsonDict:
         """Transform output for next step's params."""
         return self.transform(output)
 
@@ -110,7 +110,7 @@ class StreamStep:
         """Execute and collect full result (fallback for non-streaming)."""
         return await self.tool.arun_result(params)
     
-    def prepare_next(self, accumulated: str) -> dict[str, object]:
+    def prepare_next(self, accumulated: str) -> JsonDict:
         """Transform accumulated output for next step's params."""
         return self.accumulate_transform(accumulated)
 
@@ -123,13 +123,18 @@ class StreamStep:
 class PipelineParams(BaseModel):
     """Parameters for pipeline execution - pass-through to first tool."""
     
-    input: dict[str, object] = Field(default_factory=dict, description="Input params for first tool")
+    input: JsonDict = Field(default_factory=dict, description="Input params for first tool")
 
 
 class ParallelParams(BaseModel):
     """Parameters for parallel execution - broadcast to all tools."""
     
-    input: dict[str, object] = Field(default_factory=dict, description="Input params for all tools")
+    input: JsonDict = Field(default_factory=dict, description="Input params for all tools")
+
+
+# Rebuild models to resolve recursive JsonValue type
+PipelineParams.model_rebuild()
+ParallelParams.model_rebuild()
 
 
 # ═════════════════════════════════════════════════════════════════════════════

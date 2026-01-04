@@ -52,6 +52,16 @@ from .exporter import (
     OTLPBridge,
     create_otlp_exporter,
 )
+from .logging import (
+    BoundLogger,
+    LogEntry,
+    LogRenderer,
+    LogScope,
+    configure_logging,
+    get_logger,
+    log_context,
+    timed,
+)
 from .middleware import CorrelationMiddleware, TracingMiddleware
 from .span import Span, SpanEvent, SpanKind, SpanStatus
 from .tracer import Tracer, configure_tracing, get_tracer, traced
@@ -71,6 +81,15 @@ __all__ = [
     "get_tracer",
     "configure_tracing",
     "traced",
+    # Logging
+    "BoundLogger",
+    "LogEntry",
+    "LogRenderer",
+    "LogScope",
+    "configure_logging",
+    "get_logger",
+    "log_context",
+    "timed",
     # Exporters
     "Exporter",
     "ConsoleExporter",
