@@ -19,10 +19,8 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    NonNegativeInt,
     TypeAdapter,
     computed_field,
-    field_validator,
     model_validator,
 )
 
@@ -42,8 +40,8 @@ class ProgressKind(StrEnum):
     ERROR = "error"             # Tool encountered an error
 
 
-# Pre-computed set of terminal kinds for fast lookup
-_TERMINAL_KINDS: frozenset[ProgressKind] = frozenset({ProgressKind.COMPLETE, ProgressKind.ERROR})
+# Pre-computed terminal kinds for fast lookup
+_TERMINAL_KINDS = frozenset((ProgressKind.COMPLETE, ProgressKind.ERROR))
 
 # Empty dict singleton to avoid allocations
 _EMPTY_DATA: JsonDict = {}
@@ -97,7 +95,7 @@ class ToolProgress(BaseModel):
     def _auto_calculate_percentage(self) -> "ToolProgress":
         """Auto-calculate percentage from step/total if not provided."""
         if self.percentage is None and self.step and self.total_steps:
-            object.__setattr__(self, "percentage", (self.step / self.total_steps) * 100)
+            object.__setattr__(self, "percentage", self.step / self.total_steps * 100)
         return self
     
     @computed_field
@@ -126,64 +124,32 @@ _ToolProgressAdapter: TypeAdapter[ToolProgress] = TypeAdapter(ToolProgress)
 
 
 # Factory functions using model_construct for hot paths (bypasses validation)
+_construct = ToolProgress.model_construct
+
+
 def status(message: str, **data: JsonValue) -> ToolProgress:
     """Create a status progress event (fast path)."""
-    return ToolProgress.model_construct(
-        kind=ProgressKind.STATUS,
-        message=message,
-        step=None,
-        total_steps=None,
-        percentage=None,
-        data=dict(data) if data else _EMPTY_DATA,
-    )
+    return _construct(kind=ProgressKind.STATUS, message=message, step=None, total_steps=None, percentage=None, data={**data} or _EMPTY_DATA)
 
 
 def step(message: str, current: int, total: int, **data: JsonValue) -> ToolProgress:
     """Create a step progress event with auto-calculated percentage (fast path)."""
-    return ToolProgress.model_construct(
-        kind=ProgressKind.STEP,
-        message=message,
-        step=current,
-        total_steps=total,
-        percentage=(current / total) * 100 if total > 0 else None,
-        data=dict(data) if data else _EMPTY_DATA,
-    )
+    return _construct(kind=ProgressKind.STEP, message=message, step=current, total_steps=total, percentage=current / total * 100 if total else None, data={**data} or _EMPTY_DATA)
 
 
 def source_found(message: str, source: Mapping[str, object]) -> ToolProgress:
     """Create a source-found progress event (fast path)."""
-    return ToolProgress.model_construct(
-        kind=ProgressKind.SOURCE_FOUND,
-        message=message,
-        step=None,
-        total_steps=None,
-        percentage=None,
-        data=dict(source),
-    )
+    return _construct(kind=ProgressKind.SOURCE_FOUND, message=message, step=None, total_steps=None, percentage=None, data=dict(source))
 
 
 def complete(result: str, message: str = "Complete") -> ToolProgress:
     """Create a completion progress event (fast path)."""
-    return ToolProgress.model_construct(
-        kind=ProgressKind.COMPLETE,
-        message=message,
-        step=None,
-        total_steps=None,
-        percentage=100.0,
-        data={"result": result},
-    )
+    return _construct(kind=ProgressKind.COMPLETE, message=message, step=None, total_steps=None, percentage=100.0, data={"result": result})
 
 
 def error(message: str, **data: JsonValue) -> ToolProgress:
     """Create an error progress event (fast path)."""
-    return ToolProgress.model_construct(
-        kind=ProgressKind.ERROR,
-        message=message,
-        step=None,
-        total_steps=None,
-        percentage=None,
-        data=dict(data) if data else _EMPTY_DATA,
-    )
+    return _construct(kind=ProgressKind.ERROR, message=message, step=None, total_steps=None, percentage=None, data={**data} or _EMPTY_DATA)
 
 
 def validate_progress(data: JsonDict) -> ToolProgress:

@@ -12,17 +12,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated, Generic, TypeVar
-
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    NonNegativeFloat,
-    NonNegativeInt,
-    PositiveInt,
-    computed_field,
-)
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from toolcase.foundation.errors import JsonDict, JsonValue
 
@@ -50,14 +40,7 @@ class StreamState(StrEnum):
 
 @dataclass(slots=True, frozen=True)
 class StreamChunk:
-    """A single chunk of streamed content.
-    
-    Attributes:
-        content: The actual string content
-        index: Chunk sequence number (0-indexed)
-        timestamp: When chunk was generated (epoch ms)
-        metadata: Optional per-chunk data (e.g., token counts)
-    """
+    """A single chunk of streamed content with sequence number and optional metadata."""
     content: str
     index: int = 0
     timestamp: float = field(default_factory=lambda: time.time() * 1000)
@@ -68,25 +51,13 @@ class StreamChunk:
     
     def to_dict(self) -> JsonDict:
         """Serialize for JSON transport."""
-        return {
-            "content": self.content,
-            "index": self.index,
-            "timestamp": self.timestamp,
-            **({"metadata": self.metadata} if self.metadata else {}),
-        }
+        d = {"content": self.content, "index": self.index, "timestamp": self.timestamp}
+        return d | {"metadata": self.metadata} if self.metadata else d
 
 
 @dataclass(slots=True)
 class StreamEvent:
-    """Wrapper event for stream lifecycle management.
-    
-    Attributes:
-        kind: Event type (start, chunk, complete, error)
-        tool_name: Name of the streaming tool
-        data: Event payload - StreamChunk for chunks, error info for errors
-        accumulated: Total content streamed so far (only on complete)
-        error: Error message if kind=error
-    """
+    """Wrapper event for stream lifecycle management (start, chunk, complete, error)."""
     kind: StreamEventKind
     tool_name: str
     data: StreamChunk | None = None
@@ -96,18 +67,12 @@ class StreamEvent:
     
     def to_dict(self) -> JsonDict:
         """Serialize for JSON transport."""
-        result: JsonDict = {
-            "kind": self.kind,
-            "tool": self.tool_name,
-            "timestamp": self.timestamp,
+        return {
+            "kind": self.kind, "tool": self.tool_name, "timestamp": self.timestamp,
+            **({"data": self.data.to_dict()} if self.data else {}),
+            **({"accumulated": self.accumulated} if self.accumulated is not None else {}),
+            **({"error": self.error} if self.error else {}),
         }
-        if self.data:
-            result["data"] = self.data.to_dict()
-        if self.accumulated is not None:
-            result["accumulated"] = self.accumulated
-        if self.error:
-            result["error"] = self.error
-        return result
     
     def to_json(self) -> str:
         """JSON string for transport."""
@@ -116,16 +81,7 @@ class StreamEvent:
 
 @dataclass(slots=True)
 class StreamResult(Generic[T]):
-    """Final result of a streaming operation.
-    
-    Captures the full accumulated output plus streaming metadata.
-    
-    Attributes:
-        value: Complete accumulated result
-        chunks: Number of chunks streamed
-        duration_ms: Total streaming duration
-        tool_name: Source tool
-    """
+    """Final result of a streaming operation with accumulated output and metadata."""
     value: T
     chunks: int
     duration_ms: float
@@ -144,20 +100,13 @@ def chunk(content: str, index: int = 0, **metadata: JsonValue) -> StreamChunk:
     """Create a content chunk."""
     return StreamChunk(content=content, index=index, metadata=dict(metadata))
 
-
 def stream_start(tool_name: str) -> StreamEvent:
     """Create a stream start event."""
     return StreamEvent(kind=StreamEventKind.START, tool_name=tool_name)
 
-
 def stream_complete(tool_name: str, accumulated: str) -> StreamEvent:
     """Create a stream complete event with final accumulated content."""
-    return StreamEvent(
-        kind=StreamEventKind.COMPLETE,
-        tool_name=tool_name,
-        accumulated=accumulated,
-    )
-
+    return StreamEvent(kind=StreamEventKind.COMPLETE, tool_name=tool_name, accumulated=accumulated)
 
 def stream_error(tool_name: str, error: str) -> StreamEvent:
     """Create a stream error event."""
@@ -168,33 +117,8 @@ def stream_error(tool_name: str, error: str) -> StreamEvent:
 # Stream Collector
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def collect_stream(
-    stream: AsyncIterator[str | StreamChunk],
-    tool_name: str,
-) -> StreamResult[str]:
-    """Collect all chunks from a stream into a final result.
-    
-    Useful for consuming a streaming tool when you want the full output.
-    
-    Args:
-        stream: Async iterator yielding strings or StreamChunks
-        tool_name: Name of the tool (for result metadata)
-    
-    Returns:
-        StreamResult with accumulated content and stats
-    """
-    start = time.time()
-    parts: list[str] = []
-    count = 0
-    
-    async for item in stream:
-        content = item.content if isinstance(item, StreamChunk) else item
-        parts.append(content)
-        count += 1
-    
-    return StreamResult(
-        value="".join(parts),
-        chunks=count,
-        duration_ms=(time.time() - start) * 1000,
-        tool_name=tool_name,
-    )
+async def collect_stream(stream: AsyncIterator[str | StreamChunk], tool_name: str) -> StreamResult[str]:
+    """Collect all chunks from a stream into a final result with accumulated content and stats."""
+    t0 = time.time()
+    parts = [item.content if isinstance(item, StreamChunk) else item async for item in stream]
+    return StreamResult(value="".join(parts), chunks=len(parts), duration_ms=(time.time() - t0) * 1000, tool_name=tool_name)
