@@ -10,14 +10,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import (
-    TYPE_CHECKING,
-    Callable,
-    Generic,
-    ParamSpec,
-    TypeVar,
-    overload,
-)
+from typing import TYPE_CHECKING, Callable, Generic, ParamSpec, TypeVar, overload
+
+from toolcase.foundation.errors import JsonDict, JsonValue
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -104,7 +99,7 @@ def fixture(
 class MockResponse:
     """Simulated HTTP response."""
     status: int = 200
-    data: str | dict[str, object] | None = None
+    data: str | JsonDict | None = None
     headers: dict[str, str] = field(default_factory=dict)
     delay_ms: float = 0
     
@@ -112,7 +107,7 @@ class MockResponse:
     def ok(self) -> bool:
         return 200 <= self.status < 300
     
-    def json(self) -> dict[str, object]:
+    def json(self) -> JsonDict:
         """Return data as dict (mimics httpx/requests API)."""
         if isinstance(self.data, dict):
             return self.data
@@ -150,12 +145,10 @@ class MockAPI:
         >>> assert api.request_count == 1
     """
     
-    responses: dict[str, str | dict[str, object] | MockResponse] = field(
-        default_factory=dict
-    )
+    responses: dict[str, str | JsonDict | MockResponse] = field(default_factory=dict)
     default_response: str = "mock response"
     default_status: int = 200
-    requests: list[dict[str, object]] = field(default_factory=list)
+    requests: list[JsonDict] = field(default_factory=list)
     
     @property
     def request_count(self) -> int:
@@ -163,17 +156,13 @@ class MockAPI:
         return len(self.requests)
     
     @property
-    def last_request(self) -> dict[str, object] | None:
+    def last_request(self) -> JsonDict | None:
         """Most recent request, if any."""
         return self.requests[-1] if self.requests else None
     
-    def _record(self, method: str, endpoint: str, **kwargs: object) -> None:
+    def _record(self, method: str, endpoint: str, **kwargs: JsonValue) -> None:
         """Record a request."""
-        self.requests.append({
-            "method": method,
-            "endpoint": endpoint,
-            **kwargs,
-        })
+        self.requests.append({"method": method, "endpoint": endpoint, **kwargs})
     
     def _get_response(self, endpoint: str) -> MockResponse:
         """Get response for endpoint."""
@@ -200,46 +189,28 @@ class MockAPI:
             import asyncio
             await asyncio.sleep(response.delay_ms / 1000)
     
-    async def get(
-        self,
-        endpoint: str,
-        **params: object,
-    ) -> MockResponse:
+    async def get(self, endpoint: str, **params: JsonValue) -> MockResponse:
         """Simulate GET request."""
-        self._record("GET", endpoint, params=params)
+        self._record("GET", endpoint, params=dict(params))
         response = self._get_response(endpoint)
         await self._delay(response)
         return response
     
-    async def post(
-        self,
-        endpoint: str,
-        data: dict[str, object] | None = None,
-        **kwargs: object,
-    ) -> MockResponse:
+    async def post(self, endpoint: str, data: JsonDict | None = None, **kwargs: JsonValue) -> MockResponse:
         """Simulate POST request."""
         self._record("POST", endpoint, data=data, **kwargs)
         response = self._get_response(endpoint)
         await self._delay(response)
         return response
     
-    async def put(
-        self,
-        endpoint: str,
-        data: dict[str, object] | None = None,
-        **kwargs: object,
-    ) -> MockResponse:
+    async def put(self, endpoint: str, data: JsonDict | None = None, **kwargs: JsonValue) -> MockResponse:
         """Simulate PUT request."""
         self._record("PUT", endpoint, data=data, **kwargs)
         response = self._get_response(endpoint)
         await self._delay(response)
         return response
     
-    async def delete(
-        self,
-        endpoint: str,
-        **kwargs: object,
-    ) -> MockResponse:
+    async def delete(self, endpoint: str, **kwargs: JsonValue) -> MockResponse:
         """Simulate DELETE request."""
         self._record("DELETE", endpoint, **kwargs)
         response = self._get_response(endpoint)
@@ -250,11 +221,7 @@ class MockAPI:
         """Clear recorded requests."""
         self.requests.clear()
     
-    def set_response(
-        self,
-        endpoint: str,
-        response: str | dict[str, object] | MockResponse,
-    ) -> None:
+    def set_response(self, endpoint: str, response: str | JsonDict | MockResponse) -> None:
         """Set response for endpoint."""
         self.responses[endpoint] = response
     

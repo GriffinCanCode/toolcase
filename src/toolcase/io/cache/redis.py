@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from toolcase.foundation.errors import JsonDict
+
 from .cache import DEFAULT_TTL, ToolCache
 
 if TYPE_CHECKING:
@@ -102,11 +104,11 @@ class RedisCache(ToolCache):
         client = redis.from_url(url, **redis_kwargs)  # type: ignore[union-attr]
         return cls(client, prefix, default_ttl)
     
-    def _key(self, tool_name: str, params: BaseModel | dict[str, object]) -> str:
+    def _key(self, tool_name: str, params: BaseModel | JsonDict) -> str:
         """Generate prefixed cache key."""
         return f"{self._prefix}{self.make_key(tool_name, params)}"
     
-    def get(self, tool_name: str, params: BaseModel | dict[str, object]) -> str | None:
+    def get(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
         key = self._key(tool_name, params)
         val = self._client.get(key)
         return val.decode() if val else None
@@ -114,14 +116,14 @@ class RedisCache(ToolCache):
     def set(
         self,
         tool_name: str,
-        params: BaseModel | dict[str, object],
+        params: BaseModel | JsonDict,
         value: str,
         ttl: float | None = None,
     ) -> None:
         key = self._key(tool_name, params)
         self._client.setex(key, int(ttl or self._default_ttl), value)
     
-    def invalidate(self, tool_name: str, params: BaseModel | dict[str, object]) -> bool:
+    def invalidate(self, tool_name: str, params: BaseModel | JsonDict) -> bool:
         return self._client.delete(self._key(tool_name, params)) > 0
     
     def invalidate_tool(self, tool_name: str) -> int:
@@ -189,23 +191,23 @@ class AsyncRedisCache(ToolCache):
         client = aioredis.from_url(url, **redis_kwargs)  # type: ignore[arg-type]
         return cls(client, prefix, default_ttl)
     
-    def _key(self, tool_name: str, params: BaseModel | dict[str, object]) -> str:
+    def _key(self, tool_name: str, params: BaseModel | JsonDict) -> str:
         return f"{self._prefix}{self.make_key(tool_name, params)}"
     
     # Sync methods delegate to async (required by ABC, but use async variants)
-    def get(self, tool_name: str, params: BaseModel | dict[str, object]) -> str | None:
+    def get(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
         raise NotImplementedError("Use aget() for async cache")
     
     def set(
         self,
         tool_name: str,
-        params: BaseModel | dict[str, object],
+        params: BaseModel | JsonDict,
         value: str,
         ttl: float | None = None,
     ) -> None:
         raise NotImplementedError("Use aset() for async cache")
     
-    def invalidate(self, tool_name: str, params: BaseModel | dict[str, object]) -> bool:
+    def invalidate(self, tool_name: str, params: BaseModel | JsonDict) -> bool:
         raise NotImplementedError("Use ainvalidate() for async cache")
     
     def invalidate_tool(self, tool_name: str) -> int:
@@ -215,7 +217,7 @@ class AsyncRedisCache(ToolCache):
         raise NotImplementedError("Use aclear() for async cache")
     
     # Async variants
-    async def aget(self, tool_name: str, params: BaseModel | dict[str, object]) -> str | None:
+    async def aget(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
         key = self._key(tool_name, params)
         val = await self._client.get(key)
         return val.decode() if val else None
@@ -223,14 +225,14 @@ class AsyncRedisCache(ToolCache):
     async def aset(
         self,
         tool_name: str,
-        params: BaseModel | dict[str, object],
+        params: BaseModel | JsonDict,
         value: str,
         ttl: float | None = None,
     ) -> None:
         key = self._key(tool_name, params)
         await self._client.setex(key, int(ttl or self._default_ttl), value)
     
-    async def ainvalidate(self, tool_name: str, params: BaseModel | dict[str, object]) -> bool:
+    async def ainvalidate(self, tool_name: str, params: BaseModel | JsonDict) -> bool:
         return await self._client.delete(self._key(tool_name, params)) > 0
     
     async def ainvalidate_tool(self, tool_name: str) -> int:

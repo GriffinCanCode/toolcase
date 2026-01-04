@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from toolcase.foundation.errors import ErrorCode, ToolException, classify_exception
+from toolcase.foundation.errors import ErrorCode, JsonDict, ToolException, classify_exception
 from toolcase.runtime.middleware.middleware import Context, Next
 from .span import SpanKind, SpanStatus
 from .tracer import Tracer
@@ -70,7 +70,7 @@ class TracingMiddleware:
         tracer = self._get_tracer()
         
         # Build span attributes
-        attrs: dict[str, object] = {
+        attrs: JsonDict = {
             "tool.name": tool.metadata.name,
             "tool.category": tool.metadata.category,
         }

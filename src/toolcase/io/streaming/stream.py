@@ -24,6 +24,8 @@ from pydantic import (
     computed_field,
 )
 
+from toolcase.foundation.errors import JsonDict, JsonValue
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
@@ -59,12 +61,12 @@ class StreamChunk:
     content: str
     index: int = 0
     timestamp: float = field(default_factory=lambda: time.time() * 1000)
-    metadata: dict[str, object] = field(default_factory=dict)
+    metadata: JsonDict = field(default_factory=dict)
     
     def __len__(self) -> int:
         return len(self.content)
     
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> JsonDict:
         """Serialize for JSON transport."""
         return {
             "content": self.content,
@@ -92,9 +94,9 @@ class StreamEvent:
     error: str | None = None
     timestamp: float = field(default_factory=lambda: time.time() * 1000)
     
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> JsonDict:
         """Serialize for JSON transport."""
-        result: dict[str, object] = {
+        result: JsonDict = {
             "kind": self.kind,
             "tool": self.tool_name,
             "timestamp": self.timestamp,
@@ -138,7 +140,7 @@ class StreamResult(Generic[T]):
 # Factory Functions
 # ─────────────────────────────────────────────────────────────────────────────
 
-def chunk(content: str, index: int = 0, **metadata: object) -> StreamChunk:
+def chunk(content: str, index: int = 0, **metadata: JsonValue) -> StreamChunk:
     """Create a content chunk."""
     return StreamChunk(content=content, index=index, metadata=dict(metadata))
 

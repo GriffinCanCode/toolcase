@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, TextIO, runtime_checkable
 
+from toolcase.foundation.errors import JsonDict
+
 if TYPE_CHECKING:
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.resources import Resource
@@ -368,7 +370,7 @@ class OTLPBridge:
             instrumentation_scope=scope,
         )
     
-    def _flatten_attrs(self, attrs: dict[str, object]) -> dict[str, str | int | float | bool]:
+    def _flatten_attrs(self, attrs: JsonDict) -> dict[str, str | int | float | bool]:
         """Flatten attributes to OTel-compatible primitive types."""
         result: dict[str, str | int | float | bool] = {}
         for k, v in attrs.items():
@@ -376,6 +378,8 @@ class OTLPBridge:
                 result[k] = v
             elif isinstance(v, dict):
                 result[k] = json.dumps(v)
+            elif v is None:
+                result[k] = ""
             else:
                 result[k] = str(v)
         return result

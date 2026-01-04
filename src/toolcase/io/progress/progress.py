@@ -26,6 +26,8 @@ from pydantic import (
     model_validator,
 )
 
+from toolcase.foundation.errors import JsonDict, JsonValue
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -44,7 +46,7 @@ class ProgressKind(StrEnum):
 _TERMINAL_KINDS: frozenset[ProgressKind] = frozenset({ProgressKind.COMPLETE, ProgressKind.ERROR})
 
 # Empty dict singleton to avoid allocations
-_EMPTY_DATA: dict[str, object] = {}
+_EMPTY_DATA: JsonDict = {}
 
 
 class ToolProgress(BaseModel):
@@ -89,7 +91,7 @@ class ToolProgress(BaseModel):
     step: Annotated[int, Field(ge=1)] | None = None
     total_steps: Annotated[int, Field(ge=1)] | None = None
     percentage: Annotated[float, Field(ge=0.0, le=100.0)] | None = None
-    data: dict[str, object] = Field(default_factory=dict, repr=False)
+    data: JsonDict = Field(default_factory=dict, repr=False)
     
     @model_validator(mode="after")
     def _auto_calculate_percentage(self) -> "ToolProgress":
@@ -114,7 +116,7 @@ class ToolProgress(BaseModel):
         """Hash for frozen model."""
         return hash((self.kind, self.message, self.step, self.percentage))
     
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> JsonDict:
         """Serialize for SSE/JSON transmission."""
         return self.model_dump(exclude_none=True, exclude_defaults=False)
 
@@ -124,7 +126,7 @@ _ToolProgressAdapter: TypeAdapter[ToolProgress] = TypeAdapter(ToolProgress)
 
 
 # Factory functions using model_construct for hot paths (bypasses validation)
-def status(message: str, **data: object) -> ToolProgress:
+def status(message: str, **data: JsonValue) -> ToolProgress:
     """Create a status progress event (fast path)."""
     return ToolProgress.model_construct(
         kind=ProgressKind.STATUS,
@@ -136,7 +138,7 @@ def status(message: str, **data: object) -> ToolProgress:
     )
 
 
-def step(message: str, current: int, total: int, **data: object) -> ToolProgress:
+def step(message: str, current: int, total: int, **data: JsonValue) -> ToolProgress:
     """Create a step progress event with auto-calculated percentage (fast path)."""
     return ToolProgress.model_construct(
         kind=ProgressKind.STEP,
@@ -172,7 +174,7 @@ def complete(result: str, message: str = "Complete") -> ToolProgress:
     )
 
 
-def error(message: str, **data: object) -> ToolProgress:
+def error(message: str, **data: JsonValue) -> ToolProgress:
     """Create an error progress event (fast path)."""
     return ToolProgress.model_construct(
         kind=ProgressKind.ERROR,
@@ -184,7 +186,7 @@ def error(message: str, **data: object) -> ToolProgress:
     )
 
 
-def validate_progress(data: dict[str, object]) -> ToolProgress:
+def validate_progress(data: JsonDict) -> ToolProgress:
     """Validate a dict as ToolProgress (use when validation is needed)."""
     return _ToolProgressAdapter.validate_python(data)
 

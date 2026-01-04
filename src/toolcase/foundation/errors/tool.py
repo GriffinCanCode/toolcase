@@ -9,7 +9,7 @@ from typing import TypeAlias
 
 from .errors import ErrorCode, ToolError, classify_exception
 from .result import Result, _ERR, _OK, collect_results, sequence
-from .types import ErrorContext, ErrorTrace, _EMPTY_CONTEXTS
+from .types import ErrorContext, ErrorTrace, JsonDict, _EMPTY_CONTEXTS
 from toolcase.runtime.concurrency import to_thread
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -19,7 +19,7 @@ from toolcase.runtime.concurrency import to_thread
 ToolResult: TypeAlias = Result[str, ErrorTrace]
 
 # Empty metadata dict singleton
-_EMPTY_META: dict[str, object] = {}
+_EMPTY_META: JsonDict = {}
 
 
 def _tool_ctx(tool_name: str) -> tuple[ErrorContext, ...]:

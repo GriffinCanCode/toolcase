@@ -30,7 +30,7 @@ JsonDict = dict[str, Any]
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Empty dict singleton to avoid allocation on each ErrorContext
-_EMPTY_META: dict[str, object] = {}
+_EMPTY_META: JsonDict = {}
 
 
 class ErrorContext(BaseModel):
@@ -56,7 +56,7 @@ class ErrorContext(BaseModel):
 
     operation: Annotated[str, Field(min_length=1)]
     location: str = Field(default="", repr=False)  # Often empty, hide from repr
-    metadata: dict[str, object] = Field(default_factory=dict, repr=False)
+    metadata: JsonDict = Field(default_factory=dict, repr=False)
 
     __slots__ = ()  # Signal to Pydantic to use slots-compatible mode
     
@@ -109,7 +109,7 @@ class ErrorTrace(BaseModel):
     details: str | None = Field(default=None, repr=False)  # Often verbose, hide from repr
     
     @field_serializer("contexts")
-    def _serialize_contexts(self, v: tuple[ErrorContext, ...]) -> list[dict[str, object]]:
+    def _serialize_contexts(self, v: tuple[ErrorContext, ...]) -> list[JsonDict]:
         """Serialize tuple of contexts to list of dicts."""
         return [ctx.model_dump() for ctx in v]
     
@@ -142,7 +142,7 @@ class ErrorTrace(BaseModel):
             details=self.details,
         )
 
-    def with_operation(self, operation: str, location: str = "", **metadata: object) -> "ErrorTrace":
+    def with_operation(self, operation: str, location: str = "", **metadata: JsonValue) -> "ErrorTrace":
         """Add context with operation info."""
         ctx = ErrorContext.model_construct(
             operation=operation,
@@ -206,7 +206,7 @@ _ErrorContextAdapter: TypeAdapter[ErrorContext] = TypeAdapter(ErrorContext)
 _ErrorTraceAdapter: TypeAdapter[ErrorTrace] = TypeAdapter(ErrorTrace)
 
 
-def context(operation: str, location: str = "", **metadata: object) -> ErrorContext:
+def context(operation: str, location: str = "", **metadata: JsonValue) -> ErrorContext:
     """Create ErrorContext concisely (bypasses validation for performance)."""
     return ErrorContext.model_construct(
         operation=operation,
@@ -239,11 +239,11 @@ def trace_from_exc(exc: Exception, *, operation: str = "", code: str | None = No
     return t.with_operation(operation) if operation else t
 
 
-def validate_context(data: dict[str, object]) -> ErrorContext:
+def validate_context(data: JsonDict) -> ErrorContext:
     """Validate dict as ErrorContext (use when validation is needed)."""
     return _ErrorContextAdapter.validate_python(data)
 
 
-def validate_trace(data: dict[str, object]) -> ErrorTrace:
+def validate_trace(data: JsonDict) -> ErrorTrace:
     """Validate dict as ErrorTrace (use when validation is needed)."""
     return _ErrorTraceAdapter.validate_python(data)

@@ -54,7 +54,7 @@ from pydantic import (
 )
 
 from toolcase.foundation.core import ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult
 
 from ..core.base import ConfigurableTool, ToolConfig
 
@@ -195,7 +195,7 @@ class CustomAuth(BaseModel):
         return hash((self.auth_type, tuple(sorted(self.headers.keys()))))
 
 
-def _auth_discriminator(v: dict[str, object] | BaseModel) -> str:
+def _auth_discriminator(v: JsonDict | BaseModel) -> str:
     """Discriminator function for auth strategy union."""
     if isinstance(v, dict):
         return str(v.get("auth_type", "none"))
@@ -391,7 +391,7 @@ class HttpParams(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict, description="Additional headers", repr=False)
     query_params: dict[str, str] = Field(default_factory=dict, description="Query parameters", repr=False)
     body: str | None = Field(default=None, description="Request body (string)", repr=False)
-    json_body: dict[str, object] | list[object] | None = Field(
+    json_body: JsonDict | list[object] | None = Field(
         default=None, description="JSON body (auto-serialized)", repr=False
     )
     timeout: Annotated[float, Field(ge=0.1, le=300.0)] | None = Field(

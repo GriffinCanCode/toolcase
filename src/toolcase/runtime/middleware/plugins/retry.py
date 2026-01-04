@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from toolcase.foundation.errors import ErrorCode, ErrorTrace, ToolError, ToolException, classify_exception
+from toolcase.foundation.errors import ErrorCode, ErrorTrace, JsonDict, ToolError, ToolException, classify_exception
 from toolcase.runtime.concurrency import checkpoint
 from ...retry import Backoff, ExponentialBackoff
 from toolcase.runtime.middleware import Context, Next
@@ -89,7 +89,7 @@ class RetryMiddleware:
         next: Next,
     ) -> str:
         last_exc: Exception | None = None
-        retry_history: list[dict[str, object]] = []
+        retry_history: list[JsonDict] = []
         
         for attempt in range(self.max_attempts):
             try:

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Callable
 
 from pydantic import BaseModel, ValidationError
 
-from toolcase.foundation.errors import ErrorCode, ToolError, ToolException
+from toolcase.foundation.errors import ErrorCode, JsonDict, JsonValue, ToolError, ToolException
 
 if TYPE_CHECKING:
     from toolcase.foundation.core import BaseTool
@@ -66,7 +66,7 @@ def _extract_annotations(schema: type[BaseModel]) -> dict[str, type]:
     }
 
 
-def get_tool_schema(tool: BaseTool[BaseModel]) -> dict[str, object]:
+def get_tool_schema(tool: BaseTool[BaseModel]) -> JsonDict:
     """Extract JSON schema from tool's params for MCP registration.
     
     Returns:
@@ -80,7 +80,7 @@ def get_tool_schema(tool: BaseTool[BaseModel]) -> dict[str, object]:
     return schema
 
 
-def get_tool_properties(tool: BaseTool[BaseModel]) -> dict[str, dict[str, object]]:
+def get_tool_properties(tool: BaseTool[BaseModel]) -> dict[str, JsonDict]:
     """Extract cleaned property definitions for MCP."""
     schema = tool.params_schema.model_json_schema()
     properties = schema.get("properties", {})

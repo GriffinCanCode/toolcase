@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from toolcase.foundation.errors import ErrorCode, ErrorTrace, ToolError, ToolException, classify_exception
+from toolcase.foundation.errors import ErrorCode, ErrorTrace, JsonDict, ToolError, ToolException, classify_exception
 from toolcase.runtime.middleware import Context, Next
 
 if TYPE_CHECKING:
@@ -217,7 +217,7 @@ class CircuitBreakerMiddleware:
         else:
             self._circuits.clear()
     
-    def stats(self) -> dict[str, dict[str, object]]:
+    def stats(self) -> dict[str, JsonDict]:
         """Get statistics for all circuits (for monitoring)."""
         return {
             key: {

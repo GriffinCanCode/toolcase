@@ -7,8 +7,9 @@ streaming results to frontends via different protocols.
 from __future__ import annotations
 
 import json
-from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+from toolcase.foundation.errors import JsonDict, JsonValue
 
 from .stream import StreamChunk, StreamEvent, StreamEventKind
 
@@ -109,9 +110,9 @@ class WebSocketAdapter:
         )
         return event.to_json()
     
-    def format_message(self, tool_name: str, kind: StreamEventKind, **kwargs: object) -> str:
+    def format_message(self, tool_name: str, kind: StreamEventKind, **kwargs: JsonValue) -> str:
         """Create a formatted WebSocket message."""
-        msg: dict[str, object] = {"kind": kind, "tool": tool_name, **kwargs}
+        msg: JsonDict = {"kind": kind.value, "tool": tool_name, **kwargs}
         return json.dumps(msg)
 
 

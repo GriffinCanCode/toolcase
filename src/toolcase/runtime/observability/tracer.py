@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from functools import wraps
 from typing import TYPE_CHECKING, Callable, ParamSpec, TypeVar
 
+from toolcase.foundation.errors import JsonDict
+
 from .context import SpanContext, TraceContext, trace_context
 from .exporter import ConsoleExporter, Exporter, NoOpExporter
 from .span import Span, SpanKind, SpanStatus
@@ -70,7 +72,7 @@ class Tracer:
         self,
         name: str,
         kind: SpanKind = SpanKind.INTERNAL,
-        attributes: dict[str, object] | None = None,
+        attributes: JsonDict | None = None,
     ) -> SpanContextManager:
         """Create a span context manager.
         
@@ -86,7 +88,7 @@ class Tracer:
         self,
         name: str,
         kind: SpanKind = SpanKind.INTERNAL,
-        attributes: dict[str, object] | None = None,
+        attributes: JsonDict | None = None,
     ) -> Span:
         """Start a span manually (caller must end it).
         
@@ -139,7 +141,7 @@ class SpanContextManager:
     tracer: Tracer
     name: str
     kind: SpanKind
-    attributes: dict[str, object]
+    attributes: JsonDict
     _span: Span | None = None
     
     def __enter__(self) -> Span:
@@ -203,7 +205,7 @@ def traced(
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
             tracer = Tracer.current()
             
-            attrs: dict[str, object] = {"function": func.__name__}
+            attrs: JsonDict = {"function": func.__name__}
             if capture_args and kwargs:
                 attrs["args"] = {k: _safe_repr(v) for k, v in kwargs.items()}
             
@@ -217,7 +219,7 @@ def traced(
         async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
             tracer = Tracer.current()
             
-            attrs: dict[str, object] = {"function": func.__name__}
+            attrs: JsonDict = {"function": func.__name__}
             if capture_args and kwargs:
                 attrs["args"] = {k: _safe_repr(v) for k, v in kwargs.items()}
             

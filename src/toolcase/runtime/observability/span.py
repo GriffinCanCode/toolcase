@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from toolcase.foundation.errors import ErrorCode, ErrorTrace
+from toolcase.foundation.errors import ErrorCode, ErrorTrace, JsonDict, JsonValue
 
 if TYPE_CHECKING:
     from .context import SpanContext
@@ -43,7 +43,7 @@ class SpanEvent:
     
     name: str
     timestamp: float = field(default_factory=time.time)
-    attributes: dict[str, object] = field(default_factory=dict)
+    attributes: JsonDict = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -77,7 +77,7 @@ class Span:
     kind: SpanKind = SpanKind.INTERNAL
     start_time: float = field(default_factory=time.time)
     end_time: float | None = None
-    attributes: dict[str, object] = field(default_factory=dict)
+    attributes: JsonDict = field(default_factory=dict)
     events: list[SpanEvent] = field(default_factory=list)
     status: SpanStatus = SpanStatus.UNSET
     error: str | None = None
@@ -86,7 +86,7 @@ class Span:
     # Tool-specific fields (AI observability)
     tool_name: str | None = None
     tool_category: str | None = None
-    params: dict[str, object] | None = None
+    params: JsonDict | None = None
     result_preview: str | None = None  # Truncated result for debugging
     
     @property
@@ -101,17 +101,17 @@ class Span:
         """Whether span is still running."""
         return self.end_time is None
     
-    def set_attribute(self, key: str, value: object) -> Span:
+    def set_attribute(self, key: str, value: JsonValue) -> Span:
         """Set attribute, returns self for chaining."""
         self.attributes[key] = value
         return self
     
-    def set_attributes(self, attrs: dict[str, object]) -> Span:
+    def set_attributes(self, attrs: JsonDict) -> Span:
         """Set multiple attributes."""
         self.attributes.update(attrs)
         return self
     
-    def add_event(self, name: str, attributes: dict[str, object] | None = None) -> Span:
+    def add_event(self, name: str, attributes: JsonDict | None = None) -> Span:
         """Add timestamped event to span."""
         self.events.append(SpanEvent(name=name, attributes=attributes or {}))
         return self
@@ -167,7 +167,7 @@ class Span:
         self,
         tool_name: str,
         category: str,
-        params: dict[str, object] | None = None,
+        params: JsonDict | None = None,
     ) -> Span:
         """Set tool-specific context for AI observability."""
         self.tool_name = tool_name
@@ -203,9 +203,9 @@ class Span:
                 self.status = SpanStatus.ERROR
         return self
     
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> JsonDict:
         """Serialize span for export."""
-        result: dict[str, object] = {
+        result: JsonDict = {
             "name": self.name,
             "trace_id": self.context.trace_id,
             "span_id": self.context.span_id,

@@ -15,8 +15,7 @@ from typing import TYPE_CHECKING, Callable, Generic, TypeVar
 from pydantic import BaseModel
 
 from toolcase.foundation.core import BaseTool
-from toolcase.foundation.errors import ErrorCode, classify_exception
-from toolcase.foundation.errors import Err, ErrorTrace, Ok, ToolResult
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult, classify_exception
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -27,7 +26,7 @@ T = TypeVar("T", bound=BaseTool[BaseModel])
 @dataclass(slots=True)
 class Invocation:
     """Record of a single tool invocation."""
-    params: dict[str, object]
+    params: JsonDict
     result: ToolResult
     exception: Exception | None = None
 
@@ -39,7 +38,7 @@ class MockTool(Generic[T]):
     invocations: list[Invocation] = field(default_factory=list)
     return_value: str | None = None
     raises: type[Exception] | Exception | None = None
-    side_effect: Callable[[dict[str, object]], str] | None = None
+    side_effect: Callable[[JsonDict], str] | None = None
     error_code: ErrorCode | None = None
     
     @property
@@ -81,7 +80,7 @@ class MockTool(Generic[T]):
             return meta.name if meta else 'mock_tool'
         return self.original.metadata.name
     
-    def _execute(self, params: dict[str, object]) -> ToolResult:
+    def _execute(self, params: JsonDict) -> ToolResult:
         result: ToolResult
         exc: Exception | None = None
         tool_name = self._get_tool_name()
@@ -127,7 +126,7 @@ def mock_tool(
     *,
     return_value: str | None = None,
     raises: type[Exception] | Exception | None = None,
-    side_effect: Callable[[dict[str, object]], str] | None = None,
+    side_effect: Callable[[JsonDict], str] | None = None,
     error_code: ErrorCode | None = None,
 ) -> Generator[MockTool[T], None, None]:
     """Context manager for mocking tool behavior.

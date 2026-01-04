@@ -214,10 +214,12 @@ async def _base_stream(
     """
     from typing import cast as typing_cast
     
+    from toolcase.foundation.errors import JsonDict
+    
     # Set injected dependencies from context if present
     injected = ctx.get("injected")
     if injected and isinstance(injected, dict):
-        set_injected_deps(typing_cast("dict[str, object]", injected))
+        set_injected_deps(typing_cast("JsonDict", injected))
     
     try:
         index = 0

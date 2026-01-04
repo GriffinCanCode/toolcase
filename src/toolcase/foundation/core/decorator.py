@@ -57,7 +57,7 @@ from toolcase.runtime.concurrency import to_thread
 from toolcase.io.cache import DEFAULT_TTL
 from toolcase.foundation.errors import ToolError, ToolException, ToolResult, classify_exception, ErrorTrace, Result
 from toolcase.foundation.errors.result import _ERR, _OK
-from toolcase.foundation.errors.types import _EMPTY_CONTEXTS, ErrorContext
+from toolcase.foundation.errors.types import _EMPTY_CONTEXTS, ErrorContext, JsonDict
 from .base import BaseTool, ToolMetadata
 
 if TYPE_CHECKING:
@@ -69,10 +69,10 @@ P = ParamSpec("P")
 T = TypeVar("T")
 
 # Context variable for passing injected dependencies
-_injected_deps: ContextVar[dict[str, object]] = ContextVar("injected_deps", default={})
+_injected_deps: ContextVar[JsonDict] = ContextVar("injected_deps", default={})
 
 
-def set_injected_deps(deps: dict[str, object]) -> None:
+def set_injected_deps(deps: JsonDict) -> None:
     """Set dependencies for the current execution context.
     
     Called by registry before tool execution to provide resolved dependencies.

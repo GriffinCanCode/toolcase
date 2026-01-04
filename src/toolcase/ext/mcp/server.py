@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ValidationError
 
-from toolcase.foundation.errors import ErrorCode, ToolError, ToolException
+from toolcase.foundation.errors import ErrorCode, JsonDict, JsonValue, ToolError, ToolException
 
 if TYPE_CHECKING:
     from toolcase.foundation.core import BaseTool
@@ -69,7 +69,7 @@ class ToolServer(ABC):
         """Start the server (blocking)."""
         ...
     
-    def list_tools(self) -> list[dict[str, object]]:
+    def list_tools(self) -> list[JsonDict]:
         """List all available tools with schemas."""
         from .bridge import get_required_params, get_tool_properties
         
@@ -88,7 +88,7 @@ class ToolServer(ABC):
             if tool.metadata.enabled
         ]
     
-    async def invoke(self, tool_name: str, params: dict[str, object]) -> str:
+    async def invoke(self, tool_name: str, params: JsonDict) -> str:
         """Invoke a tool by name with parameters.
         
         Returns structured error string on failure instead of raising.

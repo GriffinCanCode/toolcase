@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Callable, Protocol, TypeVar, cast, overload, r
 from pydantic import BaseModel
 
 from toolcase.foundation.core.decorator import clear_injected_deps, set_injected_deps
-from toolcase.foundation.errors import ToolError, ToolException
+from toolcase.foundation.errors import JsonDict, ToolError, ToolException
 
 if TYPE_CHECKING:
     from typing import Any
@@ -124,7 +124,7 @@ def compose(middleware: Sequence[Middleware]) -> Next:
             # Cast required: injected deps can be any object, not just ContextValue
             injected = ctx.get("injected")
             if injected and isinstance(injected, dict):
-                set_injected_deps(cast("dict[str, object]", injected))
+                set_injected_deps(cast("JsonDict", injected))
             try:
                 return await tool.arun(params)
             finally:
