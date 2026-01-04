@@ -10,9 +10,9 @@ from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
-from ..core import BaseTool, ToolMetadata
-from ..errors import Ok, ToolResult
-from ..registry import get_registry
+from toolcase.foundation.core import BaseTool, ToolMetadata
+from toolcase.foundation.errors import Ok, ToolResult
+from toolcase.foundation.registry import get_registry
 
 
 class DiscoveryParams(BaseModel):
@@ -68,7 +68,7 @@ class DiscoveryTool(BaseTool[DiscoveryParams]):
     
     def _run(self, params: DiscoveryParams) -> str:
         """String-based fallback."""
-        from ..errors import result_to_string
+        from toolcase.foundation.errors import result_to_string
         return result_to_string(self._run_result(params), self.metadata.name)
     
     def _format_brief(self, tools: list[ToolMetadata], category: str | None) -> str:

@@ -32,14 +32,29 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
-from typing import Annotated, AsyncIterator, ClassVar, Literal, Union
+from typing import Annotated, AsyncIterator, ClassVar, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Discriminator, Field, Tag, field_validator
+from pydantic import (
+    BaseModel,
+    ByteSize,
+    ConfigDict,
+    Discriminator,
+    Field,
+    HttpUrl,
+    PositiveFloat,
+    PositiveInt,
+    SecretStr,
+    Tag,
+    computed_field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
-from ..core import ToolMetadata
-from ..errors import ErrorCode
-from ..errors import Err, ErrorTrace, Ok, ToolResult
+from toolcase.foundation.core import ToolMetadata
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult
+
 from .base import ConfigurableTool, ToolConfig
 
 # Type alias for HTTP methods
@@ -54,6 +69,7 @@ ALL_METHODS: frozenset[HttpMethod] = frozenset(["GET", "POST", "PUT", "DELETE", 
 class NoAuth(BaseModel):
     """No authentication."""
     
+    model_config = ConfigDict(frozen=True)
     auth_type: Literal["none"] = "none"
     
     def apply(self, headers: dict[str, str]) -> dict[str, str]:
@@ -61,51 +77,86 @@ class NoAuth(BaseModel):
 
 
 class BearerAuth(BaseModel):
-    """Bearer token authentication (OAuth2, JWT)."""
+    """Bearer token authentication (OAuth2, JWT).
     
+    Token is stored as SecretStr to prevent accidental logging/exposure.
+    """
+    
+    model_config = ConfigDict(frozen=True)
     auth_type: Literal["bearer"] = "bearer"
-    token: str = Field(..., description="Bearer token value")
+    token: SecretStr = Field(..., description="Bearer token value (OAuth2/JWT)")
     
     def apply(self, headers: dict[str, str]) -> dict[str, str]:
-        headers["Authorization"] = f"Bearer {self.token}"
+        headers["Authorization"] = f"Bearer {self.token.get_secret_value()}"
         return headers
+    
+    @field_serializer("token", when_used="json")
+    def _mask_token(self, v: SecretStr) -> str:
+        """Mask token in JSON serialization for security."""
+        secret = v.get_secret_value()
+        return f"{secret[:4]}...{secret[-4:]}" if len(secret) > 8 else "***"
 
 
 class BasicAuth(BaseModel):
     """HTTP Basic authentication."""
     
+    model_config = ConfigDict(frozen=True)
     auth_type: Literal["basic"] = "basic"
-    username: str
-    password: str
+    username: Annotated[str, Field(min_length=1)]
+    password: SecretStr
     
     def apply(self, headers: dict[str, str]) -> dict[str, str]:
         import base64
-        credentials = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
+        credentials = base64.b64encode(
+            f"{self.username}:{self.password.get_secret_value()}".encode()
+        ).decode()
         headers["Authorization"] = f"Basic {credentials}"
         return headers
+    
+    @field_serializer("password", when_used="json")
+    def _mask_password(self, v: SecretStr) -> str:
+        """Mask password in JSON serialization."""
+        return "***"
 
 
 class ApiKeyAuth(BaseModel):
     """API key authentication (header or query param)."""
     
+    model_config = ConfigDict(frozen=True, str_strip_whitespace=True)
     auth_type: Literal["api_key"] = "api_key"
-    key: str = Field(..., description="API key value")
-    header_name: str = Field(default="X-API-Key", description="Header name for the key")
+    key: SecretStr = Field(..., description="API key value")
+    header_name: Annotated[str, Field(
+        default="X-API-Key",
+        pattern=r"^[A-Za-z][A-Za-z0-9-]*$",
+        description="HTTP header name for the key",
+    )]
     
     def apply(self, headers: dict[str, str]) -> dict[str, str]:
-        headers[self.header_name] = self.key
+        headers[self.header_name] = self.key.get_secret_value()
         return headers
+    
+    @field_serializer("key", when_used="json")
+    def _mask_key(self, v: SecretStr) -> str:
+        """Mask API key in JSON serialization."""
+        secret = v.get_secret_value()
+        return f"{secret[:4]}..." if len(secret) > 4 else "***"
 
 
 class CustomAuth(BaseModel):
     """Custom header-based authentication."""
     
+    model_config = ConfigDict(frozen=True)
     auth_type: Literal["custom"] = "custom"
-    headers: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, SecretStr] = Field(default_factory=dict)
     
     def apply(self, headers: dict[str, str]) -> dict[str, str]:
-        headers.update(self.headers)
+        headers.update({k: v.get_secret_value() for k, v in self.headers.items()})
         return headers
+    
+    @field_serializer("headers", when_used="json")
+    def _mask_headers(self, v: dict[str, SecretStr]) -> dict[str, str]:
+        """Mask all custom header values in JSON serialization."""
+        return {k: "***" for k in v}
 
 
 def _auth_discriminator(v: dict[str, object] | BaseModel) -> str:
@@ -130,6 +181,18 @@ AuthStrategy = Annotated[
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Default blocked hosts for SSRF protection
+_DEFAULT_BLOCKED_HOSTS: frozenset[str] = frozenset({
+    "localhost", "127.0.0.1", "0.0.0.0", "::1",
+    "*.local", "169.254.*.*", "10.*.*.*",
+    "172.16.*.*", "172.17.*.*", "172.18.*.*", "172.19.*.*",
+    "172.20.*.*", "172.21.*.*", "172.22.*.*", "172.23.*.*",
+    "172.24.*.*", "172.25.*.*", "172.26.*.*", "172.27.*.*",
+    "172.28.*.*", "172.29.*.*", "172.30.*.*", "172.31.*.*",
+    "192.168.*.*",
+})
+
+
 class HttpConfig(ToolConfig):
     """Configuration for HttpTool.
     
@@ -139,44 +202,103 @@ class HttpConfig(ToolConfig):
         allowed_hosts: Glob patterns for allowed hosts. Empty = all allowed.
         blocked_hosts: Glob patterns for blocked hosts (takes precedence).
         allowed_methods: HTTP methods to allow. Empty = all allowed.
-        max_response_size: Maximum response body size in bytes.
+        max_response_size: Maximum response body size (supports "10MB" format).
         default_timeout: Default request timeout in seconds.
+        max_redirects: Maximum number of redirects to follow.
         follow_redirects: Whether to follow HTTP redirects.
         verify_ssl: Whether to verify SSL certificates.
         auth: Default authentication strategy.
         default_headers: Headers added to every request.
     """
     
-    allowed_hosts: list[str] = Field(
-        default_factory=list,
+    model_config = ConfigDict(
+        validate_default=True,
+        str_strip_whitespace=True,
+        json_schema_extra={
+            "title": "HTTP Tool Configuration",
+            "examples": [{
+                "allowed_hosts": ["api.example.com"],
+                "allowed_methods": ["GET", "POST"],
+                "default_timeout": 30.0,
+            }],
+        },
+    )
+    
+    allowed_hosts: frozenset[str] = Field(
+        default_factory=frozenset,
         description="Glob patterns for allowed hosts (empty = all)",
     )
-    blocked_hosts: list[str] = Field(
-        default_factory=lambda: ["localhost", "127.0.0.1", "0.0.0.0", "*.local", "169.254.*.*"],
+    blocked_hosts: frozenset[str] = Field(
+        default=_DEFAULT_BLOCKED_HOSTS,
         description="Glob patterns for blocked hosts (SSRF protection)",
     )
-    allowed_methods: set[HttpMethod] = Field(
-        default_factory=lambda: set(ALL_METHODS),
+    allowed_methods: frozenset[HttpMethod] = Field(
+        default_factory=lambda: frozenset(ALL_METHODS),
         description="Allowed HTTP methods",
     )
-    max_response_size: int = Field(
-        default=10 * 1024 * 1024,  # 10MB
+    max_response_size: ByteSize = Field(
+        default=ByteSize(10 * 1024 * 1024),  # 10MB
         ge=1024,
         le=100 * 1024 * 1024,
-        description="Max response size in bytes",
+        description="Max response size (e.g., '10MB', '1GB')",
     )
-    default_timeout: float = Field(default=30.0, ge=0.1, le=300.0)
-    follow_redirects: bool = Field(default=True)
-    verify_ssl: bool = Field(default=True)
+    default_timeout: Annotated[float, Field(
+        default=30.0,
+        ge=0.1,
+        le=300.0,
+        description="Default request timeout in seconds",
+    )]
+    max_redirects: PositiveInt = Field(
+        default=10,
+        le=30,
+        description="Maximum redirects to follow",
+    )
+    follow_redirects: bool = True
+    verify_ssl: bool = True
     auth: AuthStrategy = Field(default_factory=NoAuth)
     default_headers: dict[str, str] = Field(
         default_factory=lambda: {"User-Agent": "toolcase-http/1.0"},
     )
     
+    @field_validator("allowed_hosts", "blocked_hosts", mode="before")
+    @classmethod
+    def _normalize_host_sets(cls, v: frozenset[str] | set[str] | list[str]) -> frozenset[str]:
+        """Accept various iterables, normalize to frozenset."""
+        if isinstance(v, frozenset):
+            return v
+        return frozenset(v) if v else frozenset()
+    
     @field_validator("allowed_methods", mode="before")
     @classmethod
-    def _normalize_methods(cls, v: set[str] | list[str]) -> set[HttpMethod]:
-        return {m.upper() for m in v}  # type: ignore[return-value]
+    def _normalize_methods(cls, v: frozenset[str] | set[str] | list[str]) -> frozenset[HttpMethod]:
+        """Normalize methods to uppercase frozenset."""
+        if isinstance(v, frozenset):
+            return v  # type: ignore[return-value]
+        return frozenset(m.upper() for m in v)  # type: ignore[return-value]
+    
+    @model_validator(mode="after")
+    def _validate_host_config(self) -> "HttpConfig":
+        """Validate that allowed and blocked hosts don't conflict."""
+        overlap = self.allowed_hosts & self.blocked_hosts
+        if overlap:
+            raise ValueError(f"Hosts cannot be both allowed and blocked: {overlap}")
+        return self
+    
+    @computed_field
+    @property
+    def max_response_size_bytes(self) -> int:
+        """Get max response size as integer bytes."""
+        return int(self.max_response_size)
+    
+    @field_serializer("allowed_hosts", "blocked_hosts", when_used="json")
+    def _serialize_host_sets(self, v: frozenset[str]) -> list[str]:
+        """Serialize frozensets as sorted lists for consistent JSON."""
+        return sorted(v)
+    
+    @field_serializer("allowed_methods", when_used="json")
+    def _serialize_methods(self, v: frozenset[HttpMethod]) -> list[str]:
+        """Serialize methods as sorted list."""
+        return sorted(v)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -187,7 +309,7 @@ class HttpParams(BaseModel):
     """Parameters for HTTP requests.
     
     Attributes:
-        url: The URL to request
+        url: The URL to request (validated as proper URL)
         method: HTTP method (GET, POST, etc.)
         headers: Additional request headers
         query_params: URL query parameters
@@ -196,7 +318,26 @@ class HttpParams(BaseModel):
         timeout: Request timeout override
     """
     
-    url: str = Field(..., description="URL to request")
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_default=True,
+        json_schema_extra={
+            "title": "HTTP Request Parameters",
+            "examples": [{
+                "url": "https://api.example.com/data",
+                "method": "GET",
+            }, {
+                "url": "https://api.example.com/users",
+                "method": "POST",
+                "json_body": {"name": "John", "email": "john@example.com"},
+            }],
+        },
+    )
+    
+    url: Annotated[str, Field(
+        description="URL to request",
+        json_schema_extra={"format": "uri", "examples": ["https://api.example.com"]},
+    )]
     method: HttpMethod = Field(default="GET", description="HTTP method")
     headers: dict[str, str] = Field(default_factory=dict, description="Additional headers")
     query_params: dict[str, str] = Field(default_factory=dict, description="Query parameters")
@@ -204,12 +345,39 @@ class HttpParams(BaseModel):
     json_body: dict[str, object] | list[object] | None = Field(
         default=None, description="JSON body (auto-serialized)"
     )
-    timeout: float | None = Field(default=None, ge=0.1, le=300.0, description="Timeout override")
+    timeout: Annotated[float, Field(ge=0.1, le=300.0)] | None = Field(
+        default=None,
+        description="Timeout override in seconds",
+    )
+    
+    @field_validator("url", mode="before")
+    @classmethod
+    def _validate_url(cls, v: str) -> str:
+        """Validate URL has proper scheme."""
+        if not isinstance(v, str):
+            return v
+        v = v.strip()
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("URL must start with http:// or https://")
+        return v
     
     @field_validator("method", mode="before")
     @classmethod
     def _upper_method(cls, v: str) -> str:
-        return v.upper()
+        return v.upper() if isinstance(v, str) else v
+    
+    @model_validator(mode="after")
+    def _validate_body_exclusivity(self) -> "HttpParams":
+        """Ensure body and json_body are mutually exclusive."""
+        if self.body is not None and self.json_body is not None:
+            raise ValueError("Cannot specify both 'body' and 'json_body'")
+        return self
+    
+    @computed_field
+    @property
+    def has_body(self) -> bool:
+        """Whether request has a body."""
+        return self.body is not None or self.json_body is not None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -219,16 +387,61 @@ class HttpParams(BaseModel):
 class HttpResponse(BaseModel):
     """Structured HTTP response for tool output."""
     
-    status_code: int
+    model_config = ConfigDict(frozen=True)
+    
+    status_code: Annotated[int, Field(ge=100, le=599)]
     headers: dict[str, str]
     body: str
     url: str
-    elapsed_ms: float
+    elapsed_ms: PositiveFloat
+    
+    @computed_field
+    @property
+    def is_success(self) -> bool:
+        """Whether response indicates success (2xx)."""
+        return 200 <= self.status_code < 300
+    
+    @computed_field
+    @property
+    def is_redirect(self) -> bool:
+        """Whether response is a redirect (3xx)."""
+        return 300 <= self.status_code < 400
+    
+    @computed_field
+    @property
+    def is_client_error(self) -> bool:
+        """Whether response indicates client error (4xx)."""
+        return 400 <= self.status_code < 500
+    
+    @computed_field
+    @property
+    def is_server_error(self) -> bool:
+        """Whether response indicates server error (5xx)."""
+        return 500 <= self.status_code < 600
+    
+    @computed_field
+    @property
+    def content_type(self) -> str | None:
+        """Extract Content-Type header (case-insensitive)."""
+        for k, v in self.headers.items():
+            if k.lower() == "content-type":
+                return v.split(";")[0].strip()
+        return None
+    
+    @computed_field
+    @property
+    def content_length(self) -> int | None:
+        """Extract Content-Length header."""
+        for k, v in self.headers.items():
+            if k.lower() == "content-length":
+                return int(v)
+        return None
     
     def to_output(self) -> str:
         """Format as tool output string."""
+        status_emoji = "✓" if self.is_success else "✗" if self.status_code >= 400 else "→"
         lines = [
-            f"**HTTP {self.status_code}** ({self.elapsed_ms:.0f}ms)",
+            f"**HTTP {self.status_code}** {status_emoji} ({self.elapsed_ms:.0f}ms)",
             f"URL: {self.url}",
             "",
         ]
@@ -444,18 +657,19 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
             
             # Check response size
             content_length = int(response.headers.get("content-length", 0))
-            if content_length > self.config.max_response_size:
+            max_size = self.config.max_response_size_bytes
+            if content_length > max_size:
                 return Err(ErrorTrace(
-                    message=f"Response too large: {content_length} bytes (max: {self.config.max_response_size})",
+                    message=f"Response too large: {content_length} bytes (max: {max_size})",
                     error_code=ErrorCode.INVALID_PARAMS.value,
                     recoverable=False,
                 ).with_operation("response_size_check"))
             
             # Read body with size limit
             body_bytes = await response.aread()
-            if len(body_bytes) > self.config.max_response_size:
+            if len(body_bytes) > max_size:
                 return Err(ErrorTrace(
-                    message=f"Response body exceeded max size: {len(body_bytes)} bytes",
+                    message=f"Response body exceeded max size: {len(body_bytes)} bytes (max: {max_size})",
                     error_code=ErrorCode.INVALID_PARAMS.value,
                     recoverable=False,
                 ).with_operation("body_read"))
@@ -495,7 +709,7 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
     
     async def _async_run(self, params: HttpParams) -> str:
         """Execute HTTP request."""
-        from ..errors import result_to_string
+        from toolcase.foundation.errors import result_to_string
         result = await self._async_run_result(params)
         return result_to_string(result, self.metadata.name)
     
@@ -562,8 +776,8 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
                 
                 async for chunk in response.aiter_bytes(chunk_size=8192):
                     total_bytes += len(chunk)
-                    if total_bytes > self.config.max_response_size:
-                        yield f"\n\n**Error:** Response exceeded max size ({self.config.max_response_size} bytes)"
+                    if total_bytes > self.config.max_response_size_bytes:
+                        yield f"\n\n**Error:** Response exceeded max size ({self.config.max_response_size_bytes} bytes)"
                         return
                     yield chunk.decode("utf-8", errors="replace")
             

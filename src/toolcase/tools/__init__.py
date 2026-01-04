@@ -44,7 +44,7 @@ from .http import (
 )
 
 if TYPE_CHECKING:
-    from ..core import BaseTool
+    from toolcase.foundation.core import BaseTool
     from pydantic import BaseModel
 
 

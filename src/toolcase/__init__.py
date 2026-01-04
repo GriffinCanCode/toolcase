@@ -41,7 +41,7 @@ Class-Based (For Complex Tools):
     ...         return f"Results for: {params.query}"
 
 Multi-Framework Format Converters:
-    >>> from toolcase.formats import to_openai, to_anthropic, to_google
+    >>> from toolcase.foundation.formats import to_openai, to_anthropic, to_google
     >>>
     >>> # OpenAI function calling format
     >>> openai_tools = to_openai(registry)
@@ -53,15 +53,15 @@ Multi-Framework Format Converters:
     >>> gemini_tools = to_google(registry)
 
 LangChain Integration:
-    >>> from toolcase.integrations import to_langchain_tools
+    >>> from toolcase.ext.integrations import to_langchain_tools
     >>> lc_tools = to_langchain_tools(registry)
 
 MCP (Model Context Protocol) Integration:
-    >>> from toolcase.mcp import serve_mcp
+    >>> from toolcase.ext.mcp import serve_mcp
     >>> serve_mcp(registry, transport="sse", port=8080)
 
 HTTP REST Server (Web Backends):
-    >>> from toolcase.mcp import serve_http
+    >>> from toolcase.ext.mcp import serve_http
     >>> serve_http(registry, port=8000)  # Simple HTTP endpoints
 """
 
@@ -69,8 +69,8 @@ from __future__ import annotations
 
 __version__ = "0.2.0"
 
-# Core
-from .core import (
+# Foundation: Core
+from .foundation.core import (
     BaseTool,
     EmptyParams,
     FunctionTool,
@@ -80,11 +80,63 @@ from .core import (
     tool,
 )
 
-# Errors
-from .errors import ErrorCode, ToolError, ToolException, classify_exception
+# Foundation: Errors
+from .foundation.errors import (
+    Err,
+    ErrorCode,
+    ErrorContext,
+    ErrorTrace,
+    Ok,
+    Result,
+    ResultT,
+    ToolError,
+    ToolException,
+    ToolResult,
+    batch_results,
+    classify_exception,
+    collect_results,
+    sequence,
+    tool_result,
+    traverse,
+    try_tool_operation,
+    try_tool_operation_async,
+)
 
-# Progress
-from .progress import (
+# Foundation: DI
+from .foundation.di import Container, Disposable, Factory, Provider, Scope, ScopedContext
+
+# Foundation: Registry
+from .foundation.registry import ToolRegistry, get_registry, reset_registry, set_registry
+
+# Foundation: Config/Settings
+from .foundation.config import (
+    CacheSettings,
+    HttpSettings,
+    LoggingSettings,
+    RateLimitSettings,
+    RetrySettings,
+    ToolcaseSettings,
+    TracingSettings,
+    clear_settings_cache,
+    get_settings,
+)
+
+# Foundation: Testing
+from .foundation.testing import (
+    Invocation,
+    MockAPI,
+    MockResponse,
+    MockTool,
+    ToolTestCase,
+    fixture,
+    mock_api,
+    mock_api_slow,
+    mock_api_with_errors,
+    mock_tool,
+)
+
+# IO: Progress
+from .io.progress import (
     ProgressCallback,
     ProgressKind,
     ToolProgress,
@@ -95,8 +147,8 @@ from .progress import (
     step,
 )
 
-# Cache
-from .cache import (
+# IO: Cache
+from .io.cache import (
     DEFAULT_TTL,
     CacheBackend,
     MemoryCache,
@@ -106,122 +158,8 @@ from .cache import (
     set_cache,
 )
 
-# Registry
-from .registry import (
-    ToolRegistry,
-    get_registry,
-    reset_registry,
-    set_registry,
-)
-
-# Middleware
-from .middleware import (
-    Context,
-    Middleware,
-    Next,
-    compose,
-    CircuitBreakerMiddleware,
-    LoggingMiddleware,
-    MetricsMiddleware,
-    RateLimitMiddleware,
-    RetryMiddleware,
-    TimeoutMiddleware,
-)
-
-# Retry policies
-from .retry import (
-    Backoff,
-    ConstantBackoff,
-    DecorrelatedJitter,
-    ExponentialBackoff,
-    LinearBackoff,
-    RetryPolicy,
-    DEFAULT_RETRYABLE,
-    NO_RETRY,
-)
-
-# Pipeline composition
-from .pipeline import (
-    ChunkTransform,
-    ParallelTool,
-    PipelineTool,
-    Step,
-    StreamingParallelTool,
-    StreamingPipelineTool,
-    StreamMerge,
-    StreamStep,
-    interleave_streams,
-    parallel,
-    pipeline,
-    streaming_parallel,
-    streaming_pipeline,
-)
-
-# Dependency Injection
-from .di import (
-    Container,
-    Disposable,
-    Factory,
-    Provider,
-    Scope,
-    ScopedContext,
-)
-
-# Built-in tools
-from .tools import (
-    DiscoveryParams,
-    DiscoveryTool,
-    # Base classes for extensibility
-    ConfigurableTool,
-    ToolConfig,
-    # HTTP Tool
-    HttpTool,
-    HttpConfig,
-    HttpParams,
-    HttpResponse,
-    # Auth strategies (concrete classes)
-    NoAuth,
-    BearerAuth,
-    BasicAuth,
-    ApiKeyAuth,
-    CustomAuth,
-    # Utility
-    standard_tools,
-)
-
-# Monadic error handling (unified in errors module)
-from .errors import (
-    Err,
-    ErrorContext,
-    ErrorTrace,
-    Ok,
-    Result,
-    ResultT,
-    ToolResult,
-    batch_results,
-    collect_results,
-    sequence,
-    tool_result,
-    traverse,
-    try_tool_operation,
-    try_tool_operation_async,
-)
-
-# Observability
-from .observability import (
-    configure_tracing,
-    get_tracer,
-    traced,
-    CorrelationMiddleware,
-    TracingMiddleware,
-    Span,
-    SpanKind,
-    SpanStatus,
-    Tracer,
-)
-
-# Streaming (Result Streaming for LLM outputs)
-from .streaming import (
+# IO: Streaming
+from .io.streaming import (
     StreamAdapter,
     StreamChunk,
     StreamEvent,
@@ -237,204 +175,162 @@ from .streaming import (
     ws_adapter,
 )
 
-# Testing utilities
-from .testing import (
-    Invocation,
-    MockAPI,
-    MockResponse,
-    MockTool,
-    ToolTestCase,
-    fixture,
-    mock_api,
-    mock_api_slow,
-    mock_api_with_errors,
-    mock_tool,
+# Runtime: Middleware
+from .runtime.middleware import (
+    CircuitBreakerMiddleware,
+    Context,
+    LoggingMiddleware,
+    MetricsMiddleware,
+    Middleware,
+    Next,
+    RateLimitMiddleware,
+    RetryMiddleware,
+    TimeoutMiddleware,
+    compose,
 )
 
-# Agentic composition primitives
-from .agents import (
-    # Router
-    Route,
-    RouterTool,
-    router,
-    # Fallback
-    FallbackTool,
-    fallback,
-    # Escalation
+# Runtime: Retry
+from .runtime.retry import (
+    Backoff,
+    ConstantBackoff,
+    DecorrelatedJitter,
+    DEFAULT_RETRYABLE,
+    ExponentialBackoff,
+    LinearBackoff,
+    NO_RETRY,
+    RetryPolicy,
+)
+
+# Runtime: Pipeline
+from .runtime.pipeline import (
+    ChunkTransform,
+    ParallelTool,
+    PipelineTool,
+    Step,
+    StreamingParallelTool,
+    StreamingPipelineTool,
+    StreamMerge,
+    StreamStep,
+    interleave_streams,
+    parallel,
+    pipeline,
+    streaming_parallel,
+    streaming_pipeline,
+)
+
+# Runtime: Observability
+from .runtime.observability import (
+    CorrelationMiddleware,
+    Span,
+    SpanKind,
+    SpanStatus,
+    Tracer,
+    TracingMiddleware,
+    configure_tracing,
+    get_tracer,
+    traced,
+)
+
+# Runtime: Agents
+from .runtime.agents import (
     EscalationHandler,
     EscalationResult,
     EscalationStatus,
     EscalationTool,
-    QueueEscalation,
-    retry_with_escalation,
-    # Race
-    RaceTool,
-    race,
-    # Gate
+    FallbackTool,
     GateTool,
+    QueueEscalation,
+    RaceTool,
+    Route,
+    RouterTool,
+    fallback,
     gate,
+    race,
+    retry_with_escalation,
+    router,
+)
+
+# Built-in tools
+from .tools import (
+    ApiKeyAuth,
+    BasicAuth,
+    BearerAuth,
+    ConfigurableTool,
+    CustomAuth,
+    DiscoveryParams,
+    DiscoveryTool,
+    HttpConfig,
+    HttpParams,
+    HttpResponse,
+    HttpTool,
+    NoAuth,
+    ToolConfig,
+    standard_tools,
 )
 
 __all__ = [
     # Version
     "__version__",
     # Core
-    "BaseTool",
-    "ToolMetadata",
-    "EmptyParams",
-    "tool",
-    "FunctionTool",
-    "StreamingFunctionTool",
-    "ResultStreamingFunctionTool",
+    "BaseTool", "ToolMetadata", "EmptyParams", "tool",
+    "FunctionTool", "StreamingFunctionTool", "ResultStreamingFunctionTool",
     # Errors
-    "ErrorCode",
-    "ToolError",
-    "ToolException",
-    "classify_exception",
+    "ErrorCode", "ToolError", "ToolException", "classify_exception",
     # Progress
-    "ToolProgress",
-    "ProgressKind",
-    "ProgressCallback",
-    "status",
-    "step",
-    "source_found",
-    "complete",
-    "error",
+    "ToolProgress", "ProgressKind", "ProgressCallback",
+    "status", "step", "source_found", "complete", "error",
     # Cache
-    "ToolCache",
-    "MemoryCache",
-    "CacheBackend",
-    "get_cache",
-    "set_cache",
-    "reset_cache",
-    "DEFAULT_TTL",
+    "ToolCache", "MemoryCache", "CacheBackend",
+    "get_cache", "set_cache", "reset_cache", "DEFAULT_TTL",
     # Registry
-    "ToolRegistry",
-    "get_registry",
-    "set_registry",
-    "reset_registry",
+    "ToolRegistry", "get_registry", "set_registry", "reset_registry",
     # Middleware
-    "Middleware",
-    "Context",
-    "Next",
-    "compose",
-    "CircuitBreakerMiddleware",
-    "LoggingMiddleware",
-    "MetricsMiddleware",
-    "RateLimitMiddleware",
-    "RetryMiddleware",
-    "TimeoutMiddleware",
+    "Middleware", "Context", "Next", "compose",
+    "CircuitBreakerMiddleware", "LoggingMiddleware", "MetricsMiddleware",
+    "RateLimitMiddleware", "RetryMiddleware", "TimeoutMiddleware",
     # Retry policies
-    "Backoff",
-    "ExponentialBackoff",
-    "LinearBackoff",
-    "ConstantBackoff",
-    "DecorrelatedJitter",
-    "RetryPolicy",
-    "DEFAULT_RETRYABLE",
-    "NO_RETRY",
+    "Backoff", "ExponentialBackoff", "LinearBackoff", "ConstantBackoff", "DecorrelatedJitter",
+    "RetryPolicy", "DEFAULT_RETRYABLE", "NO_RETRY",
     # Pipeline composition
-    "PipelineTool",
-    "ParallelTool",
-    "StreamingPipelineTool",
-    "StreamingParallelTool",
-    "Step",
-    "StreamStep",
-    "ChunkTransform",
-    "StreamMerge",
-    "pipeline",
-    "parallel",
-    "streaming_pipeline",
-    "streaming_parallel",
-    "interleave_streams",
+    "PipelineTool", "ParallelTool", "StreamingPipelineTool", "StreamingParallelTool",
+    "Step", "StreamStep", "ChunkTransform", "StreamMerge",
+    "pipeline", "parallel", "streaming_pipeline", "streaming_parallel", "interleave_streams",
     # Dependency Injection
-    "Container",
-    "Disposable",
-    "Factory",
-    "Provider",
-    "Scope",
-    "ScopedContext",
+    "Container", "Disposable", "Factory", "Provider", "Scope", "ScopedContext",
+    # Settings/Config
+    "ToolcaseSettings", "get_settings", "clear_settings_cache",
+    "CacheSettings", "LoggingSettings", "RetrySettings",
+    "HttpSettings", "TracingSettings", "RateLimitSettings",
     # Built-in tools
-    "DiscoveryTool",
-    "DiscoveryParams",
-    "ConfigurableTool",
-    "ToolConfig",
-    "HttpTool",
-    "HttpConfig",
-    "HttpParams",
-    "HttpResponse",
-    "NoAuth",
-    "BearerAuth",
-    "BasicAuth",
-    "ApiKeyAuth",
-    "CustomAuth",
+    "DiscoveryTool", "DiscoveryParams",
+    "ConfigurableTool", "ToolConfig",
+    "HttpTool", "HttpConfig", "HttpParams", "HttpResponse",
+    "NoAuth", "BearerAuth", "BasicAuth", "ApiKeyAuth", "CustomAuth",
     "standard_tools",
     # Monadic error handling
-    "Result",
-    "Ok",
-    "Err",
-    "ResultT",
-    "ToolResult",
-    "ErrorContext",
-    "ErrorTrace",
-    "tool_result",
-    "try_tool_operation",
-    "try_tool_operation_async",
-    "batch_results",
-    "sequence",
-    "traverse",
-    "collect_results",
+    "Result", "Ok", "Err", "ResultT", "ToolResult", "ErrorContext", "ErrorTrace",
+    "tool_result", "try_tool_operation", "try_tool_operation_async",
+    "batch_results", "sequence", "traverse", "collect_results",
     # Observability
-    "configure_tracing",
-    "get_tracer",
-    "traced",
-    "CorrelationMiddleware",
-    "TracingMiddleware",
-    "Span",
-    "SpanKind",
-    "SpanStatus",
-    "Tracer",
+    "configure_tracing", "get_tracer", "traced",
+    "CorrelationMiddleware", "TracingMiddleware",
+    "Span", "SpanKind", "SpanStatus", "Tracer",
     # Streaming (Result Streaming)
-    "StreamAdapter",
-    "StreamChunk",
-    "StreamEvent",
-    "StreamEventKind",
-    "StreamResult",
-    "StreamState",
-    "chunk",
-    "stream_start",
-    "stream_complete",
-    "stream_error",
-    "sse_adapter",
-    "ws_adapter",
-    "json_lines_adapter",
+    "StreamAdapter", "StreamChunk", "StreamEvent", "StreamEventKind",
+    "StreamResult", "StreamState",
+    "chunk", "stream_start", "stream_complete", "stream_error",
+    "sse_adapter", "ws_adapter", "json_lines_adapter",
     # Testing utilities
-    "ToolTestCase",
-    "mock_tool",
-    "MockTool",
-    "Invocation",
-    "fixture",
-    "MockAPI",
-    "MockResponse",
-    "mock_api",
-    "mock_api_with_errors",
-    "mock_api_slow",
+    "ToolTestCase", "mock_tool", "MockTool", "Invocation",
+    "fixture", "MockAPI", "MockResponse",
+    "mock_api", "mock_api_with_errors", "mock_api_slow",
     # Agentic composition primitives
-    "Route",
-    "RouterTool",
-    "router",
-    "FallbackTool",
-    "fallback",
-    "EscalationHandler",
-    "EscalationResult",
-    "EscalationStatus",
-    "EscalationTool",
-    "QueueEscalation",
-    "retry_with_escalation",
-    "RaceTool",
-    "race",
-    "GateTool",
-    "gate",
+    "Route", "RouterTool", "router",
+    "FallbackTool", "fallback",
+    "EscalationHandler", "EscalationResult", "EscalationStatus", "EscalationTool",
+    "QueueEscalation", "retry_with_escalation",
+    "RaceTool", "race",
+    "GateTool", "gate",
     # Convenience
     "init_tools",
 ]
@@ -457,12 +353,7 @@ def init_tools(*tools: BaseTool) -> ToolRegistry:  # type: ignore[type-arg]
         >>> registry = init_tools(MyTool(), AnotherTool())
     """
     registry = get_registry()
-    
-    # Register discovery tool first
     registry.register(DiscoveryTool())
-    
-    # Register user-provided tools
-    for tool in tools:
-        registry.register(tool)
-    
+    for t in tools:
+        registry.register(t)
     return registry
