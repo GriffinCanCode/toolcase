@@ -113,6 +113,9 @@ from .foundation.di import Container, Disposable, Factory, Provider, Scope, Scop
 # Foundation: Registry
 from .foundation.registry import ToolRegistry, get_registry, reset_registry, set_registry
 
+# Foundation: Events
+from .foundation.events import Signal, SignalHandler, one_shot
+
 # Foundation: Config/Settings
 from .foundation.config import (
     CacheSettings,
@@ -145,6 +148,23 @@ from .foundation.testing import (
     mock_api_slow,
     mock_api_with_errors,
     mock_tool,
+)
+
+# Foundation: Fast Validation (msgspec, 10-100x faster)
+from .foundation.fast import (
+    FastStruct,
+    FastValidator,
+    decode,
+    encode,
+    encode_str,
+    fast,
+    fast_frozen,
+    from_pydantic,
+    pydantic_to_fast,
+    to_pydantic,
+    validate,
+    validate_many,
+    validate_or_none,
 )
 
 # IO: Progress
@@ -338,6 +358,18 @@ from .runtime.batch import (
     batch_execute_idempotent,
     batch_execute_idempotent_sync,
     batch_execute_sync,
+    # Dead Letter Queue
+    DLQCallback,
+    DLQConfig,
+    DLQEntry,
+    DLQStore,
+    MemoryDLQStore,
+    NO_DLQ,
+    get_dlq_store,
+    reset_dlq_store,
+    reprocess_entry,
+    route_to_dlq,
+    set_dlq_store,
 )
 
 # Built-in tools
@@ -398,6 +430,8 @@ __all__ = [
     "get_cache", "set_cache", "reset_cache", "DEFAULT_TTL",
     # Registry
     "ToolRegistry", "get_registry", "set_registry", "reset_registry",
+    # Events (Signals)
+    "Signal", "SignalHandler", "one_shot",
     # Middleware
     "Middleware", "Context", "Next", "compose",
     "BackpressureMiddleware", "CircuitBreakerMiddleware", "LoggingMiddleware", "MetricsMiddleware",
@@ -439,6 +473,11 @@ __all__ = [
     "batch_results", "sequence", "traverse", "collect_results",
     # TypeAdapter validation utilities (fast dict→model validation)
     "validate_context", "validate_trace", "validate_progress", "validate_policy",
+    # Fast Validation (msgspec, 10-100x faster)
+    "FastStruct", "fast", "fast_frozen",
+    "FastValidator", "validate", "validate_or_none", "validate_many",
+    "encode", "encode_str", "decode",
+    "to_pydantic", "from_pydantic", "pydantic_to_fast",
     # Observability - Core
     "configure_tracing", "get_tracer", "traced",
     "configure_logging", "get_logger", "log_context", "timed", "BoundLogger",
@@ -485,6 +524,10 @@ __all__ = [
     "BatchRetryPolicy", "BatchRetryStrategy", "NO_BATCH_RETRY",
     "batch_execute_idempotent", "batch_execute_idempotent_sync",
     "IdempotencyStore", "CacheIdempotencyAdapter",
+    # Dead Letter Queue
+    "DLQConfig", "DLQEntry", "DLQStore", "DLQCallback", "MemoryDLQStore",
+    "NO_DLQ", "get_dlq_store", "set_dlq_store", "reset_dlq_store",
+    "route_to_dlq", "reprocess_entry",
     # Convenience
     "init_tools",
 ]

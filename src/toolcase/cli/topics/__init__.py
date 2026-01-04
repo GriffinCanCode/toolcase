@@ -29,8 +29,11 @@ from .capabilities import CAPABILITIES
 from .validation import VALIDATION
 from .mcp import MCP
 from .effects import EFFECTS
+from .events import EVENTS
 from .resilience import RESILIENCE
 from .web import WEB
+from .dlq import DLQ
+from .fast import CONTENT as FAST
 
 TOPICS: dict[str, str] = {
     "help": HELP,
@@ -62,8 +65,11 @@ TOPICS: dict[str, str] = {
     "validation": VALIDATION,
     "mcp": MCP,
     "effects": EFFECTS,
+    "events": EVENTS,
     "resilience": RESILIENCE,
     "web": WEB,
+    "dlq": DLQ,
+    "fast": FAST,
 }
 
 __all__ = ["TOPICS"]

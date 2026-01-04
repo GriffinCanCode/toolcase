@@ -21,6 +21,8 @@ __all__ = [
     "Container", "DIResult", "Disposable", "Factory", "Provider", "Scope", "ScopedContext",
     # Registry
     "ToolRegistry", "get_registry", "set_registry", "reset_registry",
+    # Events
+    "Signal", "SignalHandler", "one_shot",
     # Effects
     "Effect", "EffectSet", "EffectHandler", "EffectContext",
     "effects", "declare_effects", "get_effects", "has_effects", "get_handler",
@@ -34,6 +36,10 @@ __all__ = [
     # Config
     "ToolcaseSettings", "get_settings", "clear_settings_cache",
     "CacheSettings", "LoggingSettings", "RetrySettings", "HttpSettings", "TracingSettings", "RateLimitSettings",
+    # Fast Validation (msgspec, 10-100x faster)
+    "FastStruct", "fast", "fast_frozen",
+    "validate", "validate_or_none", "validate_many", "FastValidator",
+    "to_pydantic", "from_pydantic", "pydantic_to_fast",
 ]
 
 
@@ -72,6 +78,11 @@ def __getattr__(name: str):
             _module_cache["registry"] = importlib.import_module(".registry", __name__)
         return getattr(_module_cache["registry"], name)
     
+    if name in ("Signal", "SignalHandler", "one_shot"):
+        if "events" not in _module_cache:
+            _module_cache["events"] = importlib.import_module(".events", __name__)
+        return getattr(_module_cache["events"], name)
+    
     if name in ("Effect", "EffectSet", "EffectHandler", "EffectContext",
                 "effects", "declare_effects", "get_effects", "has_effects", "get_handler",
                 "EffectHandlerRegistry", "EffectScope", "effect_scope", "test_effects",
@@ -94,5 +105,12 @@ def __getattr__(name: str):
         if "config" not in _module_cache:
             _module_cache["config"] = importlib.import_module(".config", __name__)
         return getattr(_module_cache["config"], name)
+    
+    if name in ("FastStruct", "fast", "fast_frozen",
+                "validate", "validate_or_none", "validate_many", "FastValidator",
+                "to_pydantic", "from_pydantic", "pydantic_to_fast"):
+        if "fast" not in _module_cache:
+            _module_cache["fast"] = importlib.import_module(".fast", __name__)
+        return getattr(_module_cache["fast"], name)
     
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

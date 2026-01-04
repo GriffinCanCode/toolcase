@@ -108,6 +108,7 @@ from .validation import (
     not_empty,
     one_of,
 )
+from .fast import FastValidation, StructValidation
 
 __all__ = [
     # Resilience (core primitive)
@@ -134,6 +135,9 @@ __all__ = [
     "ValidationMiddleware",
     "FieldRule",
     "Validator",
+    # Fast Validation (msgspec, 10-100x faster)
+    "FastValidation",
+    "StructValidation",
     # Preset validators (legacy)
     "min_length",
     "max_length",
