@@ -112,9 +112,11 @@ class TracingMiddleware:
 
 @dataclass(slots=True)
 class CorrelationMiddleware:
-    """Add correlation IDs to context for request tracing.
+    """Add correlation IDs to context for request tracing and logging.
     
-    Generates or propagates request IDs for correlating logs, traces, and metrics across a request lifecycle.
+    Generates or propagates trace IDs for correlating logs, traces, and metrics
+    across a request lifecycle. Sets a TraceContext that the logger automatically
+    reads via _get_trace_context(), ensuring all log messages include trace_id.
     
     Args:
         header_name: Header to extract correlation ID from (for HTTP)
@@ -122,7 +124,9 @@ class CorrelationMiddleware:
     
     Example:
         >>> registry.use(CorrelationMiddleware())
-        >>> registry.use(TracingMiddleware())  # Will pick up correlation ID
+        >>> # All logs within tool execution now include trace_id
+        >>> log = get_logger()
+        >>> log.info("processing")  # includes trace_id=... automatically
     """
     
     header_name: str = "X-Request-ID"
@@ -135,7 +139,25 @@ class CorrelationMiddleware:
         ctx: Context,
         next: Next,
     ) -> str:
-        if "request_id" not in ctx and self.generate_if_missing:
-            import secrets
-            ctx["request_id"] = secrets.token_hex(8)
+        from ..tracing import SpanContext, TraceContext, trace_context
+        
+        # Get or create trace context with trace_id
+        existing = TraceContext.get()
+        if existing:
+            trace_ctx = existing
+            ctx["trace_id"] = trace_ctx.span_context.trace_id
+            ctx["request_id"] = ctx.get("request_id") or trace_ctx.span_context.trace_id[:16]
+            return await next(tool, params, ctx)
+        
+        # Generate new trace context if missing
+        if self.generate_if_missing:
+            span_ctx = SpanContext.new()
+            trace_ctx = TraceContext(span_context=span_ctx)
+            ctx["trace_id"] = span_ctx.trace_id
+            ctx["request_id"] = ctx.get("request_id") or span_ctx.trace_id[:16]
+            
+            # Use context manager to scope trace context - logger reads via _get_trace_context()
+            with trace_context(trace_ctx):
+                return await next(tool, params, ctx)
+        
         return await next(tool, params, ctx)
