@@ -62,14 +62,60 @@ STANDALONE BATCH FUNCTION:
     # Sync wrapper
     results = batch_execute_sync(tool, params_list)
 
+IDEMPOTENT BATCH (EXACTLY-ONCE SEMANTICS):
+    from toolcase import (
+        batch_execute_idempotent,
+        IdempotentBatchConfig,
+        BatchRetryPolicy,
+        BatchRetryStrategy,
+        MemoryCache,  # Reuses existing cache infrastructure!
+    )
+    
+    # Configure idempotency and batch-level retry
+    config = IdempotentBatchConfig(
+        concurrency=10,
+        batch_id="order-batch-123",      # Unique batch identifier
+        retry_policy=BatchRetryPolicy(
+            max_retries=3,               # Batch-level retry attempts
+            failure_threshold=0.3,       # Retry if >30% failed
+            strategy=BatchRetryStrategy.FAILED_ONLY,
+        ),
+        idempotency_ttl=3600,            # TTL for cached results
+    )
+    
+    # Execute with exactly-once guarantees
+    # Uses existing cache system (Memory, Redis, Memcached)
+    cache = MemoryCache(default_ttl=3600)  # Or use get_cache()
+    results = await batch_execute_idempotent(tool, params, config, cache=cache)
+    
+    # Access idempotency metadata
+    print(f"Cache hits: {results.cache_hit_rate:.0%}")
+    print(f"Batch attempts: {results.batch_attempts}")
+    print(f"Was retried: {results.was_retried}")
+    print(f"Cache stats: {cache.stats()}")
+
+BATCH RETRY STRATEGIES:
+    FAILED_ONLY     Retry only failed items (default)
+    ENTIRE_BATCH    Retry entire batch on threshold breach
+
+CACHE INTEGRATION:
+    Idempotency uses existing toolcase cache infrastructure:
+    - MemoryCache      In-memory (single process)
+    - RedisCache       Redis-backed (distributed)
+    - MemcachedCache   Memcached-backed (distributed)
+    - get_cache()      Global cache instance
+
 USE CASES:
     - Parallel API calls to external services
     - Bulk data processing with rate limiting
     - Running the same analysis on multiple inputs
     - Concurrent validation of multiple items
+    - Exactly-once payment/order processing
+    - Distributed batch jobs with deduplication
 
 RELATED TOPICS:
     toolcase help tool         Tool creation with batch_run
     toolcase help concurrency  Async primitives
     toolcase help pipeline     Pipeline composition
+    toolcase help retry        Retry policies
 """
