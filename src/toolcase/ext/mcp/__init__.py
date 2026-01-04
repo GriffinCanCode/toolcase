@@ -6,6 +6,20 @@ Exposes toolcase tools via multiple protocols for different use cases:
     >>> from toolcase.mcp import serve_mcp
     >>> serve_mcp(registry, transport="sse", port=8080)
 
+**Full MCP with Resources and Prompts**:
+    >>> from toolcase.mcp import create_mcp_server
+    >>> server = create_mcp_server(registry)
+    >>> 
+    >>> @server.resource("config://app")
+    ... async def app_config() -> str:
+    ...     return '{"version": "1.0"}'
+    >>> 
+    >>> @server.prompt("summarize")
+    ... def summarize(text: str) -> str:
+    ...     return f"Summarize:\\n{text}"
+    >>> 
+    >>> server.run(transport="sse", port=8080)
+
 **HTTP REST** (Web backends, microservices, custom agents):
     >>> from toolcase.mcp import serve_http
     >>> serve_http(registry, port=8000)
@@ -15,7 +29,6 @@ Exposes toolcase tools via multiple protocols for different use cases:
 **Embed in FastAPI/Starlette**:
     >>> from toolcase.mcp import create_http_app
     >>> app = create_http_app(registry)
-    >>> # Mount into your app
 
 Dependencies:
     pip install toolcase[mcp]   # FastMCP for MCP protocol

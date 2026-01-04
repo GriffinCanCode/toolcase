@@ -10,13 +10,18 @@ Example - FastMCP (MCP clients):
     >>> from toolcase.mcp import serve_mcp
     >>> serve_mcp(registry, transport="sse", port=8080)
 
+Example - Resources and Prompts:
+    >>> server = create_mcp_server(registry)
+    >>> @server.resource("config://app")
+    ... async def app_config() -> str:
+    ...     return json.dumps({"version": "1.0"})
+    >>> @server.prompt("summarize")
+    ... def summarize(text: str) -> str:
+    ...     return f"Summarize:\\n{text}"
+
 Example - HTTP endpoints (web backends):
     >>> from toolcase.mcp import create_http_app
     >>> app = create_http_app(registry)  # Returns Starlette/FastAPI app
-
-Example - Mount into existing FastAPI:
-    >>> from toolcase.mcp import mount_tools
-    >>> mount_tools(app, registry, prefix="/tools")
 
 Requires: pip install toolcase[mcp] (for FastMCP)
          pip install toolcase[http] (for HTTP endpoints)
@@ -25,7 +30,7 @@ Requires: pip install toolcase[mcp] (for FastMCP)
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Callable, Literal, TypeVar
 
 from pydantic import ValidationError
 
@@ -36,6 +41,7 @@ if TYPE_CHECKING:
     from toolcase.foundation.registry import ToolRegistry
 
 Transport = Literal["stdio", "sse", "streamable-http"]
+F = TypeVar("F", bound=Callable[..., object])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -111,52 +117,134 @@ class ToolServer(ABC):
 class MCPServer(ToolServer):
     """FastMCP-backed server for MCP clients.
     
-    Full MCP protocol support for Cursor, Claude Desktop, VS Code, etc.
+    Full MCP protocol support including tools, resources, and prompts.
+    Compatible with Cursor, Claude Desktop, VS Code, and other MCP clients.
     
-    Example:
+    Example - Basic:
         >>> server = MCPServer("my-tools", registry)
         >>> server.run(transport="sse", port=8080)
+    
+    Example - With Resources:
+        >>> server = MCPServer("my-tools", registry)
+        >>> @server.resource("config://app")
+        ... async def app_config() -> str:
+        ...     return json.dumps({"version": "1.0", "env": "prod"})
+        >>> @server.resource("file://{path}")  # URI templates supported
+        ... async def read_file(path: str) -> str:
+        ...     return Path(path).read_text()
+    
+    Example - With Prompts:
+        >>> @server.prompt("summarize")
+        ... def summarize_prompt(content: str) -> str:
+        ...     return f"Summarize the following:\\n\\n{content}"
     """
     
-    __slots__ = ("_mcp",)
+    __slots__ = ("_mcp", "_pending_resources", "_pending_prompts")
     
     def __init__(self, name: str, registry: ToolRegistry) -> None:
+        # Store pending registrations before FastMCP is created
+        self._pending_resources: list[tuple[str, Callable[..., object]]] = []
+        self._pending_prompts: list[tuple[str, Callable[..., object]]] = []
         super().__init__(name, registry)
         self._mcp = self._create_server()
     
     def _create_server(self):
-        """Create FastMCP server and register tools."""
+        """Create FastMCP server and register tools, resources, prompts."""
         try:
             from fastmcp import FastMCP
         except ImportError as e:
-            raise ImportError(
-                "MCP integration requires fastmcp. "
-                "Install with: pip install toolcase[mcp]"
-            ) from e
+            raise ImportError("MCP integration requires fastmcp. Install with: pip install toolcase[mcp]") from e
         
         mcp = FastMCP(self._name)
         self._register_tools(mcp)
+        # Apply any pending resource/prompt registrations
+        for uri, fn in self._pending_resources:
+            mcp.resource(uri)(fn)
+        for name, fn in self._pending_prompts:
+            mcp.prompt(name)(fn)
         return mcp
     
     def _register_tools(self, mcp) -> None:
-        """Register all registry tools with FastMCP.
-        
-        Uses registry.execute() when middleware is configured (including
-        ValidationMiddleware), otherwise executes directly.
-        """
+        """Register all registry tools with FastMCP."""
         for tool in (t for t in self._registry if t.metadata.enabled):
             schema, name = tool.params_schema, tool.metadata.name
-            
             if self._registry._middleware:
-                # Use registry's execute for middleware support
                 async def handler(__name=name, **kwargs: object) -> str:
                     return await self._registry.execute(__name, kwargs)
             else:
-                # Direct execution (no middleware)
                 async def handler(__tool=tool, __schema=schema, **kwargs: object) -> str:
                     return await __tool.arun(__schema(**kwargs))  # type: ignore[arg-type]
-            
             mcp.tool(name=name, description=tool.metadata.description)(handler)
+    
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Resource Registration (MCP primitive for exposing data)
+    # ─────────────────────────────────────────────────────────────────────────────
+    
+    def resource(self, uri: str) -> Callable[[F], F]:
+        """Register a resource handler exposed via URI.
+        
+        Resources provide contextual data to LLMs. URIs can include
+        {param} placeholders for dynamic resources.
+        
+        Args:
+            uri: Resource URI (e.g., "config://app", "file://{path}")
+        
+        Example:
+            >>> @server.resource("db://users/{user_id}")
+            ... async def get_user(user_id: str) -> str:
+            ...     return json.dumps(await db.get_user(user_id))
+        """
+        def decorator(fn: F) -> F:
+            if hasattr(self, "_mcp") and self._mcp:
+                self._mcp.resource(uri)(fn)
+            else:
+                self._pending_resources.append((uri, fn))
+            return fn
+        return decorator
+    
+    def add_resource(self, uri: str, fn: Callable[..., object]) -> None:
+        """Programmatically register a resource handler."""
+        if hasattr(self, "_mcp") and self._mcp:
+            self._mcp.resource(uri)(fn)
+        else:
+            self._pending_resources.append((uri, fn))
+    
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Prompt Registration (MCP primitive for reusable templates)
+    # ─────────────────────────────────────────────────────────────────────────────
+    
+    def prompt(self, name: str) -> Callable[[F], F]:
+        """Register a prompt template.
+        
+        Prompts are reusable conversational templates that guide LLM behavior.
+        They're surfaced to users in MCP clients.
+        
+        Args:
+            name: Prompt identifier (e.g., "summarize", "code-review")
+        
+        Example:
+            >>> @server.prompt("analyze-code")
+            ... def code_review(code: str, language: str = "python") -> str:
+            ...     return f"Review this {language} code:\\n```{language}\\n{code}\\n```"
+        """
+        def decorator(fn: F) -> F:
+            if hasattr(self, "_mcp") and self._mcp:
+                self._mcp.prompt(name)(fn)
+            else:
+                self._pending_prompts.append((name, fn))
+            return fn
+        return decorator
+    
+    def add_prompt(self, name: str, fn: Callable[..., object]) -> None:
+        """Programmatically register a prompt template."""
+        if hasattr(self, "_mcp") and self._mcp:
+            self._mcp.prompt(name)(fn)
+        else:
+            self._pending_prompts.append((name, fn))
+    
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Server Lifecycle
+    # ─────────────────────────────────────────────────────────────────────────────
     
     def run(self, transport: Transport = "stdio", *, host: str = "127.0.0.1", port: int = 8080) -> None:
         """Start MCP server. transport: "stdio" (CLI), "sse" (HTTP), "streamable-http"."""
@@ -164,8 +252,16 @@ class MCPServer(ToolServer):
     
     @property
     def fastmcp(self):
-        """Access underlying FastMCP instance."""
+        """Access underlying FastMCP instance for advanced configuration."""
         return self._mcp
+    
+    def list_resources(self) -> list[str]:
+        """List registered resource URIs."""
+        return [uri for uri, _ in self._pending_resources]
+    
+    def list_prompts(self) -> list[str]:
+        """List registered prompt names."""
+        return [name for name, _ in self._pending_prompts]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -300,7 +396,24 @@ def create_http_app(registry: ToolRegistry, name: str = "toolcase"):
 
 
 def create_mcp_server(registry: ToolRegistry, name: str = "toolcase") -> MCPServer:
-    """Create MCP server without starting it."""
+    """Create MCP server without starting it. Returns server for resource/prompt registration.
+    
+    Example:
+        >>> server = create_mcp_server(registry, "my-api")
+        >>> 
+        >>> @server.resource("config://app")
+        ... async def app_config() -> str:
+        ...     return json.dumps({"version": "1.0"})
+        >>> 
+        >>> @server.prompt("summarize")
+        ... def summarize(text: str) -> str:
+        ...     return f"Summarize:\\n{text}"
+        >>> 
+        >>> server.run(transport="sse", port=8080)
+    
+    Returns:
+        MCPServer instance with full tools/resources/prompts support
+    """
     return MCPServer(name, registry)
 
 
