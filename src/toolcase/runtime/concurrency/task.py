@@ -22,7 +22,6 @@ Example:
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import functools
 from collections.abc import Awaitable, Coroutine
 from dataclasses import dataclass, field
@@ -35,10 +34,17 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 P = ParamSpec("P")
 
-# Context variable for current task tracking
-_current_task: contextvars.ContextVar[asyncio.Task[object] | None] = contextvars.ContextVar(
-    "current_task", default=None
-)
+__all__ = [
+    "TaskState",
+    "TaskHandle",
+    "CancelScope",
+    "TaskGroup",
+    "shield",
+    "checkpoint",
+    "current_task",
+    "spawn",
+    "cancellable",
+]
 
 
 class TaskState(StrEnum):

@@ -28,13 +28,28 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Generic, TypeVar
-
-if TYPE_CHECKING:
-    pass
+from typing import Callable, Generic, TypeVar
 
 T = TypeVar("T")
 U = TypeVar("U")
+
+__all__ = [
+    "merge_streams",
+    "interleave_streams",
+    "buffer_stream",
+    "throttle_stream",
+    "batch_stream",
+    "timeout_stream",
+    "take_stream",
+    "skip_stream",
+    "filter_stream",
+    "map_stream",
+    "flatten_stream",
+    "StreamMerger",
+    "enumerate_stream",
+    "zip_streams",
+    "chain_streams",
+]
 
 
 async def merge_streams(*streams: AsyncIterator[T]) -> AsyncIterator[T]:
@@ -237,47 +252,39 @@ async def batch_stream(
     """
     batch: list[T] = []
     deadline: float | None = None
+    exhausted = False
     
-    async def get_with_timeout() -> tuple[T | None, bool]:
+    while not exhausted:
+        if not batch and timeout:
+            deadline = time.monotonic() + timeout
+        
         try:
             if timeout and deadline:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return (None, False)
-                return (await asyncio.wait_for(stream.__anext__(), timeout=remaining), True)
-            return (await stream.__anext__(), True)
-        except asyncio.TimeoutError:
-            return (None, False)
-        except StopAsyncIteration:
-            return (None, False)
-    
-    try:
-        while True:
-            if not batch and timeout:
-                deadline = time.monotonic() + timeout
-            
-            item, got_item = await get_with_timeout()
-            
-            if got_item:
-                batch.append(item)  # type: ignore[arg-type]
-                if len(batch) >= size:
-                    yield batch
-                    batch = []
+                    # Timeout—flush current batch
+                    if batch:
+                        yield batch
+                        batch = []
                     deadline = None
+                    continue
+                item = await asyncio.wait_for(stream.__anext__(), timeout=remaining)
             else:
-                # Timeout or stream ended
-                if batch:
-                    yield batch
-                    batch = []
+                item = await stream.__anext__()
+            
+            batch.append(item)
+            if len(batch) >= size:
+                yield batch
+                batch = []
+                deadline = None
                 
-                # Check if stream is done
-                try:
-                    item = await stream.__anext__()
-                    batch.append(item)
-                except StopAsyncIteration:
-                    break
-    except StopAsyncIteration:
-        pass
+        except asyncio.TimeoutError:
+            if batch:
+                yield batch
+                batch = []
+            deadline = None
+        except StopAsyncIteration:
+            exhausted = True
     
     if batch:
         yield batch

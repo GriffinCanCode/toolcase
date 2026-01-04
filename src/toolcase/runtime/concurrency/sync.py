@@ -33,6 +33,17 @@ from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:
     from types import TracebackType
 
+__all__ = [
+    "Lock",
+    "RLock",
+    "Semaphore",
+    "BoundedSemaphore",
+    "Event",
+    "Condition",
+    "Barrier",
+    "CapacityLimiter",
+]
+
 
 class Lock:
     """Async mutual exclusion lock with timeout support.
@@ -603,7 +614,8 @@ class CapacityLimiter:
     def set_total(self, new_total: int) -> None:
         """Adjust total capacity dynamically.
         
-        If reducing, waits for borrowed capacity to free up.
+        If increasing: immediately releases additional slots.
+        If decreasing: new limit takes effect as slots are naturally released.
         """
         if new_total < 1:
             raise ValueError("Total must be >= 1")
@@ -612,13 +624,8 @@ class CapacityLimiter:
         self._total = new_total
         
         if delta > 0:
-            # Increase capacity
             for _ in range(delta):
                 self._semaphore.release()
-        elif delta < 0:
-            # Decrease - will naturally reduce as slots are released
-            # Acquiring tasks will wait when we exceed new limit
-            pass
     
     async def __aenter__(self) -> CapacityLimiter:
         await self.acquire()

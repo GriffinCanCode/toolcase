@@ -37,6 +37,18 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 P = ParamSpec("P")
 
+__all__ = [
+    "ThreadPool",
+    "ProcessPool",
+    "run_in_thread",
+    "run_in_process",
+    "shutdown_default_pools",
+    "threadpool",
+    "processpool",
+    "DEFAULT_THREAD_WORKERS",
+    "DEFAULT_PROCESS_WORKERS",
+]
+
 # Default worker counts based on CPU cores
 _CPU_COUNT = os.cpu_count() or 1
 DEFAULT_THREAD_WORKERS = min(32, _CPU_COUNT + 4)  # I/O bound heuristic
@@ -337,11 +349,14 @@ def shutdown_default_pools(wait: bool = True) -> None:
 # Decorators
 # ─────────────────────────────────────────────────────────────────────────────
 
+from collections.abc import Awaitable, Coroutine
+
+
 def threadpool(
     func: Callable[P, T] | None = None,
     *,
     pool: ThreadPool | None = None,
-) -> Callable[P, T] | Callable[[Callable[P, T]], Callable[P, asyncio.Future[T]]]:
+) -> Callable[P, T] | Callable[[Callable[P, T]], Callable[P, Coroutine[object, object, T]]]:
     """Decorator to run sync function in thread pool.
     
     Converts a sync function to an async one that runs in a thread pool.
@@ -354,23 +369,21 @@ def threadpool(
         >>> 
         >>> result = await blocking_operation(5)
     """
-    def decorator(f: Callable[P, T]) -> Callable[P, asyncio.Future[T]]:
+    def decorator(f: Callable[P, T]) -> Callable[P, Coroutine[object, object, T]]:
         @functools.wraps(f)
-        def wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Future[T]:
+        async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
             p = pool or _get_default_thread_pool()
-            return asyncio.ensure_future(p.run(f, *args, **kwargs))
-        return wrapper  # type: ignore[return-value]
+            return await p.run(f, *args, **kwargs)
+        return wrapper
     
-    if func is not None:
-        return decorator(func)  # type: ignore[return-value]
-    return decorator
+    return decorator(func) if func is not None else decorator
 
 
 def processpool(
     func: Callable[P, T] | None = None,
     *,
     pool: ProcessPool | None = None,
-) -> Callable[P, T] | Callable[[Callable[P, T]], Callable[P, asyncio.Future[T]]]:
+) -> Callable[P, T] | Callable[[Callable[P, T]], Callable[P, Coroutine[object, object, T]]]:
     """Decorator to run sync function in process pool.
     
     Converts a sync function to an async one that runs in a process pool.
@@ -383,13 +396,11 @@ def processpool(
         >>> 
         >>> result = await cpu_intensive(raw_data)
     """
-    def decorator(f: Callable[P, T]) -> Callable[P, asyncio.Future[T]]:
+    def decorator(f: Callable[P, T]) -> Callable[P, Coroutine[object, object, T]]:
         @functools.wraps(f)
-        def wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Future[T]:
+        async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
             p = pool or _get_default_process_pool()
-            return asyncio.ensure_future(p.run(f, *args, **kwargs))
-        return wrapper  # type: ignore[return-value]
+            return await p.run(f, *args, **kwargs)
+        return wrapper
     
-    if func is not None:
-        return decorator(func)  # type: ignore[return-value]
-    return decorator
+    return decorator(func) if func is not None else decorator
