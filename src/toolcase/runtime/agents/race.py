@@ -20,38 +20,24 @@ Example:
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
 from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, ToolResult, format_validation_error
-from toolcase.runtime.concurrency import CancelScope, checkpoint
-
-if TYPE_CHECKING:
-    pass
+from toolcase.runtime.concurrency import checkpoint
 
 
 class RaceParams(BaseModel):
     """Parameters for race execution."""
-    
-    input: JsonDict = Field(
-        default_factory=dict,
-        description="Input parameters broadcasted to all racing tools",
-    )
+    input: JsonDict = Field(default_factory=dict, description="Input parameters broadcasted to all racing tools")
 
 
-# Rebuild model to resolve recursive JsonValue type
-RaceParams.model_rebuild()
+RaceParams.model_rebuild()  # Resolve recursive JsonValue type
 
 
 class RaceTool(BaseTool[RaceParams]):
-    """Parallel execution with first-success-wins semantics.
-    
-    Runs all tools concurrently, returns as soon as one succeeds.
-    Cancels remaining tools after first success.
-    
-    If all fail, returns combined error with all failures.
+    """Parallel execution with first-success-wins. Cancels remaining tools after first success.
     
     Example:
         >>> race_search = RaceTool(
@@ -61,7 +47,6 @@ class RaceTool(BaseTool[RaceParams]):
     """
     
     __slots__ = ("_tools", "_timeout", "_meta")
-    
     params_schema = RaceParams
     cache_enabled = False
     
@@ -76,18 +61,12 @@ class RaceTool(BaseTool[RaceParams]):
         if not tools:
             raise ValueError("Race requires at least one tool")
         
-        self._tools = tools
-        self._timeout = timeout
-        
+        self._tools, self._timeout = tools, timeout
         tool_names = [t.metadata.name for t in tools]
-        derived_name = name or f"race_{'_'.join(tool_names[:3])}"
-        derived_desc = description or f"Race: {' | '.join(tool_names)}"
-        
         self._meta = ToolMetadata(
-            name=derived_name,
-            description=derived_desc,
-            category="agents",
-            streaming=False,  # Race can't stream (first-wins semantics)
+            name=name or f"race_{'_'.join(tool_names[:3])}",
+            description=description or f"Race: {' | '.join(tool_names)}",
+            category="agents", streaming=False,  # Race can't stream (first-wins semantics)
         )
     
     @property
@@ -102,26 +81,21 @@ class RaceTool(BaseTool[RaceParams]):
         return self._run_async_sync(self._async_run(params))
     
     async def _async_run(self, params: RaceParams) -> str:
-        result = await self._async_run_result(params)
-        if result.is_ok():
-            return result.unwrap()
-        return result.unwrap_err().message
+        r = await self._async_run_result(params)
+        return r.unwrap() if r.is_ok() else r.unwrap_err().message
     
     async def _async_run_result(self, params: RaceParams) -> ToolResult:
         """Execute all tools, return first success using structured concurrency."""
-        input_dict = params.input
-        errors: list[ErrorTrace | None] = [None] * len(self._tools)
-        timed_out = False
+        input_dict, errors, timed_out = params.input, [None] * len(self._tools), False
         
         async def run_tool(idx: int, tool: BaseTool[BaseModel]) -> tuple[int, ToolResult]:
-            await checkpoint()  # Cooperative cancellation point
+            await checkpoint()
             try:
                 tool_params = tool.params_schema(**input_dict)
             except ValidationError as e:
                 return idx, Err(ErrorTrace(
                     message=format_validation_error(e, tool_name=tool.metadata.name),
-                    error_code=ErrorCode.INVALID_PARAMS.value,
-                    recoverable=False,
+                    error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False,
                 ))
             return idx, await tool.arun_result(tool_params)
         
@@ -132,57 +106,40 @@ class RaceTool(BaseTool[RaceParams]):
             async with asyncio.timeout(self._timeout):
                 while pending:
                     done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                    
                     for task in done:
                         if task.cancelled():
                             continue
                         try:
                             idx, result = task.result()
                             if result.is_ok():
-                                # Winner - cancel remaining
                                 for p in pending:
                                     p.cancel()
                                 return result
                             errors[idx] = result.unwrap_err()
                         except Exception:
-                            pass  # Ignore exceptions from cancelled tasks
+                            pass
         except TimeoutError:
             timed_out = True
         finally:
-            # Clean up any remaining tasks
             for task in tasks:
                 if not task.done():
                     task.cancel()
-            # Wait for cancellations to complete
             if any(not t.done() for t in tasks):
                 await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Build error response
         valid_errors = [e for e in errors if e is not None]
+        n = len(self._tools)
         
         if timed_out and not valid_errors:
-            trace = ErrorTrace(
-                message=f"All {len(self._tools)} racing tools timed out",
-                error_code=ErrorCode.TIMEOUT.value,
-                recoverable=True,
-            )
+            trace = ErrorTrace(message=f"All {n} racing tools timed out", error_code=ErrorCode.TIMEOUT.value, recoverable=True)
         elif not valid_errors:
-            trace = ErrorTrace(
-                message=f"All {len(self._tools)} racing tools failed",
-                error_code=ErrorCode.UNKNOWN.value,
-                recoverable=True,
-            )
+            trace = ErrorTrace(message=f"All {n} racing tools failed", error_code=ErrorCode.UNKNOWN.value, recoverable=True)
         else:
             trace = ErrorTrace(
-                message=f"All {len(self._tools)} racing tools failed",
-                error_code=valid_errors[0].error_code,
+                message=f"All {n} racing tools failed", error_code=valid_errors[0].error_code,
                 recoverable=any(e.recoverable for e in valid_errors),
-                details="\n".join(
-                    f"- [{self._tools[i].metadata.name}] {e.message}"
-                    for i, e in enumerate(errors) if e is not None
-                ),
+                details="\n".join(f"- [{self._tools[i].metadata.name}] {e.message}" for i, e in enumerate(errors) if e),
             )
-        
         return Err(trace.with_operation(f"race:{self._meta.name}"))
 
 
@@ -194,8 +151,7 @@ def race(
 ) -> RaceTool:
     """Create a race between tools - first success wins.
     
-    Runs all tools concurrently. Returns as soon as any tool
-    succeeds. Cancels remaining tools after winner.
+    Runs all tools concurrently. Returns as soon as any tool succeeds. Cancels remaining tools after winner.
     
     Args:
         *tools: Tools to race
@@ -224,10 +180,4 @@ def race(
     """
     if not tools:
         raise ValueError("race() requires at least one tool")
-    
-    return RaceTool(
-        list(tools),
-        timeout=timeout,
-        name=name,
-        description=description,
-    )
+    return RaceTool(list(tools), timeout=timeout, name=name, description=description)

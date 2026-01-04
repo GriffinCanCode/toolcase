@@ -17,15 +17,12 @@ Example:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import Callable
 
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
 from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, Result, ToolResult, format_validation_error
-
-if TYPE_CHECKING:
-    pass
 
 
 # Type aliases for gate functions
@@ -36,27 +33,16 @@ ParamsTransform = Callable[[JsonDict], JsonDict]
 
 class GateParams(BaseModel):
     """Parameters for gate execution."""
-    
-    input: JsonDict = Field(
-        default_factory=dict,
-        description="Input parameters to validate and pass through",
-    )
+    input: JsonDict = Field(default_factory=dict, description="Input parameters to validate and pass through")
 
 
-# Rebuild model to resolve recursive JsonValue type
-GateParams.model_rebuild()
+GateParams.model_rebuild()  # Resolve recursive JsonValue type
 
 
 class GateTool(BaseTool[GateParams]):
-    """Pre/post condition gate for tool execution.
+    """Pre/post condition gate. Validates inputs before execution and/or outputs after.
     
-    Validates inputs before execution and/or outputs after.
-    Can transform parameters and sanitize results.
-    
-    Gate functions can return:
-    - True/False: Pass/block
-    - str: Block with custom message
-    - ToolResult: Full control over result
+    Gate functions can return: True/False (pass/block), str (block msg), or ToolResult (full control).
     
     Example:
         >>> gated = GateTool(
@@ -68,7 +54,6 @@ class GateTool(BaseTool[GateParams]):
     """
     
     __slots__ = ("_tool", "_pre", "_post", "_transform", "_block_msg", "_meta")
-    
     params_schema = GateParams
     cache_enabled = False
     
@@ -83,20 +68,12 @@ class GateTool(BaseTool[GateParams]):
         name: str | None = None,
         description: str | None = None,
     ) -> None:
-        self._tool = tool
-        self._pre = pre_check
-        self._post = post_check
-        self._transform = transform
-        self._block_msg = on_block
-        
-        derived_name = name or f"gate_{tool.metadata.name}"
-        derived_desc = description or f"Gated: {tool.metadata.description}"
-        
+        self._tool, self._pre, self._post = tool, pre_check, post_check
+        self._transform, self._block_msg = transform, on_block
         self._meta = ToolMetadata(
-            name=derived_name,
-            description=derived_desc,
-            category="agents",
-            streaming=tool.metadata.streaming,
+            name=name or f"gate_{tool.metadata.name}",
+            description=description or f"Gated: {tool.metadata.description}",
+            category="agents", streaming=tool.metadata.streaming,
         )
     
     @property
@@ -109,42 +86,21 @@ class GateTool(BaseTool[GateParams]):
     
     def _check_result(self, check_output: bool | str | ToolResult, phase: str) -> ToolResult | None:
         """Interpret check function output. Returns None to proceed, Err to block."""
-        if isinstance(check_output, bool):
-            if check_output:
-                return None  # Pass
-            trace = ErrorTrace(
-                message=self._block_msg,
-                error_code=ErrorCode.PERMISSION_DENIED.value,
-                recoverable=False,
-            ).with_operation(f"gate:{self._meta.name}", phase=phase)
-            return Err(trace)
-        
-        if isinstance(check_output, str):
-            # String = block with custom message
-            trace = ErrorTrace(
-                message=check_output,
-                error_code=ErrorCode.PERMISSION_DENIED.value,
-                recoverable=False,
-            ).with_operation(f"gate:{self._meta.name}", phase=phase)
-            return Err(trace)
-        
-        # Result type - use directly (check using Result base class)
-        if isinstance(check_output, Result):
-            if check_output.is_err():
-                return check_output
-            return None  # Ok result means pass
-        
-        # Unknown type - pass through
-        return None
+        match check_output:
+            case True: return None
+            case False:
+                return Err(ErrorTrace(message=self._block_msg, error_code=ErrorCode.PERMISSION_DENIED.value, recoverable=False).with_operation(f"gate:{self._meta.name}", phase=phase))
+            case str() as msg:
+                return Err(ErrorTrace(message=msg, error_code=ErrorCode.PERMISSION_DENIED.value, recoverable=False).with_operation(f"gate:{self._meta.name}", phase=phase))
+            case Result() as r if r.is_err(): return r
+            case _: return None
     
     def _run(self, params: GateParams) -> str:
         return self._run_async_sync(self._async_run(params))
     
     async def _async_run(self, params: GateParams) -> str:
-        result = await self._async_run_result(params)
-        if result.is_ok():
-            return result.unwrap()
-        return result.unwrap_err().message
+        r = await self._async_run_result(params)
+        return r.unwrap() if r.is_ok() else r.unwrap_err().message
     
     async def _async_run_result(self, params: GateParams) -> ToolResult:
         """Execute with pre/post gate checks."""
@@ -155,15 +111,10 @@ class GateTool(BaseTool[GateParams]):
             try:
                 pre_result = self._pre(input_dict)
             except Exception as e:
-                trace = ErrorTrace(
-                    message=f"Pre-check failed: {e}",
-                    error_code=ErrorCode.INVALID_PARAMS.value,
-                    recoverable=False,
-                ).with_operation(f"gate:{self._meta.name}", phase="pre")
-                return Err(trace)
-            
-            blocked = self._check_result(pre_result, "pre")
-            if blocked is not None:
+                return Err(ErrorTrace(
+                    message=f"Pre-check failed: {e}", error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False,
+                ).with_operation(f"gate:{self._meta.name}", phase="pre"))
+            if (blocked := self._check_result(pre_result, "pre")) is not None:
                 return blocked
         
         # Transform params if specified
@@ -171,28 +122,21 @@ class GateTool(BaseTool[GateParams]):
             try:
                 input_dict = self._transform(input_dict)
             except Exception as e:
-                trace = ErrorTrace(
-                    message=f"Transform failed: {e}",
-                    error_code=ErrorCode.PARSE_ERROR.value,
-                    recoverable=False,
-                ).with_operation(f"gate:{self._meta.name}", phase="transform")
-                return Err(trace)
+                return Err(ErrorTrace(
+                    message=f"Transform failed: {e}", error_code=ErrorCode.PARSE_ERROR.value, recoverable=False,
+                ).with_operation(f"gate:{self._meta.name}", phase="transform"))
         
         # Build params for underlying tool
         try:
             tool_params = self._tool.params_schema(**input_dict)
         except ValidationError as e:
-            trace = ErrorTrace(
+            return Err(ErrorTrace(
                 message=format_validation_error(e, tool_name=self._tool.metadata.name),
-                error_code=ErrorCode.INVALID_PARAMS.value,
-                recoverable=False,
-            )
-            return Err(trace)
+                error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False,
+            ))
         
         # Execute tool
-        result = await self._tool.arun_result(tool_params)
-        
-        if result.is_err():
+        if (result := await self._tool.arun_result(tool_params)).is_err():
             return result
         
         output = result.unwrap()
@@ -202,15 +146,11 @@ class GateTool(BaseTool[GateParams]):
             try:
                 post_result = self._post(output)
             except Exception as e:
-                trace = ErrorTrace(
-                    message=f"Post-check failed: {e}",
-                    error_code=ErrorCode.INVALID_PARAMS.value,
-                    recoverable=False,
-                ).with_operation(f"gate:{self._meta.name}", phase="post")
-                return Err(trace)
+                return Err(ErrorTrace(
+                    message=f"Post-check failed: {e}", error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False,
+                ).with_operation(f"gate:{self._meta.name}", phase="post"))
             
-            blocked = self._check_result(post_result, "post")
-            if blocked is not None:
+            if (blocked := self._check_result(post_result, "post")) is not None:
                 return blocked
             
             # Post-check can transform output (if it returned Result with value)
@@ -277,12 +217,4 @@ def gate(
         ...     post=lambda r: len(r) < 10000,  # Limit response size
         ... )
     """
-    return GateTool(
-        tool,
-        pre_check=pre,
-        post_check=post,
-        transform=transform,
-        on_block=on_block,
-        name=name,
-        description=description,
-    )
+    return GateTool(tool, pre_check=pre, post_check=post, transform=transform, on_block=on_block, name=name, description=description)

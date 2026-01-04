@@ -17,46 +17,30 @@ Example:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
 from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, ToolResult, format_validation_error
 from toolcase.runtime.concurrency import CancelScope
 
-if TYPE_CHECKING:
-    pass
-
 
 # Default errors that trigger fallback (transient/recoverable)
 DEFAULT_FALLBACK_CODES: frozenset[ErrorCode] = frozenset({
-    ErrorCode.RATE_LIMITED,
-    ErrorCode.TIMEOUT,
-    ErrorCode.NETWORK_ERROR,
-    ErrorCode.EXTERNAL_SERVICE_ERROR,
-    ErrorCode.UNKNOWN,  # Generic failures
+    ErrorCode.RATE_LIMITED, ErrorCode.TIMEOUT, ErrorCode.NETWORK_ERROR,
+    ErrorCode.EXTERNAL_SERVICE_ERROR, ErrorCode.UNKNOWN,
 })
 
 
 class FallbackParams(BaseModel):
     """Parameters for fallback execution."""
-    
-    input: JsonDict = Field(
-        default_factory=dict,
-        description="Input parameters passed to each fallback tool",
-    )
+    input: JsonDict = Field(default_factory=dict, description="Input parameters passed to each fallback tool")
 
 
-# Rebuild model to resolve recursive JsonValue type
-FallbackParams.model_rebuild()
+FallbackParams.model_rebuild()  # Resolve recursive JsonValue type
 
 
 class FallbackTool(BaseTool[FallbackParams]):
-    """Fallback chain with timeout and error filtering.
-    
-    Tries tools sequentially until one succeeds. Can filter which
-    error types trigger fallback vs immediate failure.
+    """Fallback chain with timeout and error filtering. Tries tools sequentially until one succeeds.
     
     Example:
         >>> chain = FallbackTool(
@@ -67,7 +51,6 @@ class FallbackTool(BaseTool[FallbackParams]):
     """
     
     __slots__ = ("_tools", "_timeout", "_fallback_codes", "_meta")
-    
     params_schema = FallbackParams
     cache_enabled = False
     
@@ -83,19 +66,14 @@ class FallbackTool(BaseTool[FallbackParams]):
         if not tools:
             raise ValueError("Fallback requires at least one tool")
         
-        self._tools = tools
-        self._timeout = timeout
+        self._tools, self._timeout = tools, timeout
         self._fallback_codes = fallback_on or DEFAULT_FALLBACK_CODES
         
         tool_names = [t.metadata.name for t in tools]
-        derived_name = name or f"fallback_{'_'.join(tool_names[:3])}"
-        derived_desc = description or f"Fallback chain: {' → '.join(tool_names)}"
-        
         self._meta = ToolMetadata(
-            name=derived_name,
-            description=derived_desc,
-            category="agents",
-            streaming=any(t.metadata.streaming for t in tools),
+            name=name or f"fallback_{'_'.join(tool_names[:3])}",
+            description=description or f"Fallback chain: {' → '.join(tool_names)}",
+            category="agents", streaming=any(t.metadata.streaming for t in tools),
         )
     
     @property
@@ -109,80 +87,58 @@ class FallbackTool(BaseTool[FallbackParams]):
     def _should_fallback(self, trace: ErrorTrace) -> bool:
         """Determine if error should trigger fallback to next tool."""
         if not trace.error_code:
-            return True  # Unknown errors fallback by default
+            return True
         try:
-            code = ErrorCode(trace.error_code)
-            return code in self._fallback_codes
+            return ErrorCode(trace.error_code) in self._fallback_codes
         except ValueError:
-            return True  # Unknown codes fallback
+            return True
     
     def _run(self, params: FallbackParams) -> str:
         return self._run_async_sync(self._async_run(params))
     
     async def _async_run(self, params: FallbackParams) -> str:
-        result = await self._async_run_result(params)
-        if result.is_ok():
-            return result.unwrap()
-        return result.unwrap_err().message
+        r = await self._async_run_result(params)
+        return r.unwrap() if r.is_ok() else r.unwrap_err().message
     
     async def _async_run_result(self, params: FallbackParams) -> ToolResult:
         """Execute fallback chain with Result-based handling using structured concurrency."""
-        last_error: ErrorTrace | None = None
-        errors: list[ErrorTrace] = []
+        last_error, errors = None, []
         
-        for i, tool in enumerate(self._tools):
-            # Build params for this tool
+        for tool in self._tools:
             try:
                 tool_params = tool.params_schema(**params.input)
             except ValidationError as e:
-                trace = ErrorTrace(
+                errors.append(ErrorTrace(
                     message=format_validation_error(e, tool_name=tool.metadata.name),
-                    error_code=ErrorCode.INVALID_PARAMS.value,
-                    recoverable=False,
-                )
-                errors.append(trace)
-                continue  # Try next tool
+                    error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False,
+                ))
+                continue
             
-            # Execute with timeout using CancelScope
             async with CancelScope(timeout=self._timeout) as scope:
                 result = await tool.arun_result(tool_params)
             
             if scope.cancel_called:
-                trace = ErrorTrace(
+                last_error = ErrorTrace(
                     message=f"Tool {tool.metadata.name} timed out after {self._timeout}s",
-                    error_code=ErrorCode.TIMEOUT.value,
-                    recoverable=True,
+                    error_code=ErrorCode.TIMEOUT.value, recoverable=True,
                 )
-                errors.append(trace)
-                last_error = trace
-                continue  # Timeout triggers fallback
+                errors.append(last_error)
+                continue
             
-            # Success - return immediately
             if result.is_ok():
                 return result
             
-            # Error - check if we should fallback
-            trace = result.unwrap_err()
+            last_error = trace = result.unwrap_err()
             errors.append(trace)
-            last_error = trace
             
             if not self._should_fallback(trace):
-                # Non-fallback error - stop chain
-                return result.map_err(
-                    lambda e: e.with_operation(f"fallback:{self._meta.name}", tool=tool.metadata.name)
-                )
-            
-            # Continue to next fallback
+                return result.map_err(lambda e: e.with_operation(f"fallback:{self._meta.name}", tool=tool.metadata.name))
         
-        # All tools failed
-        final_error = ErrorTrace(
+        return Err(ErrorTrace(
             message=f"All {len(self._tools)} fallback tools failed",
             error_code=last_error.error_code if last_error else ErrorCode.UNKNOWN.value,
-            recoverable=False,
-            details="\n".join(f"- {e.message}" for e in errors),
-        ).with_operation(f"fallback:{self._meta.name}")
-        
-        return Err(final_error)
+            recoverable=False, details="\n".join(f"- {e.message}" for e in errors),
+        ).with_operation(f"fallback:{self._meta.name}"))
 
 
 def fallback(
@@ -194,8 +150,7 @@ def fallback(
 ) -> FallbackTool:
     """Create a fallback chain from tools.
     
-    Tries each tool in order until one succeeds. Timeout and specific
-    error codes trigger fallback to next tool.
+    Tries each tool in order until one succeeds. Timeout and specific error codes trigger fallback to next tool.
     
     Args:
         *tools: Tools in fallback order (first = primary)
@@ -221,11 +176,4 @@ def fallback(
     """
     if not tools:
         raise ValueError("fallback() requires at least one tool")
-    
-    return FallbackTool(
-        list(tools),
-        timeout=timeout,
-        fallback_on=fallback_on,
-        name=name,
-        description=description,
-    )
+    return FallbackTool(list(tools), timeout=timeout, fallback_on=fallback_on, name=name, description=description)

@@ -40,7 +40,6 @@ logger = logging.getLogger("toolcase.agents.escalation")
 
 class EscalationStatus(str, Enum):
     """Status of an escalation request."""
-    
     PENDING = "pending"      # Awaiting human review
     APPROVED = "approved"    # Human approved, proceed
     REJECTED = "rejected"    # Human rejected
@@ -50,15 +49,7 @@ class EscalationStatus(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class EscalationResult:
-    """Result from an escalation handler.
-    
-    Attributes:
-        status: Resolution status
-        value: Override value if status is APPROVED/OVERRIDE
-        reason: Human-provided reason for decision
-        reviewer: Identifier of the human reviewer
-    """
-    
+    """Result from escalation handler. Attrs: status, value (override if APPROVED/OVERRIDE), reason, reviewer"""
     status: EscalationStatus
     value: str | None = None
     reason: str | None = None
@@ -67,16 +58,12 @@ class EscalationResult:
     @property
     def should_proceed(self) -> bool:
         """Whether execution should proceed with the result."""
-        return self.status in (EscalationStatus.APPROVED, EscalationStatus.OVERRIDE)
+        return self.status in {EscalationStatus.APPROVED, EscalationStatus.OVERRIDE}
 
 
 @dataclass(slots=True)
 class EscalationRequest:
-    """Request sent to escalation handler.
-    
-    Contains all context needed for human review.
-    """
-    
+    """Request sent to escalation handler. Contains all context needed for human review."""
     tool_name: str
     params: JsonDict
     error: ErrorTrace
@@ -87,70 +74,41 @@ class EscalationRequest:
 
 @runtime_checkable
 class EscalationHandler(Protocol):
-    """Protocol for escalation handlers.
-    
-    Implement this to integrate with your approval system:
-    - Queue-based (Redis, RabbitMQ, SQS)
-    - Webhook-based (Slack, Teams, PagerDuty)
-    - Database-based (polling table)
-    - Sync blocking (CLI prompt)
-    """
+    """Protocol for escalation handlers. Implement for queue/webhook/DB/CLI integrations."""
     
     async def escalate(self, request: EscalationRequest) -> EscalationResult:
-        """Submit escalation and await resolution.
-        
-        Args:
-            request: Full context for human review
-        
-        Returns:
-            EscalationResult with decision
-        """
+        """Submit escalation and await resolution."""
         ...
 
 
 class QueueEscalation:
-    """Queue-based escalation handler (async polling).
-    
-    Publishes to a named queue and polls for response.
-    Override `publish` and `poll` for your queue system.
+    """Queue-based escalation handler (async polling). Override publish/poll for your queue system.
     
     Example:
         >>> class RedisEscalation(QueueEscalation):
         ...     async def publish(self, request):
         ...         await redis.lpush(self.queue_name, request.json())
-        ...     
         ...     async def poll(self, request_id):
         ...         return await redis.brpop(f"response:{request_id}", timeout=60)
     """
     
-    def __init__(
-        self,
-        queue_name: str,
-        *,
-        timeout: float = 300.0,  # 5 min default
-        poll_interval: float = 1.0,
-    ) -> None:
-        self.queue_name = queue_name
-        self.timeout = timeout
-        self.poll_interval = poll_interval
+    def __init__(self, queue_name: str, *, timeout: float = 300.0, poll_interval: float = 1.0) -> None:
+        self.queue_name, self.timeout, self.poll_interval = queue_name, timeout, poll_interval
         self._pending: dict[str, EscalationResult | None] = {}
     
     def _request_id(self, request: EscalationRequest) -> str:
         """Generate unique request ID."""
-        import hashlib
-        data = f"{request.tool_name}:{request.timestamp.isoformat()}:{id(request)}"
-        return hashlib.sha256(data.encode()).hexdigest()[:16]
+        from hashlib import sha256
+        return sha256(f"{request.tool_name}:{request.timestamp.isoformat()}:{id(request)}".encode()).hexdigest()[:16]
     
     async def publish(self, request: EscalationRequest, request_id: str) -> None:
         """Publish request to queue. Override for your system."""
         logger.info(f"[{self.queue_name}] Escalation {request_id}: {request.tool_name}")
-        # Default: just log (for testing)
-        self._pending[request_id] = None
+        self._pending[request_id] = None  # Default: just log (for testing)
     
     async def poll(self, request_id: str) -> EscalationResult | None:
         """Poll for response. Override for your system."""
-        # Default: check in-memory dict (for testing)
-        return self._pending.get(request_id)
+        return self._pending.get(request_id)  # Default: check in-memory dict (for testing)
     
     def resolve(self, request_id: str, result: EscalationResult) -> None:
         """Manually resolve a pending escalation (for testing)."""
@@ -159,82 +117,49 @@ class QueueEscalation:
     async def escalate(self, request: EscalationRequest) -> EscalationResult:
         """Submit and poll for resolution."""
         request_id = self._request_id(request)
-        
         await self.publish(request, request_id)
         
-        elapsed = 0.0
-        while elapsed < self.timeout:
-            result = await self.poll(request_id)
-            if result is not None:
+        for _ in range(int(self.timeout / self.poll_interval)):
+            if (result := await self.poll(request_id)) is not None:
                 return result
-            
             await checkpoint()
             await asyncio.sleep(self.poll_interval)
-            elapsed += self.poll_interval
         
-        return EscalationResult(
-            status=EscalationStatus.TIMEOUT,
-            reason=f"No response within {self.timeout}s",
-        )
+        return EscalationResult(status=EscalationStatus.TIMEOUT, reason=f"No response within {self.timeout}s")
 
 
 class CallbackEscalation:
-    """Callback-based escalation for sync workflows.
-    
-    Calls a sync function and blocks until it returns.
-    Useful for CLI tools, notebooks, or simple approval flows.
+    """Callback-based escalation for sync workflows (CLI, notebooks, simple approval flows).
     
     Example:
         >>> def cli_approve(request):
         ...     print(f"Approve {request.tool_name}? [y/n]")
         ...     return input().lower() == "y"
-        ...
         >>> escalation = CallbackEscalation(cli_approve)
     """
     
-    def __init__(
-        self,
-        callback: Callable[[EscalationRequest], bool | str | EscalationResult],
-    ) -> None:
+    def __init__(self, callback: Callable[[EscalationRequest], bool | str | EscalationResult]) -> None:
         self.callback = callback
     
     async def escalate(self, request: EscalationRequest) -> EscalationResult:
         """Call callback and interpret result."""
-        result = await to_thread(self.callback, request)
-        
-        if isinstance(result, EscalationResult):
-            return result
-        elif isinstance(result, bool):
-            return EscalationResult(
-                status=EscalationStatus.APPROVED if result else EscalationStatus.REJECTED,
-            )
-        elif isinstance(result, str):
-            return EscalationResult(
-                status=EscalationStatus.OVERRIDE,
-                value=result,
-            )
-        else:
-            return EscalationResult(status=EscalationStatus.REJECTED, reason="Invalid callback response")
+        match await to_thread(self.callback, request):
+            case EscalationResult() as r: return r
+            case bool() as b: return EscalationResult(status=EscalationStatus.APPROVED if b else EscalationStatus.REJECTED)
+            case str() as s: return EscalationResult(status=EscalationStatus.OVERRIDE, value=s)
+            case _: return EscalationResult(status=EscalationStatus.REJECTED, reason="Invalid callback response")
 
 
 class EscalationParams(BaseModel):
     """Parameters for escalation tool execution."""
-    
-    input: JsonDict = Field(
-        default_factory=dict,
-        description="Input parameters for the underlying tool",
-    )
+    input: JsonDict = Field(default_factory=dict, description="Input parameters for the underlying tool")
 
 
-# Rebuild model to resolve recursive JsonValue type
-EscalationParams.model_rebuild()
+EscalationParams.model_rebuild()  # Resolve recursive JsonValue type
 
 
 class EscalationTool(BaseTool[EscalationParams]):
-    """Retry with human escalation on failure.
-    
-    Attempts automated execution up to max_retries, then escalates
-    to human review. If human approves, returns approval result.
+    """Retry with human escalation on failure. Attempts automated execution up to max_retries, then escalates.
     
     Example:
         >>> delete = EscalationTool(
@@ -245,7 +170,6 @@ class EscalationTool(BaseTool[EscalationParams]):
     """
     
     __slots__ = ("_tool", "_max_retries", "_handler", "_retry_codes", "_meta")
-    
     params_schema = EscalationParams
     cache_enabled = False
     
@@ -259,23 +183,12 @@ class EscalationTool(BaseTool[EscalationParams]):
         name: str | None = None,
         description: str | None = None,
     ) -> None:
-        self._tool = tool
-        self._handler = handler
-        self._max_retries = max_retries
-        self._retry_codes = retry_codes or frozenset({
-            ErrorCode.RATE_LIMITED,
-            ErrorCode.TIMEOUT,
-            ErrorCode.NETWORK_ERROR,
-        })
-        
-        derived_name = name or f"escalation_{tool.metadata.name}"
-        derived_desc = description or f"Retry {tool.metadata.name} with human escalation"
-        
+        self._tool, self._handler, self._max_retries = tool, handler, max_retries
+        self._retry_codes = retry_codes or frozenset({ErrorCode.RATE_LIMITED, ErrorCode.TIMEOUT, ErrorCode.NETWORK_ERROR})
         self._meta = ToolMetadata(
-            name=derived_name,
-            description=derived_desc,
-            category="agents",
-            streaming=tool.metadata.streaming,
+            name=name or f"escalation_{tool.metadata.name}",
+            description=description or f"Retry {tool.metadata.name} with human escalation",
+            category="agents", streaming=tool.metadata.streaming,
         )
     
     @property
@@ -293,8 +206,7 @@ class EscalationTool(BaseTool[EscalationParams]):
         if not trace.error_code:
             return True
         try:
-            code = ErrorCode(trace.error_code)
-            return code in self._retry_codes
+            return ErrorCode(trace.error_code) in self._retry_codes
         except ValueError:
             return True
     
@@ -302,39 +214,26 @@ class EscalationTool(BaseTool[EscalationParams]):
         return self._run_async_sync(self._async_run(params))
     
     async def _async_run(self, params: EscalationParams) -> str:
-        result = await self._async_run_result(params)
-        if result.is_ok():
-            return result.unwrap()
-        return result.unwrap_err().message
+        r = await self._async_run_result(params)
+        return r.unwrap() if r.is_ok() else r.unwrap_err().message
     
     async def _async_run_result(self, params: EscalationParams) -> ToolResult:
         """Execute with retry and escalation."""
-        # Build params for underlying tool
         try:
             tool_params = self._tool.params_schema(**params.input)
         except ValidationError as e:
-            trace = ErrorTrace(
+            return Err(ErrorTrace(
                 message=format_validation_error(e, tool_name=self._tool.metadata.name),
-                error_code=ErrorCode.INVALID_PARAMS.value,
-                recoverable=False,
-            )
-            return Err(trace)
+                error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False,
+            ))
         
-        # Retry loop
-        attempt = 0
-        last_error: ErrorTrace | None = None
-        
+        attempt, last_error = 0, None
         while True:
-            result = await self._tool.arun_result(tool_params)
-            
-            if result.is_ok():
+            if (result := await self._tool.arun_result(tool_params)).is_ok():
                 return result
-            
             last_error = result.unwrap_err()
-            
             if not self._should_retry(last_error, attempt):
                 break
-            
             attempt += 1
             logger.info(f"[{self._meta.name}] Retry {attempt}/{self._max_retries}")
             await checkpoint()
@@ -342,29 +241,19 @@ class EscalationTool(BaseTool[EscalationParams]):
         
         # Exhausted retries - escalate to human
         logger.info(f"[{self._meta.name}] Escalating after {attempt} retries")
-        
         request = EscalationRequest(
-            tool_name=self._tool.metadata.name,
-            params=params.input,
-            error=last_error or ErrorTrace(message="Unknown error"),
-            attempt=attempt,
+            tool_name=self._tool.metadata.name, params=params.input,
+            error=last_error or ErrorTrace(message="Unknown error"), attempt=attempt,
         )
         
-        escalation_result = await self._handler.escalate(request)
+        if (esc := await self._handler.escalate(request)).should_proceed:
+            return Ok(esc.value or f"Approved by {esc.reviewer or 'human'}")
         
-        if escalation_result.should_proceed:
-            # Human approved - return their override or success marker
-            value = escalation_result.value or f"Approved by {escalation_result.reviewer or 'human'}"
-            return Ok(value)
-        
-        # Human rejected or timeout
-        trace = ErrorTrace(
-            message=f"Escalation {escalation_result.status.value}: {escalation_result.reason or 'no reason'}",
-            error_code=ErrorCode.PERMISSION_DENIED.value if escalation_result.status == EscalationStatus.REJECTED else ErrorCode.TIMEOUT.value,
+        return Err(ErrorTrace(
+            message=f"Escalation {esc.status.value}: {esc.reason or 'no reason'}",
+            error_code=ErrorCode.PERMISSION_DENIED.value if esc.status == EscalationStatus.REJECTED else ErrorCode.TIMEOUT.value,
             recoverable=False,
-        ).with_operation(f"escalation:{self._meta.name}")
-        
-        return Err(trace)
+        ).with_operation(f"escalation:{self._meta.name}"))
 
 
 def retry_with_escalation(
@@ -378,8 +267,7 @@ def retry_with_escalation(
 ) -> EscalationTool:
     """Create tool with retry and human escalation.
     
-    Retries automated execution up to max_retries times, then
-    escalates to the specified handler for human review.
+    Retries automated execution up to max_retries times, then escalates to the specified handler for human review.
     
     Args:
         tool: Underlying tool to wrap
@@ -406,18 +294,5 @@ def retry_with_escalation(
         ...     escalate_to=SlackEscalation("#approvals"),
         ... )
     """
-    # Convert string to queue handler
-    handler: EscalationHandler
-    if isinstance(escalate_to, str):
-        handler = QueueEscalation(escalate_to)
-    else:
-        handler = escalate_to
-    
-    return EscalationTool(
-        tool,
-        handler,
-        max_retries=max_retries,
-        retry_codes=retry_codes,
-        name=name,
-        description=description,
-    )
+    handler = QueueEscalation(escalate_to) if isinstance(escalate_to, str) else escalate_to
+    return EscalationTool(tool, handler, max_retries=max_retries, retry_codes=retry_codes, name=name, description=description)
