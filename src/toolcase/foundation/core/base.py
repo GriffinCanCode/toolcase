@@ -127,7 +127,7 @@ class ToolMetadata(BaseModel):
     @property
     def short_description(self) -> str:
         """First sentence of description for compact display."""
-        return self.description.split(". ")[0].rstrip(".")
+        return self.description.split(". ", 1)[0].rstrip(".")
     
     def __hash__(self) -> int:
         """Explicit hash for frozen model (enables set/dict membership)."""
@@ -188,13 +188,7 @@ class BaseTool(ABC, Generic[TParams]):
             recoverable=recoverable, details=traceback.format_exc() if include_trace else None,
         ).render()
     
-    def _error_from_exception(
-        self,
-        exc: Exception,
-        context: str = "",
-        *,
-        recoverable: bool = True,
-    ) -> str:
+    def _error_from_exception(self, exc: Exception, context: str = "", *, recoverable: bool = True) -> str:
         """Create error response from caught exception."""
         return ToolError.from_exception(self.metadata.name, exc, context, recoverable=recoverable).render()
     
@@ -327,9 +321,9 @@ class BaseTool(ABC, Generic[TParams]):
             return string_to_result(cached, tool_name)
         
         # Execute with optional retry (timeout wraps entire retry sequence)
-        execute = (lambda: execute_with_retry(lambda: self._async_run_result(params), self.retry_policy, tool_name)
-                   if self.retry_policy else lambda: self._async_run_result(params))
-        result = await asyncio.wait_for(execute(), timeout=timeout)
+        coro = (execute_with_retry(lambda: self._async_run_result(params), self.retry_policy, tool_name)
+                if self.retry_policy else self._async_run_result(params))
+        result = await asyncio.wait_for(coro, timeout=timeout)
         
         if cache and result.is_ok():
             cache.set(tool_name, params, result_to_string(result, tool_name), self.cache_ttl)
@@ -356,16 +350,14 @@ class BaseTool(ABC, Generic[TParams]):
     
     async def arun_with_progress(self, params: TParams, on_progress: ProgressCallback | None = None, timeout: float = 60.0) -> str:
         """Execute with progress callbacks. Collects events and calls callback for each."""
-        result = ""
         async def execute() -> str:
-            nonlocal result
-            async for progress in self.stream_run(params):
-                if on_progress:
-                    on_progress(progress)
-                if progress.kind == ProgressKind.COMPLETE and progress.data:
-                    result = str(progress.data.get("result", ""))
-                elif progress.kind == ProgressKind.ERROR:
-                    raise RuntimeError(progress.message)
+            result = ""
+            async for p in self.stream_run(params):
+                on_progress and on_progress(p)
+                if p.kind == ProgressKind.COMPLETE and p.data:
+                    result = str(p.data.get("result", ""))
+                elif p.kind == ProgressKind.ERROR:
+                    raise RuntimeError(p.message)
             return result
         return await asyncio.wait_for(execute(), timeout=timeout)
     
@@ -398,12 +390,8 @@ class BaseTool(ABC, Generic[TParams]):
     
     async def stream_result_collected(self, params: TParams, timeout: float = 60.0) -> StreamResult[str]:
         """Stream and collect full result with metadata. Returns StreamResult with accumulated content and timing."""
-        start, parts = time.time(), []
-        async def collect() -> StreamResult[str]:
-            async for content in self.stream_result(params):
-                parts.append(content)
-            return StreamResult(value="".join(parts), chunks=len(parts), duration_ms=(time.time() - start) * 1000, tool_name=self.metadata.name)
-        return await asyncio.wait_for(collect(), timeout=timeout)
+        start, parts = time.time(), [c async for c in self.stream_result(params)]
+        return StreamResult(value="".join(parts), chunks=len(parts), duration_ms=(time.time() - start) * 1000, tool_name=self.metadata.name)
     
     # ─────────────────────────────────────────────────────────────────
     # Invocation (kwargs interface)

@@ -40,24 +40,16 @@ import inspect
 import re
 from contextvars import ContextVar
 from functools import wraps
-from typing import (
-    TYPE_CHECKING,
-    Callable,
-    ParamSpec,
-    TypeVar,
-    get_origin,
-    get_type_hints,
-    overload,
-)
+from typing import TYPE_CHECKING, Callable, ParamSpec, TypeVar, get_type_hints, overload
 
 from pydantic import BaseModel, Field, create_model
 
 from toolcase.runtime.concurrency import to_thread
 
 from toolcase.io.cache import DEFAULT_TTL
-from toolcase.foundation.errors import ToolError, ToolException, ToolResult, classify_exception, ErrorTrace, Result
+from toolcase.foundation.errors import ToolResult, classify_exception, ErrorTrace, Result
 from toolcase.foundation.errors.result import _ERR, _OK
-from toolcase.foundation.errors.types import _EMPTY_CONTEXTS, ErrorContext, JsonDict
+from toolcase.foundation.errors.types import ErrorContext, JsonDict
 from .base import BaseTool, ToolMetadata
 
 if TYPE_CHECKING:
@@ -77,21 +69,12 @@ _EMPTY_DEPS: JsonDict = {}
 
 
 def get_injected_deps() -> JsonDict:
-    """Get dependencies for the current execution context.
-    
-    Returns empty dict if not set (safe access pattern).
-    """
-    try:
-        return _injected_deps.get()
-    except LookupError:
-        return _EMPTY_DEPS
+    """Get dependencies for the current execution context. Returns empty dict if not set."""
+    return _injected_deps.get(_EMPTY_DEPS)
 
 
 def set_injected_deps(deps: JsonDict) -> None:
-    """Set dependencies for the current execution context.
-    
-    Called by registry before tool execution to provide resolved dependencies.
-    """
+    """Set dependencies for the current execution context. Called by registry before tool execution."""
     _injected_deps.set(deps)
 
 
@@ -112,70 +95,26 @@ _PARAM_PATTERN = re.compile(
 
 def _parse_docstring_params(docstring: str | None) -> dict[str, str]:
     """Extract parameter descriptions from Google/NumPy style docstrings."""
-    if not docstring:
+    if not docstring or len(sections := re.split(r"\n\s*(?:Args|Arguments|Parameters)\s*:\s*\n", docstring, flags=re.IGNORECASE)) < 2:
         return {}
-    
-    # Find Args/Parameters section
-    sections = re.split(r"\n\s*(?:Args|Arguments|Parameters)\s*:\s*\n", docstring, flags=re.IGNORECASE)
-    if len(sections) < 2:
-        return {}
-    
-    # Parse until next section or end
     args_section = re.split(r"\n\s*(?:Returns|Raises|Examples?|Notes?|Yields)\s*:", sections[1], flags=re.IGNORECASE)[0]
-    
-    params: dict[str, str] = {}
-    for match in _PARAM_PATTERN.finditer(args_section):
-        name = match.group("name")
-        desc = " ".join(match.group("desc").split())  # Normalize whitespace
-        params[name] = desc
-    
-    return params
+    return {m.group("name"): " ".join(m.group("desc").split()) for m in _PARAM_PATTERN.finditer(args_section)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Schema Generation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _generate_schema(
-    func: Callable[..., str],
-    model_name: str,
-    exclude: list[str] | None = None,
-) -> type[BaseModel]:
-    """Generate Pydantic model from function signature.
-    
-    Introspects type hints and defaults to build Field definitions.
-    Extracts descriptions from docstring if available.
-    
-    Args:
-        func: Function to introspect
-        model_name: Name for the generated model
-        exclude: Parameter names to exclude (e.g., injected dependencies)
-    """
-    sig = inspect.signature(func)
-    hints = get_type_hints(func)
-    param_docs = _parse_docstring_params(func.__doc__)
-    excluded = set(exclude or [])
-    
+def _generate_schema(func: Callable[..., str], model_name: str, exclude: list[str] | None = None) -> type[BaseModel]:
+    """Generate Pydantic model from function signature. Introspects type hints and defaults to build Field definitions."""
+    sig, hints, param_docs, excluded = inspect.signature(func), get_type_hints(func), _parse_docstring_params(func.__doc__), set(exclude or [])
     fields: dict[str, tuple[type, object]] = {}
-    
     for name, param in sig.parameters.items():
         if name in ("self", "cls") or name in excluded:
             continue
-        
-        # Get type hint (default to str if missing)
-        field_type = hints.get(name, str)
-        
-        # Get description from docstring
-        description = param_docs.get(name, f"Parameter: {name}")
-        
-        # Build field with default if present
-        if param.default is inspect.Parameter.empty:
-            fields[name] = (field_type, Field(..., description=description))
-        else:
-            fields[name] = (field_type, Field(default=param.default, description=description))
-    
-    model: type[BaseModel] = create_model(model_name, **fields)  # type: ignore[call-overload]
-    return model
+        field_type, description = hints.get(name, str), param_docs.get(name, f"Parameter: {name}")
+        fields[name] = (field_type, Field(..., description=description) if param.default is inspect.Parameter.empty else Field(default=param.default, description=description))
+    return create_model(model_name, **fields)  # type: ignore[call-overload]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,14 +122,7 @@ def _generate_schema(
 # ─────────────────────────────────────────────────────────────────────────────
 
 class FunctionTool(BaseTool[BaseModel]):
-    """BaseTool implementation that wraps a decorated function.
-    
-    This class bridges the function-based API with the class-based BaseTool
-    system, enabling full compatibility with registry, cache, and integrations.
-    
-    Supports dependency injection via the `inject` parameter, where declared
-    dependencies are resolved from the registry's DI container at execution time.
-    """
+    """BaseTool wrapper for decorated functions. Bridges function API with class-based system, supports DI via inject param."""
     
     __slots__ = ("_func", "_is_async", "_original_func", "_inject", "_tool_ctx")
     
@@ -204,90 +136,47 @@ class FunctionTool(BaseTool[BaseModel]):
         cache_ttl: float = DEFAULT_TTL,
         inject: list[str] | None = None,
     ) -> None:
-        self._func = func
+        self._func, self._original_func = func, func
         self._is_async = asyncio.iscoroutinefunction(func) or inspect.isasyncgenfunction(func)
-        self._original_func = func
         self._inject = inject or []
-        # Pre-compute tool context tuple (avoid repeated allocation)
-        self._tool_ctx = (ErrorContext(operation=f"tool:{metadata.name}", location="", metadata={}),)
-        
-        # Use the actual class being instantiated as base (supports subclasses)
-        base_cls = type(self)
-        
-        # Set class-level attributes on the instance
-        # This is necessary because BaseTool expects ClassVars
-        self.__class__ = type(
-            f"{base_cls.__name__}_{metadata.name}",
-            (base_cls,),
-            {
-                "metadata": metadata,
-                "params_schema": params_schema,
-                "cache_enabled": cache_enabled,
-                "cache_ttl": cache_ttl,
-            },
-        )
+        self._tool_ctx = (ErrorContext(operation=f"tool:{metadata.name}", location="", metadata={}),)  # Pre-compute (avoid allocation)
+        # Set class-level attrs (BaseTool expects ClassVars)
+        self.__class__ = type(f"{type(self).__name__}_{metadata.name}", (type(self),),
+                              {"metadata": metadata, "params_schema": params_schema, "cache_enabled": cache_enabled, "cache_ttl": cache_ttl})
     
     def _run(self, params: BaseModel) -> str:
-        """Execute the wrapped function synchronously.
-        
-        Merges validated params with any injected dependencies.
-        Exceptions propagate to _run_result() which handles conversion to Result.
-        """
-        kwargs = params.model_dump()
-        if self._inject:
-            kwargs.update(get_injected_deps())
-        if self._is_async:
-            return self._run_async_sync(self._func(**kwargs))  # type: ignore[arg-type]
-        return self._func(**kwargs)  # type: ignore[return-value]
+        """Execute the wrapped function synchronously. Merges validated params with injected dependencies."""
+        kwargs = params.model_dump() | (get_injected_deps() if self._inject else {})
+        return self._run_async_sync(self._func(**kwargs)) if self._is_async else self._func(**kwargs)  # type: ignore[arg-type, return-value]
     
     def _run_result(self, params: BaseModel) -> ToolResult:
         """Execute with Result-based error handling (optimized path)."""
         try:
-            kwargs = params.model_dump()
-            if self._inject:
-                kwargs.update(get_injected_deps())
-            if self._is_async:
-                return Result(self._run_async_sync(self._func(**kwargs)), _OK)  # type: ignore[arg-type]
-            return Result(self._func(**kwargs), _OK)  # type: ignore[arg-type]
+            kwargs = params.model_dump() | (get_injected_deps() if self._inject else {})
+            return Result(self._run_async_sync(self._func(**kwargs)) if self._is_async else self._func(**kwargs), _OK)  # type: ignore[arg-type]
         except Exception as e:
             return self._make_err(e, "execution")
     
     async def _async_run(self, params: BaseModel) -> str:
-        """Execute the wrapped function asynchronously.
-        
-        Merges validated params with any injected dependencies.
-        Exceptions propagate to _async_run_result() which handles conversion.
-        """
-        kwargs = params.model_dump()
-        if self._inject:
-            kwargs.update(get_injected_deps())
-        if self._is_async:
-            result: str = await self._func(**kwargs)  # type: ignore[misc]
-            return result
-        return await to_thread(self._func, **kwargs)  # type: ignore[arg-type]
+        """Execute the wrapped function asynchronously. Merges validated params with injected dependencies."""
+        kwargs = params.model_dump() | (get_injected_deps() if self._inject else {})
+        return await self._func(**kwargs) if self._is_async else await to_thread(self._func, **kwargs)  # type: ignore[misc, arg-type]
     
     async def _async_run_result(self, params: BaseModel) -> ToolResult:
         """Execute asynchronously with Result-based error handling."""
         try:
-            kwargs = params.model_dump()
-            if self._inject:
-                kwargs.update(get_injected_deps())
-            if self._is_async:
-                result: str = await self._func(**kwargs)  # type: ignore[misc]
-            else:
-                result = await asyncio.to_thread(self._func, **kwargs)  # type: ignore[arg-type]
-            return Result(result, _OK)
+            kwargs = params.model_dump() | (get_injected_deps() if self._inject else {})
+            return Result(await self._func(**kwargs) if self._is_async else await asyncio.to_thread(self._func, **kwargs), _OK)  # type: ignore[misc, arg-type]
         except Exception as e:
             return self._make_err(e, "async execution")
     
     def _make_err(self, exc: Exception, context: str) -> ToolResult:
         """Create Err result from exception (internal, optimized)."""
         import traceback
-        msg = f"{context}: {exc}" if context else str(exc)
-        return Result(
-            ErrorTrace(message=msg, contexts=self._tool_ctx, error_code=classify_exception(exc).value, recoverable=True, details=traceback.format_exc()),
-            _ERR,
-        )
+        return Result(ErrorTrace(
+            message=f"{context}: {exc}" if context else str(exc), contexts=self._tool_ctx,
+            error_code=classify_exception(exc).value, recoverable=True, details=traceback.format_exc(),
+        ), _ERR)
     
     @property
     def func(self) -> Callable[..., str]:
@@ -300,35 +189,19 @@ class FunctionTool(BaseTool[BaseModel]):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class StreamingFunctionTool(FunctionTool):
-    """FunctionTool variant for async generator functions yielding ToolProgress.
-    
-    For progress streaming (status updates, step progress).
-    """
+    """FunctionTool variant for async generator functions yielding ToolProgress. For progress streaming."""
     
     __slots__ = ()
     
     async def stream_run(self, params: BaseModel) -> AsyncIterator[ToolProgress]:
         """Stream progress events from the wrapped generator function."""
-        kwargs = params.model_dump()
-        if self._inject:
-            kwargs.update(get_injected_deps())
-        gen = self._func(**kwargs)
-        async for progress in gen:  # type: ignore[union-attr]
+        kwargs = params.model_dump() | (get_injected_deps() if self._inject else {})
+        async for progress in self._func(**kwargs):  # type: ignore[union-attr]
             yield progress
 
 
 class ResultStreamingFunctionTool(FunctionTool):
-    """FunctionTool variant for async generators yielding string chunks.
-    
-    For true result streaming (LLM outputs, incremental content).
-    The wrapped function should be an async generator yielding strings.
-    
-    Example:
-        >>> @tool(description="Generate report", streaming=True)
-        ... async def generate(topic: str) -> AsyncIterator[str]:
-        ...     async for chunk in llm.stream(prompt):
-        ...         yield chunk
-    """
+    """FunctionTool variant for async generators yielding string chunks. For true result streaming (LLM outputs, incremental content)."""
     
     __slots__ = ()
     
@@ -338,27 +211,18 @@ class ResultStreamingFunctionTool(FunctionTool):
     
     async def stream_result(self, params: BaseModel) -> AsyncIterator[str]:
         """Stream string chunks from the wrapped async generator."""
-        kwargs = params.model_dump()
-        if self._inject:
-            kwargs.update(get_injected_deps())
-        gen = self._func(**kwargs)
-        async for chunk in gen:  # type: ignore[union-attr]
+        kwargs = params.model_dump() | (get_injected_deps() if self._inject else {})
+        async for chunk in self._func(**kwargs):  # type: ignore[union-attr]
             yield chunk
     
     async def _async_run(self, params: BaseModel) -> str:
         """Execute by collecting all stream chunks."""
-        parts: list[str] = []
-        async for chunk in self.stream_result(params):
-            parts.append(chunk)
-        return "".join(parts)
+        return "".join([chunk async for chunk in self.stream_result(params)])
     
     async def _async_run_result(self, params: BaseModel) -> ToolResult:
         """Execute by collecting all stream chunks, with Result handling."""
         try:
-            parts: list[str] = []
-            async for chunk in self.stream_result(params):
-                parts.append(chunk)
-            return Result("".join(parts), _OK)
+            return Result("".join([chunk async for chunk in self.stream_result(params)]), _OK)
         except Exception as e:
             return self._make_err(e, "async execution")
     
@@ -459,58 +323,23 @@ def tool(
         - Injected parameters are excluded from the generated schema
     """
     def decorator(fn: Callable[P, str]) -> FunctionTool:
-        # Derive metadata from function if not provided
         tool_name = name or _to_snake_case(fn.__name__)
         tool_desc = description or _extract_description(fn.__doc__) or f"Execute {tool_name}"
-        
-        # Validate description length
         if len(tool_desc) < 10:
             tool_desc = f"{tool_desc} - automatically generated tool"
         
-        # Build metadata
-        meta = ToolMetadata(
-            name=tool_name,
-            description=tool_desc,
-            category=category,
-            requires_api_key=requires_api_key,
-            streaming=streaming,
-        )
-        
-        # Generate parameter schema (excluding injected params)
-        schema_name = f"{_to_pascal_case(tool_name)}Params"
-        schema = _generate_schema(fn, schema_name, exclude=inject or [])
+        meta = ToolMetadata(name=tool_name, description=tool_desc, category=category, requires_api_key=requires_api_key, streaming=streaming)
+        schema = _generate_schema(fn, f"{_to_pascal_case(tool_name)}Params", exclude=inject or [])
         
         # Determine tool class based on function type and streaming flag
-        is_async_gen = inspect.isasyncgenfunction(fn)
+        tool_cls = (ResultStreamingFunctionTool if streaming and inspect.isasyncgenfunction(fn) else
+                    StreamingFunctionTool if streaming and asyncio.iscoroutinefunction(fn) else FunctionTool)
         
-        if streaming and is_async_gen:
-            # Async generator yielding strings -> result streaming
-            tool_cls = ResultStreamingFunctionTool
-        elif streaming and asyncio.iscoroutinefunction(fn):
-            # Async coroutine with streaming -> progress streaming
-            tool_cls = StreamingFunctionTool
-        else:
-            # Regular sync/async function
-            tool_cls = FunctionTool
-        
-        tool_instance = tool_cls(
-            fn,
-            meta,
-            schema,
-            cache_enabled=cache_enabled,
-            cache_ttl=cache_ttl,
-            inject=inject,
-        )
-        
-        # Preserve function metadata
+        tool_instance = tool_cls(fn, meta, schema, cache_enabled=cache_enabled, cache_ttl=cache_ttl, inject=inject)
         wraps(fn)(tool_instance)
-        
         return tool_instance
     
-    # Support both @tool and @tool(...) syntax
-    if func is not None:
-        return decorator(func)
-    return decorator
+    return decorator(func) if func is not None else decorator
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -519,8 +348,7 @@ def tool(
 
 def _to_snake_case(name: str) -> str:
     """Convert CamelCase or mixed to snake_case."""
-    s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
-    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)).lower()
 
 
 def _to_pascal_case(name: str) -> str:
@@ -530,7 +358,4 @@ def _to_pascal_case(name: str) -> str:
 
 def _extract_description(docstring: str | None) -> str | None:
     """Extract first line of docstring as description."""
-    if not docstring:
-        return None
-    lines = docstring.strip().split("\n")
-    return lines[0].strip() if lines else None
+    return docstring.strip().split("\n")[0].strip() if docstring else None
