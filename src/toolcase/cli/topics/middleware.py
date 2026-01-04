@@ -16,6 +16,7 @@ BUILT-IN MIDDLEWARE:
     TimeoutMiddleware         Enforce execution time limits
     RateLimitMiddleware       Throttle call frequency
     CircuitBreakerMiddleware  Fail fast on repeated failures
+    CoalesceMiddleware        Deduplicate concurrent identical requests
     TracingMiddleware         Create spans for distributed tracing
     CorrelationMiddleware     Add correlation IDs to requests
 
@@ -75,6 +76,23 @@ CUSTOM MIDDLEWARE:
             result = await next(tool, params, ctx)
             print(f"Took {time.time() - start:.2f}s")
             return result
+
+COALESCE MIDDLEWARE (Request Deduplication):
+    from toolcase.runtime.middleware import CoalesceMiddleware
+    
+    # Deduplicate concurrent identical requests (singleflight pattern)
+    registry.use(CoalesceMiddleware())
+    
+    # 10 concurrent identical requests → 1 execution, 10 results
+    results = await asyncio.gather(*[
+        registry.execute("expensive_tool", {"q": "same"})
+        for _ in range(10)
+    ])
+    
+    # Monitor coalescing effectiveness
+    mw = CoalesceMiddleware()
+    registry.use(mw)
+    print(mw.stats)  # {total_requests, coalesced_requests, coalesce_ratio, ...}
 
 STREAMING MIDDLEWARE:
     from toolcase.runtime.middleware import StreamMiddleware, compose_streaming

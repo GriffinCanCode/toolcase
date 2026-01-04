@@ -5,6 +5,10 @@ They have no external dependencies beyond the standard library.
 """
 
 from .breaker import CircuitBreakerMiddleware, CircuitState, MemoryStateStore, State, StateStore
+from .coalesce import CoalesceMiddleware
+
+# Re-export from foundation for convenience
+from toolcase.foundation.errors import CoalesceStatsDict
 from .logging import LoggingMiddleware
 from .metrics import LogMetricsBackend, MetricsBackend, MetricsMiddleware
 from .rate_limit import RateLimitMiddleware
@@ -116,6 +120,8 @@ __all__ = [
     "RETRYABLE_CODES",
     "TimeoutMiddleware",
     "RateLimitMiddleware",
+    "CoalesceMiddleware",
+    "CoalesceStatsDict",
     # Observability
     "LoggingMiddleware",
     "LogMetricsBackend",

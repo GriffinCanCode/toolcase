@@ -38,6 +38,7 @@ Tracing Example:
 from .middleware import Context, Middleware, Next, compose
 from .plugins import (
     CircuitBreakerMiddleware,
+    CoalesceMiddleware,
     FieldRule,
     LoggingMiddleware,
     LogMetricsBackend,
@@ -85,6 +86,7 @@ __all__ = [
     "apply_backpressure",
     # Resilience
     "CircuitBreakerMiddleware",
+    "CoalesceMiddleware",
     "RetryMiddleware",
     "TimeoutMiddleware",
     "RateLimitMiddleware",

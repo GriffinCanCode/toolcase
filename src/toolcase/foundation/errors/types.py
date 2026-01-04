@@ -57,6 +57,14 @@ class CacheStatsDict(TypedDict):
     max_entries: int
 
 
+class CoalesceStatsDict(TypedDict):
+    """Statistics for request coalescing middleware."""
+    total_requests: int
+    coalesced_requests: int
+    in_flight: int
+    coalesce_ratio: float
+
+
 class SpanEventDict(TypedDict, total=False):
     """Serialized span event."""
     name: str

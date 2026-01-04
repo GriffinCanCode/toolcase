@@ -34,6 +34,7 @@ from .tool import (
 from .types import (
     CacheStatsDict,
     CircuitStateDict,
+    CoalesceStatsDict,
     ErrorContext,
     ErrorTrace,
     ErrorTraceSerialized,
@@ -83,7 +84,7 @@ __all__ = [
     # JSON types
     "JsonPrimitive", "JsonValue", "JsonArray", "JsonObject", "JsonDict", "JsonMapping",
     # TypedDicts for well-known structures
-    "CircuitStateDict", "CacheStatsDict", "SpanDict", "SpanEventDict", "SpanToolDict",
+    "CircuitStateDict", "CacheStatsDict", "CoalesceStatsDict", "SpanDict", "SpanEventDict", "SpanToolDict",
     "StreamChunkDict", "StreamEventDict", "RequestRecordDict", "ErrorTraceSerialized",
     # Runtime type checking (beartype)
     "typechecked", "TypeViolation", "TypeViolationError", "is_json_value", "is_json_dict", "as_json_value", "as_json_dict",
