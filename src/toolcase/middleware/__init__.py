@@ -14,14 +14,11 @@ Example:
     >>> result = await registry.execute("my_tool", {"query": "test"})
 """
 
-from .middleware import (
-    Context,
-    Middleware,
-    Next,
-    compose,
-)
-from .builtins import (
+from .middleware import Context, Middleware, Next, compose
+from .plugins import (
     LoggingMiddleware,
+    LogMetricsBackend,
+    MetricsBackend,
     MetricsMiddleware,
     RateLimitMiddleware,
     RetryMiddleware,
@@ -34,8 +31,10 @@ __all__ = [
     "Next",
     "Context",
     "compose",
-    # Built-ins
+    # Plugins
     "LoggingMiddleware",
+    "LogMetricsBackend",
+    "MetricsBackend",
     "MetricsMiddleware",
     "RateLimitMiddleware",
     "RetryMiddleware",
