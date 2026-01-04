@@ -45,6 +45,7 @@ from .facade import (
     map_async,
     to_thread,
     run_sync,
+    sleep,
 )
 
 # Primitives - task management

@@ -6,7 +6,7 @@ Optimized for high-frequency error path creation with minimal allocations.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, TypeAlias
+from typing import TYPE_CHECKING, Annotated, TypeAlias, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, computed_field, field_serializer
 
@@ -18,6 +18,12 @@ if TYPE_CHECKING:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 ResultT: TypeAlias = "Result[str, str]"
+
+# JSON type aliases - using Any for recursive types to avoid Pydantic resolution issues
+from typing import Any
+JsonPrimitive = Union[str, int, float, bool, None]
+JsonValue = Union[JsonPrimitive, list[Any], dict[str, Any]]  # Any for recursive slots
+JsonDict = dict[str, Any]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Error Context & Provenance

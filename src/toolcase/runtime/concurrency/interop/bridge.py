@@ -122,15 +122,26 @@ def run_sync(
 
 
 def _run_in_thread_loop(coro: Coroutine[object, object, T]) -> T:
-    """Run coroutine in a new thread with its own event loop."""
+    """Run coroutine in a new thread with its own event loop.
+    
+    Propagates context variables to the new thread for tracing and DI continuity.
+    """
     result: T | None = None
     error: BaseException | None = None
     done = threading.Event()
     
+    # Capture context from current thread to propagate to the worker
+    ctx = contextvars.copy_context()
+    
     def runner() -> None:
         nonlocal result, error
+        
+        async def _run_with_context() -> T:
+            return await coro
+        
         try:
-            result = asyncio.run(coro)
+            # Run within copied context so contextvars propagate
+            result = ctx.run(asyncio.run, _run_with_context())
         except BaseException as e:
             error = e
         finally:
@@ -288,6 +299,7 @@ class AsyncAdapter(Generic[P, T]):
     """Wrap a sync function to be callable as async.
     
     Runs the sync function in a thread pool to avoid blocking.
+    Propagates context variables for tracing and DI continuity.
     
     Example:
         >>> def sync_io(path: str) -> str:
@@ -301,21 +313,21 @@ class AsyncAdapter(Generic[P, T]):
     executor: ThreadPoolExecutor | None = None
     
     async def __call__(self, *args: object, **kwargs: object) -> T:
-        """Call wrapped function asynchronously."""
+        """Call wrapped function asynchronously with context propagation."""
         loop = asyncio.get_running_loop()
+        ctx = contextvars.copy_context()
+        executor = self.executor or _get_default_executor()
         
         if kwargs:
             wrapped = functools.partial(self.func, **kwargs)  # type: ignore[arg-type]
             return await loop.run_in_executor(
-                self.executor or _get_default_executor(),
-                wrapped,
-                *args,
+                executor,
+                functools.partial(ctx.run, wrapped, *args),
             )
         
         return await loop.run_in_executor(
-            self.executor or _get_default_executor(),
-            self.func,  # type: ignore[arg-type]
-            *args,
+            executor,
+            functools.partial(ctx.run, self.func, *args),  # type: ignore[arg-type]
         )
     
     def __repr__(self) -> str:

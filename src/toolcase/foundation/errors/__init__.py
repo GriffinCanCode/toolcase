@@ -24,6 +24,9 @@ from .tool import (
 from .types import (
     ErrorContext,
     ErrorTrace,
+    JsonDict,
+    JsonPrimitive,
+    JsonValue,
     ResultT,
     context,
     trace,
@@ -46,4 +49,6 @@ __all__ = [
     "validate_context", "validate_trace",
     # Collection ops
     "sequence", "traverse", "collect_results",
+    # JSON types
+    "JsonPrimitive", "JsonValue", "JsonDict",
 ]
