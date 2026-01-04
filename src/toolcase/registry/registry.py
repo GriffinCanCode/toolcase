@@ -319,7 +319,7 @@ class ToolRegistry:
                 except KeyError as e:
                     yield ToolError.create(
                         name, f"Missing dependency: {e}",
-                        ErrorCode.CONFIG_ERROR, recoverable=False
+                        ErrorCode.INVALID_PARAMS, recoverable=False
                     ).render()
                     return
             else:

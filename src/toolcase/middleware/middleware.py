@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
+from ..core.decorator import clear_injected_deps, set_injected_deps
 from ..errors import ToolError, ToolException
 
 if TYPE_CHECKING:
@@ -98,6 +99,9 @@ def compose(middleware: Sequence[Middleware]) -> Next:
     Uses functional composition via iteration. The resulting function
     wraps each middleware around the base executor with error handling.
     
+    Handles dependency injection by setting context-var deps from context["injected"]
+    before tool execution.
+    
     Args:
         middleware: Ordered list of middleware (first = outermost)
     
@@ -106,7 +110,14 @@ def compose(middleware: Sequence[Middleware]) -> Next:
     """
     async def base(tool: BaseTool[BaseModel], params: BaseModel, ctx: Context) -> str:
         try:
-            return await tool.arun(params)
+            # Set injected dependencies from context if present
+            injected = ctx.get("injected")
+            if injected and isinstance(injected, dict):
+                set_injected_deps(injected)
+            try:
+                return await tool.arun(params)
+            finally:
+                clear_injected_deps()
         except ToolException as e:
             return e.error.render()
         except Exception as e:
