@@ -11,9 +11,8 @@ from __future__ import annotations
 
 import json
 import sys
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, TextIO, runtime_checkable
 
 if TYPE_CHECKING:
@@ -81,7 +80,7 @@ class ConsoleExporter:
         status_color = {"ok": c["green"], "error": c["red"], "unset": c["dim"]}
         
         # Format timing
-        ts = datetime.fromtimestamp(span.start_time, tz=timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+        ts = datetime.fromtimestamp(span.start_time, tz=UTC).strftime("%H:%M:%S.%f")[:-3]
         dur = f"{span.duration_ms:.1f}ms" if span.duration_ms else "..."
         
         # Indent based on parent depth (approx from context)
@@ -204,15 +203,17 @@ def create_otlp_exporter(
     endpoint: str = "http://localhost:4317",
     service_name: str = "toolcase",
     insecure: bool = True,
+    headers: dict[str, str] | None = None,
 ) -> Exporter:
     """Create OTLP exporter for OpenTelemetry backends.
     
-    Requires: pip install opentelemetry-exporter-otlp-proto-grpc
+    Requires: pip install toolcase[otel]
     
     Args:
         endpoint: OTLP gRPC endpoint
         service_name: Service name for traces
         insecure: Use insecure connection (default for local dev)
+        headers: Optional headers for authentication (e.g., API keys)
     
     Returns:
         OTLPSpanExporter wrapped in our Exporter protocol
@@ -221,56 +222,203 @@ def create_otlp_exporter(
         ImportError: If opentelemetry packages not installed
     """
     try:
-        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-        from opentelemetry.sdk.resources import Resource
-        from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        import opentelemetry.exporter.otlp.proto.grpc.trace_exporter  # noqa: F401
     except ImportError as e:
         raise ImportError(
-            "OTLP exporter requires: pip install opentelemetry-exporter-otlp-proto-grpc"
+            "OTLP exporter requires: pip install toolcase[otel]"
         ) from e
     
-    return _OTLPBridge(
+    return OTLPBridge(
         endpoint=endpoint,
         service_name=service_name,
         insecure=insecure,
+        headers=headers,
     )
 
 
 @dataclass
-class _OTLPBridge:
-    """Bridge our Span format to OpenTelemetry SDK."""
+class OTLPBridge:
+    """Bridge toolcase Spans to OpenTelemetry OTLP export.
+    
+    Properly converts our Span format to OTel ReadableSpan for direct export,
+    preserving timing, context, attributes, events, and status.
+    """
     
     endpoint: str
     service_name: str
-    insecure: bool
-    _provider: object = field(default=None, init=False)
-    _exporter: object = field(default=None, init=False)
+    insecure: bool = True
+    headers: dict[str, str] | None = None
+    _exporter: object = field(default=None, init=False, repr=False)
+    _resource: object = field(default=None, init=False, repr=False)
     
     def __post_init__(self) -> None:
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-        from opentelemetry.sdk.resources import Resource
-        from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.sdk.resources import SERVICE_NAME, Resource
         
-        resource = Resource.create({"service.name": self.service_name})
-        self._provider = TracerProvider(resource=resource)
-        self._exporter = OTLPSpanExporter(endpoint=self.endpoint, insecure=self.insecure)
-        self._provider.add_span_processor(BatchSpanProcessor(self._exporter))
+        self._resource = Resource.create({SERVICE_NAME: self.service_name})
+        self._exporter = OTLPSpanExporter(
+            endpoint=self.endpoint,
+            insecure=self.insecure,
+            headers=self.headers or {},
+        )
     
     def export(self, spans: list[Span]) -> None:
-        # Convert our spans to OTel format and export
-        # This is a simplified bridge - production would do full conversion
-        from opentelemetry.trace import Status, StatusCode
+        """Convert and export spans to OTLP backend."""
+        otel_spans = [self._to_otel_span(s) for s in spans]
+        self._exporter.export(otel_spans)
+    
+    def _to_otel_span(self, span: Span) -> object:
+        """Convert toolcase Span to OTel ReadableSpan."""
+        from opentelemetry.sdk.trace import Event
+        from opentelemetry.sdk.util.instrumentation import InstrumentationScope
+        from opentelemetry.trace import SpanContext, TraceFlags
+        from opentelemetry.trace import SpanKind as OtelSpanKind
+        from opentelemetry.trace.status import Status, StatusCode
         
-        tracer = self._provider.get_tracer("toolcase")
-        for span in spans:
-            with tracer.start_span(span.name) as otel_span:
-                for k, v in span.attributes.items():
-                    otel_span.set_attribute(k, str(v))
-                if span.error:
-                    otel_span.set_status(Status(StatusCode.ERROR, span.error))
+        # Map our SpanKind to OTel SpanKind
+        kind_map = {
+            "tool": OtelSpanKind.CLIENT,
+            "internal": OtelSpanKind.INTERNAL,
+            "external": OtelSpanKind.CLIENT,
+            "pipeline": OtelSpanKind.INTERNAL,
+        }
+        otel_kind = kind_map.get(span.kind.value, OtelSpanKind.INTERNAL)
+        
+        # Parse trace/span IDs (hex strings -> int)
+        trace_id = int(span.context.trace_id, 16) if span.context.trace_id else 0
+        span_id = int(span.context.span_id, 16) if span.context.span_id else 0
+        parent_id = int(span.context.parent_id, 16) if span.context.parent_id else None
+        
+        # Build OTel SpanContext
+        ctx = SpanContext(
+            trace_id=trace_id,
+            span_id=span_id,
+            is_remote=False,
+            trace_flags=TraceFlags.SAMPLED,
+        )
+        
+        # Build parent SpanContext if exists
+        parent_ctx = None
+        if parent_id:
+            parent_ctx = SpanContext(
+                trace_id=trace_id,
+                span_id=parent_id,
+                is_remote=False,
+                trace_flags=TraceFlags.SAMPLED,
+            )
+        
+        # Convert timestamps (seconds -> nanoseconds)
+        start_ns = int(span.start_time * 1e9)
+        end_ns = int(span.end_time * 1e9) if span.end_time else start_ns
+        
+        # Convert status
+        if span.status.value == "error":
+            status = Status(StatusCode.ERROR, span.error or "")
+        elif span.status.value == "ok":
+            status = Status(StatusCode.OK)
+        else:
+            status = Status(StatusCode.UNSET)
+        
+        # Flatten attributes (OTel only accepts primitive types)
+        attrs = self._flatten_attrs(span.attributes)
+        
+        # Add tool context as attributes
+        if span.tool_name:
+            attrs["tool.name"] = span.tool_name
+        if span.tool_category:
+            attrs["tool.category"] = span.tool_category
+        if span.result_preview:
+            attrs["tool.result_preview"] = span.result_preview
+        
+        # Convert events
+        events = tuple(
+            Event(
+                name=e.name,
+                timestamp=int(e.timestamp * 1e9),
+                attributes=self._flatten_attrs(e.attributes),
+            )
+            for e in span.events
+        )
+        
+        # Create instrumentation scope
+        scope = InstrumentationScope(name="toolcase", version="0.2.0")
+        
+        return _ReadableSpanAdapter(
+            name=span.name,
+            context=ctx,
+            parent=parent_ctx,
+            kind=otel_kind,
+            start_time=start_ns,
+            end_time=end_ns,
+            attributes=attrs,
+            events=events,
+            status=status,
+            resource=self._resource,
+            instrumentation_scope=scope,
+        )
+    
+    def _flatten_attrs(self, attrs: dict[str, object]) -> dict[str, str | int | float | bool]:
+        """Flatten attributes to OTel-compatible primitive types."""
+        result: dict[str, str | int | float | bool] = {}
+        for k, v in attrs.items():
+            if isinstance(v, (str, int, float, bool)):
+                result[k] = v
+            elif isinstance(v, dict):
+                result[k] = json.dumps(v)
+            else:
+                result[k] = str(v)
+        return result
     
     def shutdown(self) -> None:
-        if self._provider:
-            self._provider.shutdown()
+        """Flush and shutdown the exporter."""
+        if self._exporter:
+            self._exporter.shutdown()
+
+
+@dataclass(slots=True)
+class _ReadableSpanAdapter:
+    """Adapter implementing OTel ReadableSpan protocol for direct export."""
+    
+    name: str
+    context: object  # SpanContext
+    parent: object | None  # SpanContext
+    kind: object  # SpanKind
+    start_time: int  # nanoseconds
+    end_time: int  # nanoseconds
+    attributes: dict[str, str | int | float | bool]
+    events: tuple[object, ...]  # Events
+    status: object  # Status
+    resource: object  # Resource
+    instrumentation_scope: object | None = None  # InstrumentationScope
+    
+    # ReadableSpan protocol
+    def get_span_context(self) -> object:
+        return self.context
+    
+    @property
+    def parent_span_context(self) -> object | None:
+        return self.parent
+    
+    @property
+    def links(self) -> tuple[object, ...]:
+        return ()
+    
+    @property
+    def dropped_attributes(self) -> int:
+        return 0
+    
+    @property
+    def dropped_events(self) -> int:
+        return 0
+    
+    @property
+    def dropped_links(self) -> int:
+        return 0
+    
+    def to_json(self, indent: int | None = None) -> str:
+        return json.dumps({
+            "name": self.name,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "attributes": self.attributes,
+        }, indent=indent)

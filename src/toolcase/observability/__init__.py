@@ -49,6 +49,7 @@ from .exporter import (
     Exporter,
     JsonExporter,
     NoOpExporter,
+    OTLPBridge,
     create_otlp_exporter,
 )
 from .middleware import CorrelationMiddleware, TracingMiddleware
@@ -77,6 +78,7 @@ __all__ = [
     "NoOpExporter",
     "BatchExporter",
     "CompositeExporter",
+    "OTLPBridge",
     "create_otlp_exporter",
     # Middleware
     "TracingMiddleware",
