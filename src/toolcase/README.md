@@ -2,7 +2,7 @@
 
 **Type-safe, extensible tool framework for AI agents.**
 
-A minimal yet powerful framework for creating tools that AI agents can invoke. Supports type-safe parameters, caching, progress streaming, and multi-framework format converters for OpenAI, Anthropic, Google Gemini, and LangChain.
+A minimal yet powerful framework for creating tools that AI agents can invoke. Supports type-safe parameters, caching, progress streaming, and multi-framework format converters for OpenAI, Anthropic, Google Gemini, LangChain, and MCP.
 
 ## Architecture
 
@@ -49,6 +49,22 @@ Multi-framework adapters:
   - `to_openai()`, `to_anthropic()`, `to_google()`, `to_provider()`
 - **`langchain.py`** - LangChain StructuredTool integration
   - `to_langchain()`, `to_langchain_tools()`
+
+### MCP (`toolcase.mcp`)
+Server integration for multiple deployment scenarios:
+
+**MCP Protocol** (Cursor, Claude Desktop, VS Code):
+- **`MCPServer`** - Full MCP protocol server
+- **`serve_mcp()`** - Run MCP server (stdio/sse transport)
+
+**HTTP REST** (Web backends, microservices):
+- **`HTTPToolServer`** - Simple HTTP endpoints
+- **`serve_http()`** - Run HTTP server
+- **`create_http_app()`** - ASGI app for embedding
+
+**Shared**:
+- **`ToolServer`** - Abstract base for custom servers
+- **`tool_to_handler()`** - Convert BaseTool to handler
 
 ### Tools (`toolcase.tools`)
 Built-in tools:
@@ -123,6 +139,32 @@ from toolcase.integrations import to_langchain_tools
 lc_tools = to_langchain_tools(registry)
 ```
 
+### MCP Server (Cursor, Claude Desktop)
+```python
+from toolcase.mcp import serve_mcp
+
+# stdio transport (default, for CLI tools)
+serve_mcp(registry)
+
+# SSE transport (for Cursor, Claude Desktop)
+serve_mcp(registry, transport="sse", port=8080)
+```
+
+### HTTP REST Server (Web Backends)
+```python
+from toolcase.mcp import serve_http, create_http_app
+
+# Standalone server
+serve_http(registry, port=8000)
+# GET  /tools         → List tools with schemas
+# POST /tools/{name}  → Invoke tool with JSON body
+
+# Or embed in existing FastAPI/Starlette app
+from fastapi import FastAPI
+app = FastAPI()
+app.mount("/tools", create_http_app(registry))
+```
+
 ## Design Principles
 
 1. **Type Safety First** - Pydantic-powered schemas ensure type validation
@@ -154,6 +196,12 @@ from toolcase.cache import MemoryCache
 
 # Test integrations
 from toolcase.integrations import to_openai
+
+# Test MCP (requires pip install toolcase[mcp])
+from toolcase.mcp import serve_mcp, MCPServer
+
+# Test HTTP server (requires pip install toolcase[http])
+from toolcase.mcp import serve_http, HTTPToolServer
 ```
 
 ## Contributing

@@ -2,7 +2,7 @@
 
 A minimal yet powerful framework for creating tools that AI agents can invoke.
 Supports type-safe parameters, caching, progress streaming, and multi-framework
-format converters for OpenAI, Anthropic, Google Gemini, and LangChain.
+format converters for OpenAI, Anthropic, Google Gemini, LangChain, and MCP.
 
 Quick Start (Decorator - Recommended):
     >>> from toolcase import tool, get_registry
@@ -55,11 +55,19 @@ Multi-Framework Format Converters:
 LangChain Integration:
     >>> from toolcase.integrations import to_langchain_tools
     >>> lc_tools = to_langchain_tools(registry)
+
+MCP (Model Context Protocol) Integration:
+    >>> from toolcase.mcp import serve_mcp
+    >>> serve_mcp(registry, transport="sse", port=8080)
+
+HTTP REST Server (Web Backends):
+    >>> from toolcase.mcp import serve_http
+    >>> serve_http(registry, port=8000)  # Simple HTTP endpoints
 """
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Core
 from .core import BaseTool, EmptyParams, FunctionTool, StreamingFunctionTool, ToolMetadata, tool
@@ -98,8 +106,36 @@ from .registry import (
     set_registry,
 )
 
+# Middleware
+from .middleware import (
+    Context,
+    Middleware,
+    Next,
+    compose,
+    LoggingMiddleware,
+    MetricsMiddleware,
+    RateLimitMiddleware,
+    RetryMiddleware,
+    TimeoutMiddleware,
+)
+
 # Built-in tools
 from .tools import DiscoveryParams, DiscoveryTool
+
+# Monadic error handling
+from .monads import (
+    Err,
+    ErrorContext,
+    ErrorTrace,
+    Ok,
+    Result,
+    ResultT,
+    ToolResult,
+    collect_results,
+    sequence,
+    tool_result,
+    traverse,
+)
 
 __all__ = [
     # Version
@@ -138,9 +174,31 @@ __all__ = [
     "get_registry",
     "set_registry",
     "reset_registry",
+    # Middleware
+    "Middleware",
+    "Context",
+    "Next",
+    "compose",
+    "LoggingMiddleware",
+    "MetricsMiddleware",
+    "RateLimitMiddleware",
+    "RetryMiddleware",
+    "TimeoutMiddleware",
     # Built-in tools
     "DiscoveryTool",
     "DiscoveryParams",
+    # Monadic error handling
+    "Result",
+    "Ok",
+    "Err",
+    "ResultT",
+    "ToolResult",
+    "ErrorContext",
+    "ErrorTrace",
+    "tool_result",
+    "sequence",
+    "traverse",
+    "collect_results",
     # Convenience
     "init_tools",
 ]
