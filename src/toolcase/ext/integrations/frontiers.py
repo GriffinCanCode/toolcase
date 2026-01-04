@@ -17,7 +17,8 @@ Example:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 
 from pydantic import BaseModel
 
@@ -25,15 +26,76 @@ if TYPE_CHECKING:
     from toolcase.foundation.core import BaseTool
     from toolcase.foundation.registry import ToolRegistry
 
-# Type aliases for clarity
-OpenAITool = dict[str, Any]
-AnthropicTool = dict[str, Any]
-GoogleTool = dict[str, Any]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Typed Schemas for Provider Formats
+# ─────────────────────────────────────────────────────────────────────────────
+
+# JSON Schema property value type
+JsonSchemaValue = bool | int | float | str | list["JsonSchemaValue"] | dict[str, "JsonSchemaValue"] | None
 
 
-def _get_json_schema(tool: BaseTool[BaseModel]) -> dict[str, Any]:
+class JsonSchemaProperty(TypedDict, total=False):
+    """JSON Schema property definition."""
+    type: str
+    description: str
+    enum: list[str]
+    default: JsonSchemaValue
+    items: "JsonSchemaProperty"
+    properties: dict[str, "JsonSchemaProperty"]
+    required: list[str]
+    format: str
+    minimum: int | float
+    maximum: int | float
+    minLength: int
+    maxLength: int
+    pattern: str
+
+
+class ParametersSchema(TypedDict, total=False):
+    """JSON Schema for function parameters."""
+    type: Literal["object"]
+    properties: dict[str, JsonSchemaProperty]
+    required: list[str]
+    additionalProperties: bool
+
+
+class OpenAIFunctionDef(TypedDict, total=False):
+    """OpenAI function definition within a tool."""
+    name: str
+    description: str
+    parameters: ParametersSchema
+    strict: bool
+
+
+class OpenAITool(TypedDict):
+    """OpenAI function calling tool format."""
+    type: Literal["function"]
+    function: OpenAIFunctionDef
+
+
+class AnthropicTool(TypedDict):
+    """Anthropic tool_use format."""
+    name: str
+    description: str
+    input_schema: ParametersSchema
+
+
+class GoogleTool(TypedDict):
+    """Google Gemini function declaration format."""
+    name: str
+    description: str
+    parameters: ParametersSchema
+
+
+# JSON schema types are inherently dynamic; use dict[str, ...] for internal processing
+_JsonSchema = dict[str, JsonSchemaValue]
+_PropertyMap = dict[str, JsonSchemaProperty]
+
+
+def _get_json_schema(tool: BaseTool[BaseModel]) -> _JsonSchema:
     """Extract JSON schema from tool's params_schema."""
-    schema = tool.params_schema.model_json_schema()
+    schema: _JsonSchema = tool.params_schema.model_json_schema()
     # Remove Pydantic metadata not needed by providers
     schema.pop("title", None)
     schema.pop("$defs", None)
@@ -41,13 +103,19 @@ def _get_json_schema(tool: BaseTool[BaseModel]) -> dict[str, Any]:
     return schema
 
 
-def _clean_properties(properties: dict[str, Any]) -> dict[str, Any]:
-    """Clean property definitions for provider compatibility."""
-    cleaned = {}
-    for name, prop in properties.items():
-        clean_prop = {k: v for k, v in prop.items() if k != "title"}
-        cleaned[name] = clean_prop
-    return cleaned
+def _clean_properties(properties: _JsonSchema) -> _PropertyMap:
+    """Clean property definitions for provider compatibility.
+    
+    Note: Takes loose dict type since JSON schema structure is dynamic.
+    Returns typed PropertyMap for downstream consumers.
+    """
+    if not isinstance(properties, dict):
+        return {}
+    return {
+        name: {k: v for k, v in prop.items() if k != "title"}  # type: ignore[misc]
+        for name, prop in properties.items()
+        if isinstance(prop, dict)
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,22 +157,25 @@ def tool_to_openai(
         https://platform.openai.com/docs/guides/function-calling
     """
     schema = _get_json_schema(tool)
-    properties = schema.get("properties", {})
-    required = schema.get("required", [])
+    raw_props = schema.get("properties") or {}
+    raw_required = schema.get("required")
+    required = list(raw_required) if isinstance(raw_required, list) else []
     
-    function_def: dict[str, Any] = {
+    params: ParametersSchema = {
+        "type": "object",
+        "properties": _clean_properties(raw_props if isinstance(raw_props, dict) else {}),
+        "required": [str(r) for r in required],
+    }
+    
+    function_def: OpenAIFunctionDef = {
         "name": tool.metadata.name,
         "description": tool.metadata.description,
-        "parameters": {
-            "type": "object",
-            "properties": _clean_properties(properties),
-            "required": required,
-        },
+        "parameters": params,
     }
     
     if strict:
         function_def["strict"] = True
-        function_def["parameters"]["additionalProperties"] = False
+        params["additionalProperties"] = False
     
     return {"type": "function", "function": function_def}
 
@@ -173,16 +244,17 @@ def tool_to_anthropic(tool: BaseTool[BaseModel]) -> AnthropicTool:
         https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/implement-tool-use
     """
     schema = _get_json_schema(tool)
-    properties = schema.get("properties", {})
-    required = schema.get("required", [])
+    raw_props = schema.get("properties") or {}
+    raw_required = schema.get("required")
+    required = list(raw_required) if isinstance(raw_required, list) else []
     
     return {
         "name": tool.metadata.name,
         "description": tool.metadata.description,
         "input_schema": {
             "type": "object",
-            "properties": _clean_properties(properties),
-            "required": required,
+            "properties": _clean_properties(raw_props if isinstance(raw_props, dict) else {}),
+            "required": [str(r) for r in required],
         },
     }
 
@@ -249,16 +321,17 @@ def tool_to_google(tool: BaseTool[BaseModel]) -> GoogleTool:
         https://ai.google.dev/gemini-api/docs/function-calling
     """
     schema = _get_json_schema(tool)
-    properties = schema.get("properties", {})
-    required = schema.get("required", [])
+    raw_props = schema.get("properties") or {}
+    raw_required = schema.get("required")
+    required = list(raw_required) if isinstance(raw_required, list) else []
     
     return {
         "name": tool.metadata.name,
         "description": tool.metadata.description,
         "parameters": {
             "type": "object",
-            "properties": _clean_properties(properties),
-            "required": required,
+            "properties": _clean_properties(raw_props if isinstance(raw_props, dict) else {}),
+            "required": [str(r) for r in required],
         },
     }
 
@@ -304,24 +377,27 @@ def to_google(
 
 Provider = Literal["openai", "anthropic", "google"]
 
+# Union type for all provider tool formats
+ProviderTool = OpenAITool | AnthropicTool | GoogleTool
+
 
 def to_provider(
     registry: ToolRegistry,
     provider: Provider,
     *,
     enabled_only: bool = True,
-    **kwargs: Any,
-) -> list[dict[str, Any]]:
+    strict: bool = False,
+) -> Sequence[ProviderTool]:
     """Convert tools to any supported provider format.
     
     Args:
         registry: Tool registry containing tools to convert
         provider: Target provider ("openai", "anthropic", "google")
         enabled_only: Only include enabled tools (default True)
-        **kwargs: Provider-specific options (e.g., strict=True for OpenAI)
+        strict: Enable strict mode (OpenAI only, ignored for other providers)
     
     Returns:
-        List of provider-compatible tool definitions
+        Sequence of provider-compatible tool definitions
     
     Raises:
         ValueError: If provider is not supported
@@ -329,19 +405,12 @@ def to_provider(
     Example:
         >>> tools = to_provider(registry, "openai", strict=True)
     """
-    converters = {
-        "openai": to_openai,
-        "anthropic": to_anthropic,
-        "google": to_google,
-    }
-    
-    if provider not in converters:
-        supported = ", ".join(converters.keys())
-        raise ValueError(f"Unsupported provider: {provider}. Supported: {supported}")
-    
-    converter = converters[provider]
-    
-    # Only OpenAI supports strict mode
-    if provider == "openai":
-        return converter(registry, enabled_only=enabled_only, **kwargs)
-    return converter(registry, enabled_only=enabled_only)
+    match provider:
+        case "openai":
+            return to_openai(registry, enabled_only=enabled_only, strict=strict)
+        case "anthropic":
+            return to_anthropic(registry, enabled_only=enabled_only)
+        case "google":
+            return to_google(registry, enabled_only=enabled_only)
+        case _:
+            raise ValueError(f"Unsupported provider: {provider}. Supported: openai, anthropic, google")

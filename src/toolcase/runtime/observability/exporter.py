@@ -16,6 +16,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, TextIO, runtime_checkable
 
 if TYPE_CHECKING:
+    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import Event
+    from opentelemetry.sdk.util.instrumentation import InstrumentationScope
+    from opentelemetry.trace import SpanContext, SpanKind
+    from opentelemetry.trace.status import Status
+    
     from .span import Span
 
 
@@ -248,8 +255,8 @@ class OTLPBridge:
     service_name: str
     insecure: bool = True
     headers: dict[str, str] | None = None
-    _exporter: object = field(default=None, init=False, repr=False)
-    _resource: object = field(default=None, init=False, repr=False)
+    _exporter: OTLPSpanExporter | None = field(default=None, init=False, repr=False)
+    _resource: Resource | None = field(default=None, init=False, repr=False)
     
     def __post_init__(self) -> None:
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -264,10 +271,12 @@ class OTLPBridge:
     
     def export(self, spans: list[Span]) -> None:
         """Convert and export spans to OTLP backend."""
+        if self._exporter is None:
+            return
         otel_spans = [self._to_otel_span(s) for s in spans]
         self._exporter.export(otel_spans)
     
-    def _to_otel_span(self, span: Span) -> object:
+    def _to_otel_span(self, span: Span) -> _ReadableSpanAdapter:
         """Convert toolcase Span to OTel ReadableSpan."""
         from opentelemetry.sdk.trace import Event
         from opentelemetry.sdk.util.instrumentation import InstrumentationScope
@@ -343,6 +352,8 @@ class OTLPBridge:
         # Create instrumentation scope
         scope = InstrumentationScope(name="toolcase", version="0.2.0")
         
+        # _resource is always set in __post_init__, assert for type checker
+        assert self._resource is not None
         return _ReadableSpanAdapter(
             name=span.name,
             context=ctx,
@@ -380,27 +391,27 @@ class _ReadableSpanAdapter:
     """Adapter implementing OTel ReadableSpan protocol for direct export."""
     
     name: str
-    context: object  # SpanContext
-    parent: object | None  # SpanContext
-    kind: object  # SpanKind
+    context: SpanContext
+    parent: SpanContext | None
+    kind: SpanKind
     start_time: int  # nanoseconds
     end_time: int  # nanoseconds
     attributes: dict[str, str | int | float | bool]
-    events: tuple[object, ...]  # Events
-    status: object  # Status
-    resource: object  # Resource
-    instrumentation_scope: object | None = None  # InstrumentationScope
+    events: tuple[Event, ...]
+    status: Status
+    resource: Resource
+    instrumentation_scope: InstrumentationScope | None = None
     
     # ReadableSpan protocol
-    def get_span_context(self) -> object:
+    def get_span_context(self) -> SpanContext:
         return self.context
     
     @property
-    def parent_span_context(self) -> object | None:
+    def parent_span_context(self) -> SpanContext | None:
         return self.parent
     
     @property
-    def links(self) -> tuple[object, ...]:
+    def links(self) -> tuple[()]:
         return ()
     
     @property

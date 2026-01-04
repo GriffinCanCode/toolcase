@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
-from typing import Annotated, AsyncIterator, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, AsyncIterator, ClassVar, Literal
 from urllib.parse import urlparse
 
 from pydantic import (
@@ -57,6 +57,9 @@ from toolcase.foundation.core import ToolMetadata
 from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult
 
 from .base import ConfigurableTool, ToolConfig
+
+if TYPE_CHECKING:
+    import httpx
 
 # Type alias for HTTP methods
 HttpMethod = Literal["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
@@ -308,11 +311,14 @@ class HttpConfig(ToolConfig):
     
     @field_validator("allowed_methods", mode="before")
     @classmethod
-    def _normalize_methods(cls, v: frozenset[str] | set[str] | list[str] | tuple[str, ...]) -> frozenset[HttpMethod]:
-        """Normalize methods to uppercase frozenset."""
-        if isinstance(v, frozenset):
-            return v  # type: ignore[return-value]
-        return frozenset(m.upper() for m in v)  # type: ignore[return-value]
+    def _normalize_methods(cls, v: frozenset[str] | set[str] | list[str] | tuple[str, ...]) -> frozenset[str]:
+        """Normalize methods to uppercase frozenset.
+        
+        Note: Returns frozenset[str] to satisfy Pydantic's validator return type.
+        The field annotation (frozenset[HttpMethod]) constrains runtime values.
+        """
+        # Always normalize to uppercase, even if already frozenset (may be lowercase)
+        return frozenset(m.upper() for m in v) if v else frozenset()
     
     @model_validator(mode="after")
     def _validate_host_config(self) -> "HttpConfig":
@@ -564,7 +570,7 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
     
     def __init__(self, config: HttpConfig | None = None) -> None:
         super().__init__(config)
-        self._client: object | None = None  # Lazy httpx client
+        self._client: httpx.AsyncClient | None = None  # Lazy httpx client
     
     # ─────────────────────────────────────────────────────────────────
     # Security Validation
@@ -626,17 +632,17 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
     # HTTP Client
     # ─────────────────────────────────────────────────────────────────
     
-    async def _get_client(self) -> object:
+    async def _get_client(self) -> httpx.AsyncClient:
         """Get or create httpx async client."""
         if self._client is None:
             try:
-                import httpx
+                import httpx as httpx_mod
             except ImportError as e:
                 raise ImportError(
                     "httpx is required for HttpTool. Install with: pip install httpx"
                 ) from e
             
-            self._client = httpx.AsyncClient(
+            self._client = httpx_mod.AsyncClient(
                 follow_redirects=self.config.follow_redirects,
                 verify=self.config.verify_ssl,
                 timeout=self.config.default_timeout,
@@ -646,7 +652,7 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
     async def _close_client(self) -> None:
         """Close the httpx client."""
         if self._client is not None:
-            await self._client.aclose()  # type: ignore[union-attr]
+            await self._client.aclose()
             self._client = None
     
     # ─────────────────────────────────────────────────────────────────
@@ -698,7 +704,7 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
             client = await self._get_client()
             timeout = params.timeout or self.config.default_timeout
             
-            response = await client.request(  # type: ignore[union-attr]
+            response = await client.request(
                 method=params.method,
                 url=params.url,
                 headers=headers,
@@ -817,7 +823,7 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
             client = await self._get_client()
             timeout = params.timeout or self.config.default_timeout
             
-            async with client.stream(  # type: ignore[union-attr]
+            async with client.stream(
                 method=params.method,
                 url=params.url,
                 headers=headers,

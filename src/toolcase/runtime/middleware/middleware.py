@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Coroutine, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Callable, Protocol, TypeVar, cast, overload, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -18,6 +18,11 @@ from toolcase.foundation.errors import ToolError, ToolException
 if TYPE_CHECKING:
     from typing import Any
     from toolcase.foundation.core import BaseTool
+
+# TypeVar for Context.get() default value
+_T = TypeVar("_T")
+# Value types typically stored in context
+ContextValue = str | int | float | bool | dict[str, "ContextValue"] | list["ContextValue"] | None
 
 
 @dataclass(slots=True)
@@ -37,18 +42,23 @@ class Context:
         'abc123'
     """
     
-    data: dict[str, object] = field(default_factory=dict)
+    data: dict[str, ContextValue] = field(default_factory=dict)
     
-    def __getitem__(self, key: str) -> object:
+    def __getitem__(self, key: str) -> ContextValue:
         return self.data[key]
     
-    def __setitem__(self, key: str, value: object) -> None:
+    def __setitem__(self, key: str, value: ContextValue) -> None:
         self.data[key] = value
     
     def __contains__(self, key: str) -> bool:
         return key in self.data
     
-    def get(self, key: str, default: object = None) -> object:
+    @overload
+    def get(self, key: str) -> ContextValue: ...
+    @overload
+    def get(self, key: str, default: _T) -> ContextValue | _T: ...
+    
+    def get(self, key: str, default: _T | None = None) -> ContextValue | _T | None:
         return self.data.get(key, default)
 
 
@@ -111,9 +121,10 @@ def compose(middleware: Sequence[Middleware]) -> Next:
     async def base(tool: BaseTool[BaseModel], params: BaseModel, ctx: Context) -> str:
         try:
             # Set injected dependencies from context if present
+            # Cast required: injected deps can be any object, not just ContextValue
             injected = ctx.get("injected")
             if injected and isinstance(injected, dict):
-                set_injected_deps(injected)
+                set_injected_deps(cast("dict[str, object]", injected))
             try:
                 return await tool.arun(params)
             finally:
