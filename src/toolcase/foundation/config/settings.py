@@ -1,12 +1,23 @@
 """Environment-based configuration using pydantic-settings.
 
 Provides type-safe, validated configuration from environment variables
-with sensible defaults. Supports .env files and nested configuration.
+with sensible defaults. Supports multiple .env file variants and nested configuration.
+
+Supported env file formats (in priority order, later overrides earlier):
+- .env                     Base configuration
+- .env.local               Local overrides (typically gitignored)
+- .env.{environment}       Environment-specific (.env.development, .env.production)
+- .env.{environment}.local Environment-specific local overrides
+
+Compatible with:
+- python-dotenv
+- pydantic-settings
+- django-environ
+- python-decouple
 
 Optimizations:
-- Uses frozen models where appropriate for immutability
+- Uses frozen models for immutability
 - AliasChoices for flexible env var naming
-- Coercion flags for strict/lenient parsing
 - Computed fields for derived values
 
 Example:
@@ -17,14 +28,20 @@ Example:
     >>> print(settings.logging.level)
     'INFO'
     
-    # Or with environment variables:
+    # Environment variables:
     # TOOLCASE_CACHE_TTL=7200
     # TOOLCASE_LOG_LEVEL=DEBUG
+    
+    # Or via .env files:
+    # .env:            TOOLCASE_DEBUG=false
+    # .env.local:      TOOLCASE_DEBUG=true  # Overrides .env
 """
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -38,6 +55,16 @@ from pydantic import (
     field_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _detect_env_files() -> tuple[str, ...]:
+    """Detect available .env files in priority order for current environment."""
+    env = os.environ.get("TOOLCASE_ENVIRONMENT") or os.environ.get("ENVIRONMENT") or os.environ.get("ENV", "development")
+    cwd = Path.cwd()
+    
+    # Priority order: base → env-specific → local overrides
+    candidates = [".env", f".env.{env.lower()}", f".env.{env.lower()}.local", ".env.local"]
+    return tuple(name for name in candidates if (cwd / name).is_file())
 
 
 class CacheSettings(BaseSettings):
@@ -206,16 +233,26 @@ class RateLimitSettings(BaseSettings):
 
 
 class ToolcaseSettings(BaseSettings):
-    """Root settings for Toolcase framework. Loads from env vars (TOOLCASE_ prefix), .env files, nested config. Frozen/immutable with cached singleton via get_settings()."""
+    """Root settings for Toolcase framework.
+    
+    Loads from env vars (TOOLCASE_ prefix), multiple .env file variants, nested config.
+    Frozen/immutable with cached singleton via get_settings().
+    
+    Supported env files (in priority order):
+    - .env                     Base configuration
+    - .env.{environment}       Environment-specific
+    - .env.{environment}.local Environment-specific local
+    - .env.local               Local overrides
+    """
     
     model_config = SettingsConfigDict(
         env_prefix="TOOLCASE_",
-        env_file=".env",
+        env_file=_detect_env_files(),  # Dynamic: loads available env files in priority order
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         extra="ignore",
         validate_default=True,
-        frozen=True,  # Settings are immutable once loaded
+        frozen=True,
         revalidate_instances="never",
         use_enum_values=True,
     )

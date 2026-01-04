@@ -3,12 +3,13 @@
 A production-ready HTTP tool with:
 - Configurable allowed hosts/methods for security
 - Multiple auth strategies (Bearer, Basic, API Key, Custom)
+- Environment-aware auth (auto-load secrets from env vars)
 - Streaming support for large responses
 - Proper timeout and error handling
 - Response size limits
 
 Example:
-    >>> from toolcase.tools import HttpTool
+    >>> from toolcase.tools import HttpTool, BearerAuth, EnvBearerAuth
     >>> 
     >>> # Basic usage (all hosts/methods allowed)
     >>> http = HttpTool()
@@ -21,10 +22,13 @@ Example:
     ...     default_timeout=10.0,
     ... ))
     >>> 
-    >>> # With authentication
-    >>> http = HttpTool(HttpConfig(
-    ...     auth=BearerAuth(token="sk-xxx"),
-    ... ))
+    >>> # With explicit authentication
+    >>> http = HttpTool(HttpConfig(auth=BearerAuth(token="sk-xxx")))
+    >>> 
+    >>> # With environment-based authentication (recommended)
+    >>> http = HttpTool(HttpConfig(auth=EnvBearerAuth(env_var="OPENAI_API_KEY")))
+    >>> # Or shorthand:
+    >>> http = HttpTool(HttpConfig(auth=bearer_from_env("OPENAI_API_KEY")))
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ from __future__ import annotations
 import base64
 import fnmatch
 import json
+import os
 import time
 from typing import TYPE_CHECKING, Annotated, AsyncIterator, ClassVar, Literal
 from urllib.parse import urlparse
@@ -145,6 +150,86 @@ class CustomAuth(BaseModel):
     def __hash__(self) -> int: return hash((self.auth_type, tuple(sorted(self.headers.keys()))))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Environment-Aware Authentication (auto-load from env vars)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_env_secret(env_var: str, required: bool = True) -> SecretStr:
+    """Load a secret from environment variable."""
+    value = os.environ.get(env_var)
+    if value is None:
+        if required:
+            raise EnvironmentError(f"Required environment variable '{env_var}' is not set")
+        value = ""
+    return SecretStr(value)
+
+
+class EnvBearerAuth(BaseModel):
+    """Bearer token from environment variable. Token loaded lazily from env var on first use."""
+    model_config = _FROZEN_CONFIG
+    auth_type: Literal["env_bearer"] = "env_bearer"
+    env_var: str = Field(..., description="Environment variable name containing the token")
+    
+    def apply(self, headers: dict[str, str]) -> dict[str, str]:
+        return headers | {"Authorization": f"Bearer {_get_env_secret(self.env_var).get_secret_value()}"}
+    
+    def __hash__(self) -> int: return hash((self.auth_type, self.env_var))
+
+
+class EnvApiKeyAuth(BaseModel):
+    """API key from environment variable."""
+    model_config = ConfigDict(**_FROZEN_CONFIG, str_strip_whitespace=True)
+    auth_type: Literal["env_api_key"] = "env_api_key"
+    env_var: str = Field(..., description="Environment variable name containing the API key")
+    header_name: str = Field(default="X-API-Key", pattern=r"^[A-Za-z][A-Za-z0-9-]*$")
+    
+    def apply(self, headers: dict[str, str]) -> dict[str, str]:
+        return headers | {self.header_name: _get_env_secret(self.env_var).get_secret_value()}
+    
+    def __hash__(self) -> int: return hash((self.auth_type, self.env_var, self.header_name))
+
+
+class EnvBasicAuth(BaseModel):
+    """Basic auth with credentials from environment variables."""
+    model_config = _FROZEN_CONFIG
+    auth_type: Literal["env_basic"] = "env_basic"
+    username_env: str = Field(..., description="Env var for username")
+    password_env: str = Field(..., description="Env var for password")
+    
+    def apply(self, headers: dict[str, str]) -> dict[str, str]:
+        username = os.environ.get(self.username_env, "")
+        password = _get_env_secret(self.password_env).get_secret_value()
+        creds = base64.b64encode(f"{username}:{password}".encode()).decode()
+        return headers | {"Authorization": f"Basic {creds}"}
+    
+    def __hash__(self) -> int: return hash((self.auth_type, self.username_env, self.password_env))
+
+
+# Convenience factory functions for env-based auth
+def bearer_from_env(env_var: str = "API_TOKEN") -> EnvBearerAuth:
+    """Create Bearer auth that loads token from environment variable.
+    
+    Example:
+        >>> auth = bearer_from_env("OPENAI_API_KEY")
+        >>> http = HttpTool(HttpConfig(auth=auth))
+    """
+    return EnvBearerAuth(env_var=env_var)
+
+
+def api_key_from_env(env_var: str = "API_KEY", header: str = "X-API-Key") -> EnvApiKeyAuth:
+    """Create API key auth that loads from environment variable.
+    
+    Example:
+        >>> auth = api_key_from_env("ANTHROPIC_API_KEY", header="x-api-key")
+    """
+    return EnvApiKeyAuth(env_var=env_var, header_name=header)
+
+
+def basic_from_env(username_env: str = "API_USERNAME", password_env: str = "API_PASSWORD") -> EnvBasicAuth:
+    """Create Basic auth that loads credentials from environment variables."""
+    return EnvBasicAuth(username_env=username_env, password_env=password_env)
+
+
 def _auth_discriminator(v: JsonDict | BaseModel) -> str:
     """Discriminator function for auth strategy union."""
     return str(v.get("auth_type", "none")) if isinstance(v, dict) else getattr(v, "auth_type", "none")
@@ -156,7 +241,10 @@ AuthStrategy = Annotated[
     | Annotated[BearerAuth, Tag("bearer")]
     | Annotated[BasicAuth, Tag("basic")]
     | Annotated[ApiKeyAuth, Tag("api_key")]
-    | Annotated[CustomAuth, Tag("custom")],
+    | Annotated[CustomAuth, Tag("custom")]
+    | Annotated[EnvBearerAuth, Tag("env_bearer")]
+    | Annotated[EnvApiKeyAuth, Tag("env_api_key")]
+    | Annotated[EnvBasicAuth, Tag("env_basic")],
     Discriminator(_auth_discriminator),
 ]
 
