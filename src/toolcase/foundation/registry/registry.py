@@ -10,12 +10,13 @@ The registry provides:
 - Centralized validation via ValidationMiddleware
 - Capability-aware execution (respects max_concurrent, caching, etc.)
 - Effect system verification (declare side effects, enable pure testing)
+- Event signals for lifecycle hooks (on_register, on_unregister, on_execute)
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 
 from beartype import beartype as typechecked
 from pydantic import BaseModel, ValidationError
@@ -23,6 +24,7 @@ from pydantic import BaseModel, ValidationError
 from toolcase.foundation.core import AnyTool, BaseTool, ToolCapabilities, ToolMetadata, ToolProtocol
 from toolcase.foundation.di import Container, Factory, Scope
 from toolcase.foundation.errors import ErrorCode, ToolError, ToolException, format_validation_error
+from toolcase.foundation.events import Signal
 from toolcase.runtime.middleware import Context, Middleware, Next, ValidationMiddleware, compose, compose_streaming, StreamMiddleware
 from toolcase.runtime.concurrency import run_sync, CapacityLimiter
 from toolcase.io.streaming import (
@@ -65,9 +67,23 @@ class ToolRegistry:
         >>> @tool(description="Fetch data", effects=["db"])
         ... async def fetch(db: Database) -> str: ...
         >>> registry.register(fetch)  # Verifies db handler exists
+    
+    Event Signals:
+        >>> registry.on_register += lambda tool: print(f"Registered: {tool.metadata.name}")
+        >>> registry.on_unregister += lambda name: print(f"Unregistered: {name}")
+        >>> registry.on_execute += lambda name, params, result: log_execution(name)
     """
     
-    __slots__ = ("_tools", "_middleware", "_chain", "_stream_chain", "_container", "_validation", "_limiters", "_effect_handlers", "_require_effects")
+    __slots__ = (
+        "_tools", "_middleware", "_chain", "_stream_chain", "_container",
+        "_validation", "_limiters", "_effect_handlers", "_require_effects",
+        "on_register", "on_unregister", "on_execute",
+    )
+    
+    # Event type signatures for external typing
+    OnRegister = Callable[[AnyTool], None]
+    OnUnregister = Callable[[str], None]
+    OnExecute = Callable[[str, dict[str, object] | BaseModel, str], None]
     
     def __init__(self) -> None:
         self._tools: dict[str, AnyTool] = {}
@@ -79,36 +95,33 @@ class ToolRegistry:
         self._limiters: dict[str, CapacityLimiter] = {}  # Concurrency control per tool
         self._effect_handlers: dict[str, object] = {}  # Effect handlers (e.g., InMemoryDB)
         self._require_effects: bool = False  # Whether to verify effects on registration
+        # Event signals for lifecycle hooks
+        self.on_register: Signal[ToolRegistry.OnRegister] = Signal()
+        self.on_unregister: Signal[ToolRegistry.OnUnregister] = Signal()
+        self.on_execute: Signal[ToolRegistry.OnExecute] = Signal()
     
     @typechecked
     def register(self, tool: AnyTool) -> None:
-        """Register a tool instance with validation.
-        
-        Accepts either BaseTool subclasses or any object conforming to ToolProtocol.
-        Automatically creates a CapacityLimiter for tools with max_concurrent set.
-        Verifies effect handlers exist when require_effects() is enabled.
-        """
-        name = tool.metadata.name
+        """Register a tool instance. Creates CapacityLimiter for max_concurrent tools. Verifies effects when enabled."""
+        name, meta = tool.metadata.name, tool.metadata
         if name in self._tools:
             raise ValueError(f"Tool '{name}' already registered. Use unregister() first.")
-        if len(tool.metadata.description) < 10:
+        if len(meta.description) < 10:
             raise ValueError(f"Tool '{name}' description too short for LLM selection.")
-        
-        # Verify effects if enabled
-        if self._require_effects:
-            self._verify_tool_effects(tool)
-        
+        self._require_effects and self._verify_tool_effects(tool)  # Verify effects if enabled
         self._tools[name] = tool
-        
-        # Create CapacityLimiter for rate-limited tools
-        if (max_conc := tool.metadata.max_concurrent) is not None:
+        if (max_conc := meta.max_concurrent) is not None:  # Create CapacityLimiter for rate-limited tools
             self._limiters[name] = CapacityLimiter(max_conc)
+        self.on_register.fire(tool)
     
     @typechecked
     def unregister(self, name: str) -> bool:
-        """Remove a tool by name. Returns True if found."""
+        """Remove a tool by name. Returns True if found. Fires on_unregister signal."""
         self._limiters.pop(name, None)
-        return self._tools.pop(name, None) is not None
+        if self._tools.pop(name, None) is not None:
+            self.on_unregister.fire(name)
+            return True
+        return False
     
     @typechecked
     def get(self, name: str) -> AnyTool | None:
@@ -186,101 +199,39 @@ class ToolRegistry:
         """
         self._effect_handlers[effect.lower()] = handler
     
-    def get_effect(self, effect: str) -> object | None:
-        """Get registered effect handler."""
-        return self._effect_handlers.get(effect.lower())
-    
-    def has_effect(self, effect: str) -> bool:
-        """Check if effect handler is registered."""
-        return effect.lower() in self._effect_handlers
-    
-    @property
-    def registered_effects(self) -> frozenset[str]:
-        """All registered effect types."""
-        return frozenset(self._effect_handlers.keys())
+    def get_effect(self, effect: str) -> object | None: return self._effect_handlers.get(effect.lower())  # Get registered effect handler
+    def has_effect(self, effect: str) -> bool: return effect.lower() in self._effect_handlers  # Check if effect handler is registered
+    registered_effects = property(lambda s: frozenset(s._effect_handlers.keys()))  # All registered effect types
     
     def _verify_tool_effects(self, tool: AnyTool) -> None:
-        """Verify tool's declared effects have handlers.
-        
-        Raises:
-            MissingEffectHandler: If a declared effect has no handler
-        """
+        """Verify tool's declared effects have handlers. Raises MissingEffectHandler if missing."""
         from toolcase.foundation.effects import MissingEffectHandler, get_effects
-        
-        declared = get_effects(tool)
-        if not declared:
-            return
-        
-        for effect in declared:
+        for effect in (get_effects(tool) or []):
             if effect not in self._effect_handlers:
                 raise MissingEffectHandler(effect, tool.metadata.name)
     
     def verify_all_effects(self) -> list[tuple[str, str]]:
-        """Verify all registered tools have their effects satisfied.
-        
-        Returns:
-            List of (tool_name, effect) tuples for missing handlers
-        """
+        """Verify all registered tools have their effects satisfied. Returns (tool_name, effect) for missing handlers."""
         from toolcase.foundation.effects import get_effects
-        
-        missing: list[tuple[str, str]] = []
-        for name, tool in self._tools.items():
-            for effect in get_effects(tool):
-                if effect not in self._effect_handlers:
-                    missing.append((name, effect))
-        return missing
+        return [(name, effect) for name, tool in self._tools.items()
+                for effect in get_effects(tool) if effect not in self._effect_handlers]
     
     def tools_by_effect(self, *effects: str) -> list[ToolMetadata]:
-        """Get tools that declare specific effects.
-        
-        Args:
-            *effects: Effect names to filter by
-        
-        Returns:
-            Tools declaring all specified effects
-        """
+        """Get tools declaring all specified effects."""
         from toolcase.foundation.effects import has_effects
-        
-        return [
-            tool.metadata
-            for tool in self._tools.values()
-            if has_effects(tool, *effects)
-        ]
+        return [t.metadata for t in self._tools.values() if has_effects(t, *effects)]
     
-    def __getitem__(self, name: str) -> AnyTool:
-        """Get tool by name, raises KeyError if not found."""
-        return self._tools[name]
-    
-    def __contains__(self, name: str) -> bool:
-        return name in self._tools
-    
-    def __len__(self) -> int:
-        return len(self._tools)
-    
-    def __iter__(self) -> Iterator[AnyTool]:
-        return iter(self._tools.values())
+    def __getitem__(self, name: str) -> AnyTool: return self._tools[name]  # Get tool by name, raises KeyError
+    def __contains__(self, name: str) -> bool: return name in self._tools
+    def __len__(self) -> int: return len(self._tools)
+    def __iter__(self) -> Iterator[AnyTool]: return iter(self._tools.values())
     
     # ─────────────────────────────────────────────────────────────────
     # Middleware
     # ─────────────────────────────────────────────────────────────────
     
     def use(self, middleware: Middleware | StreamMiddleware) -> None:
-        """Add middleware to the execution pipeline.
-        
-        Middleware is applied in order: first added = outermost (runs first).
-        Invalidates the compiled chain, forcing recompilation on next execute.
-        
-        Both regular Middleware and StreamMiddleware are supported. Regular
-        middleware is auto-adapted for streaming context.
-        
-        Args:
-            middleware: Middleware instance implementing Middleware or StreamMiddleware
-        
-        Example:
-            >>> registry.use(LoggingMiddleware())
-            >>> registry.use(StreamLoggingMiddleware())  # Streaming-aware
-            >>> registry.use(RateLimitMiddleware(max_calls=10, window_seconds=60))
-        """
+        """Add middleware to pipeline. First added = outermost. Invalidates compiled chain."""
         self._middleware.append(middleware)
         self._chain = self._stream_chain = None  # Invalidate cached chains
     
@@ -310,15 +261,8 @@ class ToolRegistry:
             self._chain = self._stream_chain = None
         return self._validation
     
-    @property
-    def validation(self) -> ValidationMiddleware | None:
-        """Access the ValidationMiddleware if configured."""
-        return self._validation
-    
-    @property
-    def has_validation_middleware(self) -> bool:
-        """Check if ValidationMiddleware is configured."""
-        return self._validation is not None
+    validation = property(lambda s: s._validation)  # Access the ValidationMiddleware if configured
+    has_validation_middleware = property(lambda s: s._validation is not None)  # Check if configured
     
     def _get_chain(self) -> Next:
         """Get or compile the middleware chain."""
@@ -401,26 +345,18 @@ class ToolRegistry:
                 try:
                     if (limiter := self._limiters.get(name)) is not None:
                         async with limiter:
-                            return await self._get_chain()(tool, validated, context)  # type: ignore[arg-type]
-                    return await self._get_chain()(tool, validated, context)  # type: ignore[arg-type]
+                            result = await self._get_chain()(tool, validated, context)  # type: ignore[arg-type]
+                    else:
+                        result = await self._get_chain()(tool, validated, context)  # type: ignore[arg-type]
+                    self.on_execute.fire(name, params, result)
+                    return result
                 except ToolException as e:
                     return e.error.render()
                 except Exception as e:
                     return ToolError.from_exception(name, e, "Execution failed").render()
     
-    def execute_sync(
-        self,
-        name: str,
-        params: dict[str, object] | BaseModel,
-        *,
-        ctx: Context | None = None,
-    ) -> str:
-        """Synchronous wrapper for execute().
-        
-        For sync callers that need middleware support. Uses run_sync()
-        which handles nested event loops (FastAPI, Jupyter).
-        Returns structured error string on failure.
-        """
+    def execute_sync(self, name: str, params: dict[str, object] | BaseModel, *, ctx: Context | None = None) -> str:
+        """Synchronous wrapper for execute(). Uses run_sync() for nested event loops."""
         try:
             return run_sync(self.execute(name, params, ctx=ctx))
         except Exception as e:
@@ -591,9 +527,7 @@ class ToolRegistry:
         """List tools filtered by category."""
         return [t.metadata for t in self._tools.values() if t.metadata.category == category and (not enabled_only or t.metadata.enabled)]
     
-    def categories(self) -> set[str]:
-        """Get all unique categories."""
-        return {t.metadata.category for t in self._tools.values()}
+    def categories(self) -> set[str]: return {t.metadata.category for t in self._tools.values()}  # Get all unique categories
     
     # ─────────────────────────────────────────────────────────────────
     # Formatting
@@ -616,69 +550,35 @@ class ToolRegistry:
     
     def register_all(self, *tools: AnyTool) -> None:
         """Register multiple tools at once."""
-        for tool in tools:
-            self.register(tool)
+        for tool in tools: self.register(tool)
     
     def clear(self) -> None:
-        """Remove all registered tools, middleware, providers, and effect handlers."""
-        self._tools.clear()
-        self._middleware.clear()
-        self._chain = self._stream_chain = None
-        self._validation = None
-        self._limiters.clear()
+        """Remove all registered tools, middleware, providers, effect handlers, and event subscriptions."""
+        for d in (self._tools, self._middleware, self._limiters, self._effect_handlers): d.clear()
         self._container.clear()
-        self._effect_handlers.clear()
+        self._chain = self._stream_chain = self._validation = None
         self._require_effects = False
+        self.on_register.clear()
+        self.on_unregister.clear()
+        self.on_execute.clear()
     
     # ─────────────────────────────────────────────────────────────────
     # Capability Introspection
     # ─────────────────────────────────────────────────────────────────
     
-    def get_limiter(self, name: str) -> CapacityLimiter | None:
-        """Get the CapacityLimiter for a rate-limited tool (if any)."""
-        return self._limiters.get(name)
+    def get_limiter(self, name: str) -> CapacityLimiter | None: return self._limiters.get(name)  # Get CapacityLimiter for rate-limited tool
+    def limiter_stats(self) -> dict[str, dict[str, int]]: return {k: v.statistics for k, v in self._limiters.items()}  # Get stats for all limiters
     
-    def limiter_stats(self) -> dict[str, dict[str, int]]:
-        """Get statistics for all capacity limiters."""
-        return {name: limiter.statistics for name, limiter in self._limiters.items()}
-    
-    def tools_by_capability(
-        self,
-        *,
-        supports_caching: bool | None = None,
-        supports_streaming: bool | None = None,
-        idempotent: bool | None = None,
-        max_concurrent_lte: int | None = None,
-    ) -> list[ToolMetadata]:
-        """Filter tools by advertised capabilities.
-        
-        Args:
-            supports_caching: Filter by caching support
-            supports_streaming: Filter by streaming support
-            idempotent: Filter by idempotency
-            max_concurrent_lte: Filter by max_concurrent <= value
-        
-        Returns:
-            List of ToolMetadata matching the capability filters
-        
-        Example:
-            >>> streamable = registry.tools_by_capability(supports_streaming=True)
-            >>> rate_limited = registry.tools_by_capability(max_concurrent_lte=10)
-        """
-        results: list[ToolMetadata] = []
-        for tool in self._tools.values():
-            caps = tool.metadata.capabilities
-            if supports_caching is not None and caps.supports_caching != supports_caching:
-                continue
-            if supports_streaming is not None and caps.supports_streaming != supports_streaming:
-                continue
-            if idempotent is not None and caps.idempotent != idempotent:
-                continue
-            if max_concurrent_lte is not None:
-                if caps.max_concurrent is None or caps.max_concurrent > max_concurrent_lte:
-                    continue
-            results.append(tool.metadata)
-        return results
+    def tools_by_capability(self, *, supports_caching: bool | None = None, supports_streaming: bool | None = None,
+                            idempotent: bool | None = None, max_concurrent_lte: int | None = None) -> list[ToolMetadata]:
+        """Filter tools by advertised capabilities. Returns list of matching ToolMetadata."""
+        def matches(caps: ToolCapabilities) -> bool:
+            if supports_caching is not None and caps.supports_caching != supports_caching: return False
+            if supports_streaming is not None and caps.supports_streaming != supports_streaming: return False
+            if idempotent is not None and caps.idempotent != idempotent: return False
+            if max_concurrent_lte is not None and (caps.max_concurrent is None or caps.max_concurrent > max_concurrent_lte): return False
+            return True
+        return [t.metadata for t in self._tools.values() if matches(t.metadata.capabilities)]
     
     # ─────────────────────────────────────────────────────────────────
     # Circuit Breaker Observability
@@ -690,93 +590,28 @@ class ToolRegistry:
         return next((m for m in self._middleware if isinstance(m, CircuitBreakerMiddleware)), None)
     
     def circuit_state(self, tool_name: str) -> object | None:
-        """Get current circuit state for a tool.
-        
-        Returns State enum if CircuitBreakerMiddleware is configured, else None.
-        
-        Args:
-            tool_name: Tool name to check
-        
-        Returns:
-            State enum (CLOSED, OPEN, HALF_OPEN) or None if no circuit breaker
-        
-        Example:
-            >>> registry.use(CircuitBreakerMiddleware())
-            >>> state = registry.circuit_state("search")
-            >>> if state and state.name == "OPEN":
-            ...     print("Circuit is open - failing fast")
-        """
-        if (mw := self._find_circuit_middleware()) is not None:
-            return mw.get_state(tool_name)  # type: ignore[union-attr]
-        return None
+        """Get current circuit state. Returns State enum or None if no breaker."""
+        return mw.get_state(tool_name) if (mw := self._find_circuit_middleware()) else None  # type: ignore[union-attr]
     
     def circuit_is_open(self, tool_name: str) -> bool:
-        """Check if a tool's circuit is open (fail-fast mode).
-        
-        Convenience method for quick checks. Returns False if no circuit breaker.
-        
-        Args:
-            tool_name: Tool name to check
-        
-        Returns:
-            True if circuit is open, False otherwise (or no breaker configured)
-        """
+        """Check if circuit is open (fail-fast). Returns False if no breaker."""
         from toolcase.runtime.resilience import State
         return self.circuit_state(tool_name) == State.OPEN
     
     def circuit_stats(self) -> dict[str, object]:
-        """Get statistics for all circuit breakers.
-        
-        Returns:
-            Dict mapping tool names to circuit state dicts, empty if no breaker
-        
-        Example:
-            >>> stats = registry.circuit_stats()
-            >>> for tool, state in stats.items():
-            ...     print(f"{tool}: {state['state']} ({state['failures']} failures)")
-        """
-        if (mw := self._find_circuit_middleware()) is not None:
-            return mw.stats()  # type: ignore[union-attr]
-        return {}
+        """Get statistics for all circuit breakers. Returns empty dict if no breaker."""
+        return mw.stats() if (mw := self._find_circuit_middleware()) else {}  # type: ignore[union-attr]
     
     def reset_circuit(self, tool_name: str | None = None) -> bool:
-        """Manually reset circuit breaker(s).
-        
-        Args:
-            tool_name: Tool to reset, or None to reset all circuits
-        
-        Returns:
-            True if circuit breaker was found and reset, False if no breaker
-        
-        Example:
-            >>> registry.reset_circuit("search")  # Reset one tool
-            >>> registry.reset_circuit()  # Reset all circuits
-        """
-        if (mw := self._find_circuit_middleware()) is not None:
+        """Manually reset circuit breaker(s). Returns True if breaker found and reset."""
+        if (mw := self._find_circuit_middleware()):
             mw.reset(tool_name)  # type: ignore[union-attr]
             return True
         return False
     
     def get_circuit_breaker(self, tool_name: str) -> object | None:
-        """Get the CircuitBreaker instance for a tool.
-        
-        Provides direct access to the core primitive for advanced monitoring
-        or manual intervention.
-        
-        Args:
-            tool_name: Tool name
-        
-        Returns:
-            CircuitBreaker instance or None if no middleware configured
-        
-        Example:
-            >>> breaker = registry.get_circuit_breaker("search")
-            >>> if breaker:
-            ...     print(f"Retry after: {breaker.retry_after}s")
-        """
-        if (mw := self._find_circuit_middleware()) is not None:
-            return mw.get_breaker(tool_name)  # type: ignore[union-attr]
-        return None
+        """Get CircuitBreaker instance for a tool. Returns None if no middleware."""
+        return mw.get_breaker(tool_name) if (mw := self._find_circuit_middleware()) else None  # type: ignore[union-attr]
     
     async def dispose(self) -> None:
         """Dispose all singleton resources in the container."""
@@ -793,7 +628,7 @@ _registry: ToolRegistry | None = None
 def get_registry() -> ToolRegistry:
     """Get the global tool registry instance."""
     global _registry
-    return _registry if _registry else (_registry := ToolRegistry())
+    return _registry or (_registry := ToolRegistry())
 
 
 def set_registry(registry: ToolRegistry) -> None:

@@ -72,8 +72,15 @@ MIDDLEWARE:
     validation = registry.use_validation()
     validation.add_rule("search", "query", min_len(3), "query too short")
 
+EVENT SIGNALS:
+    # Hook into registration lifecycle
+    registry.on_register += lambda tool: print(f"Registered: {tool.metadata.name}")
+    registry.on_unregister += lambda name: print(f"Unregistered: {name}")
+    registry.on_execute += lambda name, params, result: log_execution(name)
+
 RELATED TOPICS:
     toolcase help tool       Creating tools
+    toolcase help events     Event signals and lifecycle hooks
     toolcase help formats    Exporting to OpenAI/Anthropic/Google
     toolcase help middleware Middleware composition
     toolcase help quickstart Complete agent setup guide
