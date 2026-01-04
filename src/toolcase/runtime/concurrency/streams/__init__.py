@@ -3,6 +3,7 @@
 Stream utilities for working with async iterators:
 - Merging: merge_streams, interleave_streams
 - Buffering: buffer_stream, batch_stream
+- Backpressure: backpressure_stream, BackpressureController
 - Rate control: throttle_stream, timeout_stream
 - Transforms: map_stream, filter_stream, flatten_stream
 """
@@ -11,6 +12,8 @@ from .combinators import (
     merge_streams,
     interleave_streams,
     buffer_stream,
+    backpressure_stream,
+    BackpressureController,
     throttle_stream,
     batch_stream,
     timeout_stream,
@@ -29,6 +32,8 @@ __all__ = [
     "merge_streams",
     "interleave_streams",
     "buffer_stream",
+    "backpressure_stream",
+    "BackpressureController",
     "throttle_stream",
     "batch_stream",
     "timeout_stream",

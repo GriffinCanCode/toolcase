@@ -220,11 +220,31 @@ class StreamingFunctionTool(FunctionTool):
 class ResultStreamingFunctionTool(FunctionTool):
     """FunctionTool variant for async generators yielding string chunks. For true result streaming (LLM outputs, incremental content)."""
     
-    __slots__ = ()
+    __slots__ = ("_backpressure_buffer",)
+    
+    def __init__(
+        self,
+        func: Callable[..., str] | Callable[..., Awaitable[str]],
+        metadata: ToolMetadata,
+        params_schema: type[BaseModel],
+        *,
+        cache_enabled: bool = True,
+        cache_ttl: float = DEFAULT_TTL,
+        inject: list[str] | None = None,
+        effects: frozenset[str] | None = None,
+        backpressure_buffer: int | None = None,
+    ) -> None:
+        super().__init__(func, metadata, params_schema, cache_enabled=cache_enabled, cache_ttl=cache_ttl, inject=inject, effects=effects)
+        self._backpressure_buffer = backpressure_buffer
     
     @property
     def supports_result_streaming(self) -> bool:
         return True
+    
+    @property
+    def backpressure_buffer(self) -> int | None:
+        """Buffer size for backpressure, or None if disabled."""
+        return self._backpressure_buffer
     
     async def stream_result(self, params: BaseModel) -> AsyncIterator[str]:
         """Stream string chunks from the wrapped async generator."""
@@ -235,6 +255,22 @@ class ResultStreamingFunctionTool(FunctionTool):
             if (handler := get_handler(effect)) and kwargs.get(effect) is None:
                 kwargs[effect] = handler
         async for chunk in self._func(**kwargs):  # type: ignore[union-attr]
+            yield chunk
+    
+    async def stream_result_with_backpressure(self, params: BaseModel, buffer_size: int | None = None) -> AsyncIterator[str]:
+        """Stream with backpressure - producer pauses when consumer is slow.
+        
+        Args:
+            params: Tool parameters
+            buffer_size: Override buffer size (default: tool's backpressure_buffer or 10)
+        
+        Yields:
+            String chunks with backpressure applied
+        """
+        from toolcase.runtime.concurrency.streams import backpressure_stream
+        
+        size = buffer_size or self._backpressure_buffer or 10
+        async for chunk in backpressure_stream(self.stream_result(params), maxsize=size):
             yield chunk
     
     async def _async_run(self, params: BaseModel) -> str:
@@ -258,6 +294,7 @@ def tool(
     tags: list[str] | set[str] | None = None,
     requires_api_key: bool = False,
     streaming: bool = False,
+    backpressure_buffer: int | None = None,
     cache_enabled: bool = True,
     cache_ttl: float = DEFAULT_TTL,
     inject: list[str] | None = None,
@@ -280,6 +317,7 @@ def tool(
     tags: list[str] | set[str] | None = None,
     requires_api_key: bool = False,
     streaming: bool = False,
+    backpressure_buffer: int | None = None,
     cache_enabled: bool = True,
     cache_ttl: float = DEFAULT_TTL,
     inject: list[str] | None = None,
@@ -305,6 +343,8 @@ def tool(
         tags: Capability tags for discovery (e.g., ["search", "web"])
         requires_api_key: Whether tool needs external API credentials
         streaming: Whether tool supports progress streaming
+        backpressure_buffer: Buffer size for backpressure (streaming tools only).
+                            When set, producer pauses when buffer fills. None = no backpressure.
         cache_enabled: Enable result caching
         cache_ttl: Cache TTL in seconds
         inject: List of dependency names to inject from registry container
@@ -354,20 +394,21 @@ def tool(
         ...     result = await db.fetch(query)
         ...     return str(result)
     
-    Streaming Example:
-        >>> @tool(description="Generate report", streaming=True)
+    Streaming with Backpressure:
+        >>> @tool(description="Generate report", streaming=True, backpressure_buffer=10)
         ... async def generate(topic: str) -> AsyncIterator[str]:
         ...     async for chunk in llm.stream(f"Report on {topic}"):
-        ...         yield chunk
+        ...         yield chunk  # Pauses if consumer is slow
         ...
         >>> async for chunk in registry.stream_execute("generate", {"topic": "AI"}):
-        ...     print(chunk, end="", flush=True)
+        ...     await slow_process(chunk)  # Producer pauses when buffer fills
     
     Notes:
         - Function must return str (or AsyncIterator[str] for streaming)
         - All parameters must have type hints
         - Async functions are fully supported
         - streaming=True with async generator enables result streaming
+        - backpressure_buffer prevents memory buildup with slow consumers
         - Injected parameters are excluded from the generated schema
         - Effects are tracked for verification and pure testing
     """
@@ -398,10 +439,17 @@ def tool(
         effect_set = frozenset(e.lower() if isinstance(e, str) else e for e in (effects or ()))
         
         # Determine tool class based on function type and streaming flag
-        tool_cls = (ResultStreamingFunctionTool if streaming and inspect.isasyncgenfunction(fn) else
+        is_result_streaming = streaming and inspect.isasyncgenfunction(fn)
+        tool_cls = (ResultStreamingFunctionTool if is_result_streaming else
                     StreamingFunctionTool if streaming and asyncio.iscoroutinefunction(fn) else FunctionTool)
         
-        tool_instance = tool_cls(fn, meta, schema, cache_enabled=cache_enabled, cache_ttl=cache_ttl, inject=inject, effects=effect_set)
+        # Pass backpressure_buffer only to ResultStreamingFunctionTool
+        if is_result_streaming:
+            tool_instance = tool_cls(fn, meta, schema, cache_enabled=cache_enabled, cache_ttl=cache_ttl, 
+                                     inject=inject, effects=effect_set, backpressure_buffer=backpressure_buffer)
+        else:
+            tool_instance = tool_cls(fn, meta, schema, cache_enabled=cache_enabled, cache_ttl=cache_ttl, 
+                                     inject=inject, effects=effect_set)
         wraps(fn)(tool_instance)
         return tool_instance
     

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator, Awaitable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Callable, Generic, TypeVar
 
@@ -35,6 +36,7 @@ __all__ = [
     "merge_streams",
     "interleave_streams",
     "buffer_stream",
+    "backpressure_stream",
     "throttle_stream",
     "batch_stream",
     "timeout_stream",
@@ -157,7 +159,127 @@ async def buffer_stream(stream: AsyncIterator[T], maxsize: int = 10) -> AsyncIte
             raise error
     finally:
         task.cancel()
-        with asyncio.suppress(asyncio.CancelledError):
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@dataclass(slots=True)
+class BackpressureController:
+    """Controls backpressure state for streaming with pause/resume semantics.
+    
+    Used by backpressure_stream to communicate flow control signals.
+    Producers check `should_pause` and consumers call `resume()`.
+    
+    Example:
+        >>> controller = BackpressureController(high_water=10, low_water=5)
+        >>> # Producer side
+        >>> if controller.should_pause:
+        ...     await controller.wait_for_resume()
+        >>> # Consumer side (after processing batch)
+        >>> controller.consumed(5)
+    """
+    high_water: int = 10
+    low_water: int = 3
+    _pending: int = field(default=0, repr=False)
+    _paused: bool = field(default=False, repr=False)
+    _resume_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    
+    def __post_init__(self) -> None:
+        self._resume_event.set()  # Initially not paused
+    
+    @property
+    def pending(self) -> int:
+        """Current number of pending (unconsumed) items."""
+        return self._pending
+    
+    @property
+    def should_pause(self) -> bool:
+        """True if producer should pause (high water mark reached)."""
+        return self._pending >= self.high_water
+    
+    @property
+    def is_paused(self) -> bool:
+        """True if currently in paused state."""
+        return self._paused
+    
+    def produced(self, n: int = 1) -> None:
+        """Mark n items as produced. Called by producer."""
+        self._pending += n
+        if self._pending >= self.high_water and not self._paused:
+            self._paused = True
+            self._resume_event.clear()
+    
+    def consumed(self, n: int = 1) -> None:
+        """Mark n items as consumed. Resumes if below low water."""
+        self._pending = max(0, self._pending - n)
+        if self._pending <= self.low_water and self._paused:
+            self._paused = False
+            self._resume_event.set()
+    
+    async def wait_for_resume(self) -> None:
+        """Block until backpressure is released (pending < low_water)."""
+        await self._resume_event.wait()
+
+
+async def backpressure_stream(
+    stream: AsyncIterator[T],
+    maxsize: int = 10,
+    *,
+    controller: BackpressureController | None = None,
+) -> AsyncIterator[T]:
+    """Stream with backpressure - pauses producer when consumer is slow.
+    
+    When buffer reaches maxsize, producer awaits until consumer catches up.
+    This prevents memory buildup for fast producers with slow consumers.
+    
+    Uses asyncio.Queue with maxsize for natural backpressure via put() blocking.
+    Optionally accepts a BackpressureController for fine-grained flow control.
+    
+    Args:
+        stream: Source async iterator (producer)
+        maxsize: Buffer capacity - producer blocks when full (default: 10)
+        controller: Optional controller for external flow monitoring
+    
+    Yields:
+        Items from stream with backpressure applied
+    
+    Example:
+        >>> # Producer pauses when 10 items buffered, resumes when consumed
+        >>> async for chunk in backpressure_stream(fast_llm_stream(), maxsize=10):
+        ...     await slow_process(chunk)  # Consumer
+        
+        >>> # With controller for monitoring
+        >>> ctrl = BackpressureController(high_water=10, low_water=3)
+        >>> async for item in backpressure_stream(source, controller=ctrl):
+        ...     if ctrl.is_paused:
+        ...         log.debug("Producer paused due to backpressure")
+        ...     process(item)
+    """
+    buf: asyncio.Queue[T | None] = asyncio.Queue(maxsize=maxsize)
+    error: BaseException | None = None
+    ctrl = controller or BackpressureController(high_water=maxsize, low_water=max(1, maxsize // 3))
+    
+    async def producer() -> None:
+        nonlocal error
+        try:
+            async for item in stream:
+                await buf.put(item)  # Blocks when queue full (backpressure)
+                ctrl.produced()
+        except BaseException as e:
+            error = e
+        finally:
+            await buf.put(None)  # Sentinel
+    
+    task = asyncio.create_task(producer())
+    try:
+        while (item := await buf.get()) is not None:
+            ctrl.consumed()
+            yield item
+        if error:
+            raise error
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
             await task
 
 

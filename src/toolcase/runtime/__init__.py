@@ -20,6 +20,7 @@ __all__ = [
     "Middleware", "Next", "Context", "compose",
     "StreamMiddleware", "StreamingAdapter", "StreamingChain", "compose_streaming",
     "StreamLoggingMiddleware", "StreamMetricsMiddleware",
+    "BackpressureMiddleware", "apply_backpressure",
     "CircuitBreakerMiddleware", "LoggingMiddleware", "LogMetricsBackend", "MetricsBackend",
     "MetricsMiddleware", "RateLimitMiddleware", "RetryMiddleware", "TimeoutMiddleware",
     # Observability
@@ -51,8 +52,9 @@ __all__ = [
     "ThreadPool", "ProcessPool", "run_in_thread", "run_in_process",
     # Concurrency - Wait Strategies
     "race_async", "gather_async", "gather_settled", "first_success", "map_async", "all_settled",
-    # Concurrency - Streams
-    "merge_streams", "interleave_streams_async", "buffer_stream", "throttle_stream", "batch_stream",
+    # Concurrency - Streams (with backpressure)
+    "merge_streams", "interleave_streams_async", "buffer_stream", "backpressure_stream", "BackpressureController",
+    "throttle_stream", "batch_stream",
     # Concurrency - Interop
     "run_sync", "run_async", "from_thread", "to_thread", "AsyncAdapter", "SyncAdapter",
 ]
@@ -81,6 +83,7 @@ def __getattr__(name: str):
         "Middleware", "Next", "Context", "compose",
         "StreamMiddleware", "StreamingAdapter", "StreamingChain", "compose_streaming",
         "StreamLoggingMiddleware", "StreamMetricsMiddleware",
+        "BackpressureMiddleware", "apply_backpressure",
         "CircuitBreakerMiddleware", "LoggingMiddleware", "LogMetricsBackend", "MetricsBackend",
         "MetricsMiddleware", "RateLimitMiddleware", "RetryMiddleware", "TimeoutMiddleware",
     }
@@ -133,8 +136,9 @@ def __getattr__(name: str):
         "ThreadPool", "ProcessPool", "run_in_thread", "run_in_process",
         # Wait strategies
         "race_async", "gather_async", "gather_settled", "first_success", "map_async", "all_settled",
-        # Streams
-        "merge_streams", "interleave_streams_async", "buffer_stream", "throttle_stream", "batch_stream",
+        # Streams (with backpressure)
+        "merge_streams", "interleave_streams_async", "buffer_stream", "backpressure_stream", "BackpressureController",
+        "throttle_stream", "batch_stream",
         # Interop
         "run_sync", "run_async", "from_thread", "to_thread", "AsyncAdapter", "SyncAdapter",
     }

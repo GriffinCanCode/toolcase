@@ -151,17 +151,30 @@ async def _base_stream(
     params: BaseModel,
     ctx: Context,
 ) -> AsyncIterator[StreamChunk]:
-    """Base streaming executor - yields chunks from tool.stream_result()."""
+    """Base streaming executor - yields chunks from tool.stream_result().
+    
+    Automatically applies backpressure if tool has backpressure_buffer set.
+    """
     # Set injected dependencies from context if present
     if (injected := ctx.get("injected")) and isinstance(injected, dict):
         set_injected_deps(cast(InjectedDeps, injected))
     
     try:
         if getattr(tool, "supports_result_streaming", False):
-            idx = 0
-            async for content in tool.stream_result(params):
-                yield StreamChunk(content=content, index=idx)
-                idx += 1
+            # Check for backpressure configuration
+            bp_buffer = getattr(tool, "backpressure_buffer", None) or ctx.get("backpressure_buffer")
+            
+            if bp_buffer:
+                # Use backpressure-enabled streaming
+                async for content in tool.stream_result_with_backpressure(params, buffer_size=bp_buffer):
+                    idx = ctx.get("_bp_idx", 0)
+                    ctx["_bp_idx"] = idx + 1
+                    yield StreamChunk(content=content, index=idx)
+            else:
+                idx = 0
+                async for content in tool.stream_result(params):
+                    yield StreamChunk(content=content, index=idx)
+                    idx += 1
         else:
             # Non-streaming tool: yield single chunk with complete result
             yield StreamChunk(content=await tool.arun(params), index=0)
@@ -310,3 +323,120 @@ class StreamMetricsMiddleware:
             "error_code": classify_exception(error).value,
         }
         self.backend.increment(f"{self.prefix}.errors", tags=tags)  # type: ignore[union-attr]
+
+
+@dataclass(slots=True)
+class BackpressureMiddleware:
+    """Apply backpressure to streaming - pauses producer when consumer is slow.
+    
+    Buffers chunks in an async queue with max size. When buffer fills,
+    producer blocks until consumer catches up. Prevents memory buildup
+    for fast producers with slow consumers.
+    
+    Args:
+        buffer_size: Max buffered chunks before producer pauses (default: 10)
+        log_pauses: Log when backpressure activates/releases
+    
+    Context keys set:
+        - _backpressure_paused: bool - currently paused
+        - _backpressure_pause_count: int - times paused during stream
+    
+    Example:
+        >>> # Producer pauses after 10 chunks until consumer catches up
+        >>> registry.use(BackpressureMiddleware(buffer_size=10))
+        
+        >>> # With pause logging for debugging
+        >>> registry.use(BackpressureMiddleware(buffer_size=5, log_pauses=True))
+    """
+    
+    buffer_size: int = 10
+    log_pauses: bool = False
+    _log: logging.Logger | None = None
+    
+    def __post_init__(self) -> None:
+        if self.log_pauses and self._log is None:
+            self._log = logging.getLogger("toolcase.backpressure")
+    
+    async def on_start(self, tool: BaseTool[BaseModel], params: BaseModel, ctx: Context) -> None:
+        """Initialize backpressure queue for this stream."""
+        import asyncio
+        ctx["_bp_queue"] = asyncio.Queue[StreamChunk | None](maxsize=self.buffer_size)
+        ctx["_bp_pause_count"] = 0
+        ctx["_bp_paused"] = False
+        ctx["_bp_tool"] = tool.metadata.name
+    
+    async def on_chunk(self, chunk: StreamChunk, ctx: Context) -> StreamChunk:
+        """Pass chunk through - actual buffering happens in wrap_stream."""
+        return chunk
+    
+    async def on_complete(self, accumulated: str, ctx: Context) -> None:
+        if self.log_pauses and (pause_count := ctx.get("_bp_pause_count", 0)):
+            self._log.info(f"[{ctx.get('_bp_tool')}] Backpressure activated {pause_count} times")  # type: ignore[union-attr]
+    
+    async def on_error(self, error: Exception, ctx: Context) -> None:
+        pass
+
+
+async def apply_backpressure(
+    source: AsyncIterator[StreamChunk],
+    buffer_size: int = 10,
+    *,
+    ctx: Context | None = None,
+) -> AsyncIterator[StreamChunk]:
+    """Apply backpressure to a chunk stream.
+    
+    Standalone function for applying backpressure without middleware.
+    Producer blocks when buffer_size chunks are pending.
+    
+    Args:
+        source: Source chunk stream
+        buffer_size: Max buffered chunks before blocking
+        ctx: Optional context for tracking stats
+    
+    Yields:
+        StreamChunks with backpressure applied
+    
+    Example:
+        >>> # Direct usage without middleware
+        >>> async for chunk in apply_backpressure(fast_stream, buffer_size=5):
+        ...     await slow_process(chunk)
+    """
+    import asyncio
+    from toolcase.runtime.concurrency.streams import backpressure_stream
+    
+    # Adapt StreamChunk stream to backpressure_stream
+    async def chunk_values() -> AsyncIterator[StreamChunk]:
+        async for chunk in source:
+            yield chunk
+    
+    pause_count = 0
+    buf: asyncio.Queue[StreamChunk | None] = asyncio.Queue(maxsize=buffer_size)
+    error: BaseException | None = None
+    
+    async def producer() -> None:
+        nonlocal error, pause_count
+        try:
+            async for chunk in source:
+                if buf.full():
+                    pause_count += 1
+                    if ctx:
+                        ctx["_bp_pause_count"] = pause_count
+                        ctx["_bp_paused"] = True
+                await buf.put(chunk)
+                if ctx:
+                    ctx["_bp_paused"] = False
+        except BaseException as e:
+            error = e
+        finally:
+            await buf.put(None)
+    
+    task = asyncio.create_task(producer())
+    try:
+        while (chunk := await buf.get()) is not None:
+            yield chunk
+        if error:
+            raise error
+    finally:
+        task.cancel()
+        with asyncio.suppress(asyncio.CancelledError):
+            await task

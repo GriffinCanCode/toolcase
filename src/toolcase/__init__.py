@@ -191,6 +191,7 @@ from .io.streaming import (
 
 # Runtime: Middleware
 from .runtime.middleware import (
+    BackpressureMiddleware,
     CircuitBreakerMiddleware,
     Context,
     LoggingMiddleware,
@@ -200,6 +201,7 @@ from .runtime.middleware import (
     RateLimitMiddleware,
     RetryMiddleware,
     TimeoutMiddleware,
+    apply_backpressure,
     compose,
 )
 
@@ -314,7 +316,18 @@ from .runtime.batch import (
     BatchConfig,
     BatchItem,
     BatchResult,
+    BatchRetryPolicy,
+    BatchRetryStrategy,
+    IdempotencyStore,
+    IdempotentBatchConfig,
+    IdempotentBatchResult,
+    MemoryIdempotencyStore,
+    NO_BATCH_RETRY,
+    RedisIdempotencyStore,
+    StoredResult,
     batch_execute,
+    batch_execute_idempotent,
+    batch_execute_idempotent_sync,
     batch_execute_sync,
 )
 
@@ -378,8 +391,8 @@ __all__ = [
     "ToolRegistry", "get_registry", "set_registry", "reset_registry",
     # Middleware
     "Middleware", "Context", "Next", "compose",
-    "CircuitBreakerMiddleware", "LoggingMiddleware", "MetricsMiddleware",
-    "RateLimitMiddleware", "RetryMiddleware", "TimeoutMiddleware",
+    "BackpressureMiddleware", "CircuitBreakerMiddleware", "LoggingMiddleware", "MetricsMiddleware",
+    "RateLimitMiddleware", "RetryMiddleware", "TimeoutMiddleware", "apply_backpressure",
     # Retry policies
     "Backoff", "ExponentialBackoff", "LinearBackoff", "ConstantBackoff", "DecorrelatedJitter",
     "RetryPolicy", "DEFAULT_RETRYABLE", "NO_RETRY",
@@ -454,6 +467,11 @@ __all__ = [
     # Batch
     "BatchConfig", "BatchItem", "BatchResult",
     "batch_execute", "batch_execute_sync",
+    # Idempotent Batch
+    "IdempotentBatchConfig", "IdempotentBatchResult",
+    "BatchRetryPolicy", "BatchRetryStrategy", "NO_BATCH_RETRY",
+    "batch_execute_idempotent", "batch_execute_idempotent_sync",
+    "IdempotencyStore", "StoredResult", "MemoryIdempotencyStore", "RedisIdempotencyStore",
     # Convenience
     "init_tools",
 ]

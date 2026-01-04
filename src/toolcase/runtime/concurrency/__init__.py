@@ -107,6 +107,8 @@ from .streams import (
     merge_streams,
     interleave_streams,
     buffer_stream,
+    backpressure_stream,
+    BackpressureController,
     throttle_stream,
     batch_stream,
     timeout_stream,
@@ -139,7 +141,7 @@ from .interop import (
 )
 
 __all__ = [
-    # === Unified Facade (PRIMARY IMPORT) ===
+    # === Unified Facade ===
     "Concurrency",
     "ConcurrencyConfig",
     # Facade convenience aliases
@@ -201,6 +203,8 @@ __all__ = [
     "merge_streams",
     "interleave_streams",
     "buffer_stream",
+    "backpressure_stream",
+    "BackpressureController",
     "throttle_stream",
     "batch_stream",
     "timeout_stream",

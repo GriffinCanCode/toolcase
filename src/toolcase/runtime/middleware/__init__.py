@@ -62,6 +62,8 @@ from .streaming import (
     StreamingChain,
     StreamLoggingMiddleware,
     StreamMetricsMiddleware,
+    BackpressureMiddleware,
+    apply_backpressure,
     compose_streaming,
 )
 
@@ -78,6 +80,9 @@ __all__ = [
     "compose_streaming",
     "StreamLoggingMiddleware",
     "StreamMetricsMiddleware",
+    # Backpressure
+    "BackpressureMiddleware",
+    "apply_backpressure",
     # Resilience
     "CircuitBreakerMiddleware",
     "RetryMiddleware",
