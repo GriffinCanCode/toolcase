@@ -3,6 +3,12 @@
 Provides type-safe, validated configuration from environment variables
 with sensible defaults. Supports .env files and nested configuration.
 
+Optimizations:
+- Uses frozen models where appropriate for immutability
+- AliasChoices for flexible env var naming
+- Coercion flags for strict/lenient parsing
+- Computed fields for derived values
+
 Example:
     >>> from toolcase.foundation.settings import get_settings
     >>> settings = get_settings()
@@ -22,6 +28,7 @@ from functools import lru_cache
 from typing import Annotated, Literal
 
 from pydantic import (
+    AliasChoices,
     ByteSize,
     Field,
     NonNegativeFloat,
@@ -40,10 +47,16 @@ class CacheSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="TOOLCASE_CACHE_",
         extra="ignore",
+        frozen=True,  # Settings should be immutable
+        revalidate_instances="never",
     )
     
     enabled: bool = True
-    ttl: PositiveFloat = Field(default=3600.0, description="Default cache TTL in seconds")
+    ttl: PositiveFloat = Field(
+        default=3600.0,
+        description="Default cache TTL in seconds",
+        validation_alias=AliasChoices("ttl", "TTL", "cache_ttl"),  # Accept multiple formats
+    )
     max_size: PositiveInt = Field(default=1000, description="Max cache entries")
     redis_url: SecretStr | None = Field(default=None, description="Redis URL for distributed cache")
     
@@ -52,6 +65,9 @@ class CacheSettings(BaseSettings):
     def backend(self) -> Literal["memory", "redis"]:
         """Determine cache backend from configuration."""
         return "redis" if self.redis_url else "memory"
+    
+    def __hash__(self) -> int:
+        return hash((self.enabled, self.ttl, self.max_size))
 
 
 class LoggingSettings(BaseSettings):
@@ -60,12 +76,21 @@ class LoggingSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="TOOLCASE_LOG_",
         extra="ignore",
+        frozen=True,
+        revalidate_instances="never",
+        use_enum_values=True,  # Store enum values directly
     )
     
-    level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
+        default="INFO",
+        validation_alias=AliasChoices("level", "LEVEL", "log_level"),
+    )
     format: Literal["json", "text"] = "text"
     include_timestamps: bool = True
     include_correlation_id: bool = True
+    
+    def __hash__(self) -> int:
+        return hash((self.level, self.format))
 
 
 class RetrySettings(BaseSettings):
@@ -74,6 +99,8 @@ class RetrySettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="TOOLCASE_RETRY_",
         extra="ignore",
+        frozen=True,
+        revalidate_instances="never",
     )
     
     max_retries: Annotated[int, Field(ge=0, le=10)] = 3
@@ -81,6 +108,15 @@ class RetrySettings(BaseSettings):
     max_delay: PositiveFloat = Field(default=30.0, description="Maximum delay in seconds")
     exponential_base: PositiveFloat = Field(default=2.0, description="Exponential backoff base")
     jitter: bool = True
+    
+    @computed_field
+    @property
+    def is_enabled(self) -> bool:
+        """Whether retries are enabled."""
+        return self.max_retries > 0
+    
+    def __hash__(self) -> int:
+        return hash((self.max_retries, self.base_delay, self.max_delay))
 
 
 class HttpSettings(BaseSettings):
@@ -89,6 +125,8 @@ class HttpSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="TOOLCASE_HTTP_",
         extra="ignore",
+        frozen=True,
+        revalidate_instances="never",
     )
     
     timeout: PositiveFloat = Field(default=30.0, description="Default request timeout")
@@ -100,6 +138,15 @@ class HttpSettings(BaseSettings):
     follow_redirects: bool = True
     max_redirects: PositiveInt = Field(default=10)
     user_agent: str = "toolcase-http/1.0"
+    
+    @computed_field
+    @property
+    def max_response_bytes(self) -> int:
+        """Max response size as int."""
+        return int(self.max_response_size)
+    
+    def __hash__(self) -> int:
+        return hash((self.timeout, self.verify_ssl))
 
 
 class TracingSettings(BaseSettings):
@@ -108,6 +155,8 @@ class TracingSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="TOOLCASE_TRACING_",
         extra="ignore",
+        frozen=True,
+        revalidate_instances="never",
     )
     
     enabled: bool = False
@@ -115,10 +164,20 @@ class TracingSettings(BaseSettings):
     otlp_endpoint: str | None = Field(
         default=None,
         description="OpenTelemetry collector endpoint",
+        validation_alias=AliasChoices("otlp_endpoint", "OTLP_ENDPOINT", "endpoint"),
     )
     sample_rate: Annotated[float, Field(ge=0.0, le=1.0)] = 1.0
     export_batch_size: PositiveInt = 100
     export_timeout: PositiveFloat = 30.0
+    
+    @computed_field
+    @property
+    def is_configured(self) -> bool:
+        """Whether tracing is fully configured."""
+        return self.enabled and self.otlp_endpoint is not None
+    
+    def __hash__(self) -> int:
+        return hash((self.enabled, self.service_name))
 
 
 class RateLimitSettings(BaseSettings):
@@ -127,12 +186,24 @@ class RateLimitSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="TOOLCASE_RATELIMIT_",
         extra="ignore",
+        frozen=True,
+        revalidate_instances="never",
+        use_enum_values=True,
     )
     
     enabled: bool = False
     max_calls: PositiveInt = Field(default=100, description="Max calls per window")
     window_seconds: PositiveFloat = Field(default=60.0, description="Time window in seconds")
     strategy: Literal["sliding", "fixed"] = "sliding"
+    
+    @computed_field
+    @property
+    def calls_per_second(self) -> float:
+        """Compute calls per second rate."""
+        return self.max_calls / self.window_seconds if self.window_seconds > 0 else 0.0
+    
+    def __hash__(self) -> int:
+        return hash((self.enabled, self.max_calls, self.window_seconds))
 
 
 class ToolcaseSettings(BaseSettings):
@@ -140,6 +211,12 @@ class ToolcaseSettings(BaseSettings):
     
     Loads configuration from environment variables with TOOLCASE_ prefix.
     Supports nested configuration and .env files.
+    
+    Optimizations:
+    - Frozen for immutability (settings shouldn't change at runtime)
+    - AliasChoices for flexible env var naming
+    - Computed fields for derived values
+    - Cached singleton instance via get_settings()
     
     Example environment variables:
         TOOLCASE_DEBUG=true
@@ -156,11 +233,21 @@ class ToolcaseSettings(BaseSettings):
         env_nested_delimiter="__",
         extra="ignore",
         validate_default=True,
+        frozen=True,  # Settings are immutable once loaded
+        revalidate_instances="never",
+        use_enum_values=True,
     )
     
     # Global settings
-    debug: bool = Field(default=False, description="Enable debug mode")
-    environment: Literal["development", "staging", "production"] = "development"
+    debug: bool = Field(
+        default=False,
+        description="Enable debug mode",
+        validation_alias=AliasChoices("debug", "DEBUG"),
+    )
+    environment: Literal["development", "staging", "production"] = Field(
+        default="development",
+        validation_alias=AliasChoices("environment", "ENV", "ENVIRONMENT"),
+    )
     
     # Nested settings (loaded with TOOLCASE_CACHE_, TOOLCASE_LOG_, etc.)
     cache: CacheSettings = Field(default_factory=CacheSettings)
@@ -187,6 +274,15 @@ class ToolcaseSettings(BaseSettings):
     def is_development(self) -> bool:
         """Check if running in development."""
         return self.environment == "development"
+    
+    @computed_field
+    @property
+    def is_staging(self) -> bool:
+        """Check if running in staging."""
+        return self.environment == "staging"
+    
+    def __hash__(self) -> int:
+        return hash((self.debug, self.environment))
 
 
 # Singleton pattern for settings

@@ -13,6 +13,7 @@ from .progress import (
     source_found,
     status,
     step,
+    validate_progress,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "source_found",
     "complete",
     "error",
+    "validate_progress",
 ]

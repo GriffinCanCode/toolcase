@@ -2,7 +2,12 @@
 
 Provides declarative retry behavior at the tool class level.
 Works with ToolResult error codes, complementing middleware (exception-based).
-Uses Pydantic for validation and configuration.
+
+Optimizations:
+- Frozen for immutability and hashability
+- TypeAdapter for fast validation
+- Pre-computed disabled state
+- Enum value caching
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from pydantic import (
     Field,
     NonNegativeInt,
     PositiveFloat,
+    TypeAdapter,
     computed_field,
     field_serializer,
     field_validator,
@@ -40,6 +46,9 @@ DEFAULT_RETRYABLE: frozenset[ErrorCode] = frozenset({
     ErrorCode.TIMEOUT,
     ErrorCode.NETWORK_ERROR,
 })
+
+# Pre-computed set of retryable code values for fast string lookup
+_DEFAULT_RETRYABLE_VALUES: frozenset[str] = frozenset(c.value for c in DEFAULT_RETRYABLE)
 
 
 class RetryPolicy(BaseModel):
@@ -71,6 +80,8 @@ class RetryPolicy(BaseModel):
         frozen=True,
         arbitrary_types_allowed=True,  # For Backoff protocol
         validate_default=True,
+        extra="forbid",
+        revalidate_instances="never",
         json_schema_extra={
             "title": "Retry Policy",
             "description": "Configuration for automatic retry behavior",
@@ -82,15 +93,18 @@ class RetryPolicy(BaseModel):
     )
     
     max_retries: Annotated[int, Field(ge=0, le=10)] = 3
-    backoff: Backoff = Field(default_factory=ExponentialBackoff)
+    backoff: Backoff = Field(default_factory=ExponentialBackoff, repr=False)
     retryable_codes: frozenset[ErrorCode] = DEFAULT_RETRYABLE
-    on_retry: Callable[[int, ErrorCode, float], None] | None = Field(default=None, exclude=True)
+    on_retry: Callable[[int, ErrorCode, float], None] | None = Field(default=None, exclude=True, repr=False)
+    
+    # Cached string values for fast lookup (computed once)
+    _code_values: frozenset[str] | None = None
     
     @field_validator("retryable_codes", mode="before")
     @classmethod
-    def _normalize_codes(cls, v: frozenset[ErrorCode] | set[str] | list[str]) -> frozenset[ErrorCode]:
+    def _normalize_codes(cls, v: frozenset[ErrorCode] | set[str] | list[str] | tuple[str, ...]) -> frozenset[ErrorCode]:
         """Accept strings and convert to ErrorCode enum."""
-        if isinstance(v, frozenset):
+        if isinstance(v, frozenset) and all(isinstance(c, ErrorCode) for c in v):
             return v
         return frozenset(ErrorCode(c) if isinstance(c, str) else c for c in v)
     
@@ -105,6 +119,15 @@ class RetryPolicy(BaseModel):
         """Whether retries are effectively disabled."""
         return self.max_retries == 0 or not self.retryable_codes
     
+    def _get_code_values(self) -> frozenset[str]:
+        """Get cached set of code string values for fast lookup."""
+        cached = object.__getattribute__(self, "_code_values")
+        if cached is None:
+            values = frozenset(c.value for c in self.retryable_codes)
+            object.__setattr__(self, "_code_values", values)
+            return values
+        return cached
+    
     def should_retry(self, code: ErrorCode | str, attempt: int) -> bool:
         """Determine if retry should be attempted.
         
@@ -118,18 +141,17 @@ class RetryPolicy(BaseModel):
         if attempt >= self.max_retries:
             return False
         
-        # Handle string error codes
-        if isinstance(code, str):
-            try:
-                code = ErrorCode(code)
-            except ValueError:
-                return False
-        
-        return code in self.retryable_codes
+        # Fast path: string lookup without enum conversion
+        code_str = code.value if isinstance(code, ErrorCode) else code
+        return code_str in self._get_code_values()
     
     def get_delay(self, attempt: int) -> float:
         """Get delay before next retry attempt."""
         return self.backoff.delay(attempt)
+    
+    def __hash__(self) -> int:
+        """Hash for frozen model."""
+        return hash((self.max_retries, tuple(sorted(c.value for c in self.retryable_codes))))
 
 
 # Singleton for no-retry policy (optimization)

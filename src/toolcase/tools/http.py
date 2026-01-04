@@ -46,6 +46,7 @@ from pydantic import (
     PositiveInt,
     SecretStr,
     Tag,
+    TypeAdapter,
     computed_field,
     field_serializer,
     field_validator,
@@ -69,11 +70,26 @@ ALL_METHODS: frozenset[HttpMethod] = frozenset(["GET", "POST", "PUT", "DELETE", 
 class NoAuth(BaseModel):
     """No authentication."""
     
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="never")
     auth_type: Literal["none"] = "none"
     
     def apply(self, headers: dict[str, str]) -> dict[str, str]:
         return headers
+    
+    def __hash__(self) -> int:
+        return hash(self.auth_type)
+
+
+# Singleton NoAuth instance for reuse (most common case)
+_NO_AUTH: NoAuth | None = None
+
+
+def get_no_auth() -> NoAuth:
+    """Get singleton NoAuth instance."""
+    global _NO_AUTH
+    if _NO_AUTH is None:
+        _NO_AUTH = NoAuth()
+    return _NO_AUTH
 
 
 class BearerAuth(BaseModel):
@@ -82,7 +98,7 @@ class BearerAuth(BaseModel):
     Token is stored as SecretStr to prevent accidental logging/exposure.
     """
     
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="never")
     auth_type: Literal["bearer"] = "bearer"
     token: SecretStr = Field(..., description="Bearer token value (OAuth2/JWT)")
     
@@ -95,12 +111,15 @@ class BearerAuth(BaseModel):
         """Mask token in JSON serialization for security."""
         secret = v.get_secret_value()
         return f"{secret[:4]}...{secret[-4:]}" if len(secret) > 8 else "***"
+    
+    def __hash__(self) -> int:
+        return hash((self.auth_type, self.token.get_secret_value()))
 
 
 class BasicAuth(BaseModel):
     """HTTP Basic authentication."""
     
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="never")
     auth_type: Literal["basic"] = "basic"
     username: Annotated[str, Field(min_length=1)]
     password: SecretStr
@@ -117,12 +136,20 @@ class BasicAuth(BaseModel):
     def _mask_password(self, v: SecretStr) -> str:
         """Mask password in JSON serialization."""
         return "***"
+    
+    def __hash__(self) -> int:
+        return hash((self.auth_type, self.username))
 
 
 class ApiKeyAuth(BaseModel):
     """API key authentication (header or query param)."""
     
-    model_config = ConfigDict(frozen=True, str_strip_whitespace=True)
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        str_strip_whitespace=True,
+        revalidate_instances="never",
+    )
     auth_type: Literal["api_key"] = "api_key"
     key: SecretStr = Field(..., description="API key value")
     header_name: Annotated[str, Field(
@@ -140,12 +167,15 @@ class ApiKeyAuth(BaseModel):
         """Mask API key in JSON serialization."""
         secret = v.get_secret_value()
         return f"{secret[:4]}..." if len(secret) > 4 else "***"
+    
+    def __hash__(self) -> int:
+        return hash((self.auth_type, self.header_name))
 
 
 class CustomAuth(BaseModel):
     """Custom header-based authentication."""
     
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="never")
     auth_type: Literal["custom"] = "custom"
     headers: dict[str, SecretStr] = Field(default_factory=dict)
     
@@ -157,6 +187,9 @@ class CustomAuth(BaseModel):
     def _mask_headers(self, v: dict[str, SecretStr]) -> dict[str, str]:
         """Mask all custom header values in JSON serialization."""
         return {k: "***" for k in v}
+    
+    def __hash__(self) -> int:
+        return hash((self.auth_type, tuple(sorted(self.headers.keys()))))
 
 
 def _auth_discriminator(v: dict[str, object] | BaseModel) -> str:
@@ -214,6 +247,9 @@ class HttpConfig(ToolConfig):
     model_config = ConfigDict(
         validate_default=True,
         str_strip_whitespace=True,
+        extra="forbid",  # Catch config typos
+        revalidate_instances="never",
+        frozen=True,  # Config should be immutable once created
         json_schema_extra={
             "title": "HTTP Tool Configuration",
             "examples": [{
@@ -227,10 +263,12 @@ class HttpConfig(ToolConfig):
     allowed_hosts: frozenset[str] = Field(
         default_factory=frozenset,
         description="Glob patterns for allowed hosts (empty = all)",
+        repr=False,  # Can be verbose
     )
     blocked_hosts: frozenset[str] = Field(
         default=_DEFAULT_BLOCKED_HOSTS,
         description="Glob patterns for blocked hosts (SSRF protection)",
+        repr=False,
     )
     allowed_methods: frozenset[HttpMethod] = Field(
         default_factory=lambda: frozenset(ALL_METHODS),
@@ -255,14 +293,14 @@ class HttpConfig(ToolConfig):
     )
     follow_redirects: bool = True
     verify_ssl: bool = True
-    auth: AuthStrategy = Field(default_factory=NoAuth)
+    auth: AuthStrategy = Field(default_factory=get_no_auth)
     default_headers: dict[str, str] = Field(
         default_factory=lambda: {"User-Agent": "toolcase-http/1.0"},
     )
     
     @field_validator("allowed_hosts", "blocked_hosts", mode="before")
     @classmethod
-    def _normalize_host_sets(cls, v: frozenset[str] | set[str] | list[str]) -> frozenset[str]:
+    def _normalize_host_sets(cls, v: frozenset[str] | set[str] | list[str] | tuple[str, ...]) -> frozenset[str]:
         """Accept various iterables, normalize to frozenset."""
         if isinstance(v, frozenset):
             return v
@@ -270,7 +308,7 @@ class HttpConfig(ToolConfig):
     
     @field_validator("allowed_methods", mode="before")
     @classmethod
-    def _normalize_methods(cls, v: frozenset[str] | set[str] | list[str]) -> frozenset[HttpMethod]:
+    def _normalize_methods(cls, v: frozenset[str] | set[str] | list[str] | tuple[str, ...]) -> frozenset[HttpMethod]:
         """Normalize methods to uppercase frozenset."""
         if isinstance(v, frozenset):
             return v  # type: ignore[return-value]
@@ -299,6 +337,9 @@ class HttpConfig(ToolConfig):
     def _serialize_methods(self, v: frozenset[HttpMethod]) -> list[str]:
         """Serialize methods as sorted list."""
         return sorted(v)
+    
+    def __hash__(self) -> int:
+        return hash((self.default_timeout, self.verify_ssl, self.follow_redirects))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -321,6 +362,8 @@ class HttpParams(BaseModel):
     model_config = ConfigDict(
         str_strip_whitespace=True,
         validate_default=True,
+        extra="forbid",
+        populate_by_name=True,  # Accept aliases
         json_schema_extra={
             "title": "HTTP Request Parameters",
             "examples": [{
@@ -339,11 +382,11 @@ class HttpParams(BaseModel):
         json_schema_extra={"format": "uri", "examples": ["https://api.example.com"]},
     )]
     method: HttpMethod = Field(default="GET", description="HTTP method")
-    headers: dict[str, str] = Field(default_factory=dict, description="Additional headers")
-    query_params: dict[str, str] = Field(default_factory=dict, description="Query parameters")
-    body: str | None = Field(default=None, description="Request body (string)")
+    headers: dict[str, str] = Field(default_factory=dict, description="Additional headers", repr=False)
+    query_params: dict[str, str] = Field(default_factory=dict, description="Query parameters", repr=False)
+    body: str | None = Field(default=None, description="Request body (string)", repr=False)
     json_body: dict[str, object] | list[object] | None = Field(
-        default=None, description="JSON body (auto-serialized)"
+        default=None, description="JSON body (auto-serialized)", repr=False
     )
     timeout: Annotated[float, Field(ge=0.1, le=300.0)] | None = Field(
         default=None,
@@ -380,6 +423,10 @@ class HttpParams(BaseModel):
         return self.body is not None or self.json_body is not None
 
 
+# TypeAdapter for fast dict->HttpParams validation
+_HttpParamsAdapter: TypeAdapter[HttpParams] = TypeAdapter(HttpParams)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Response Model
 # ─────────────────────────────────────────────────────────────────────────────
@@ -387,11 +434,15 @@ class HttpParams(BaseModel):
 class HttpResponse(BaseModel):
     """Structured HTTP response for tool output."""
     
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        revalidate_instances="never",
+    )
     
     status_code: Annotated[int, Field(ge=100, le=599)]
-    headers: dict[str, str]
-    body: str
+    headers: dict[str, str] = Field(repr=False)  # Can be verbose
+    body: str = Field(repr=False)  # Often large
     url: str
     elapsed_ms: PositiveFloat
     
@@ -419,23 +470,27 @@ class HttpResponse(BaseModel):
         """Whether response indicates server error (5xx)."""
         return 500 <= self.status_code < 600
     
+    def _header_value(self, key: str) -> str | None:
+        """Get header value case-insensitively (O(n) but headers are small)."""
+        key_lower = key.lower()
+        return next((v for k, v in self.headers.items() if k.lower() == key_lower), None)
+    
     @computed_field
     @property
     def content_type(self) -> str | None:
         """Extract Content-Type header (case-insensitive)."""
-        for k, v in self.headers.items():
-            if k.lower() == "content-type":
-                return v.split(";")[0].strip()
-        return None
+        ct = self._header_value("content-type")
+        return ct.split(";")[0].strip() if ct else None
     
     @computed_field
     @property
     def content_length(self) -> int | None:
         """Extract Content-Length header."""
-        for k, v in self.headers.items():
-            if k.lower() == "content-length":
-                return int(v)
-        return None
+        cl = self._header_value("content-length")
+        return int(cl) if cl else None
+    
+    def __hash__(self) -> int:
+        return hash((self.status_code, self.url, self.elapsed_ms))
     
     def to_output(self) -> str:
         """Format as tool output string."""
@@ -448,8 +503,7 @@ class HttpResponse(BaseModel):
         
         # Include relevant headers
         for key in ("Content-Type", "Content-Length", "Date", "Server"):
-            if key.lower() in {k.lower() for k in self.headers}:
-                val = next(v for k, v in self.headers.items() if k.lower() == key.lower())
+            if (val := self._header_value(key)):
                 lines.append(f"{key}: {val}")
         
         lines.extend(["", "**Response:**", self.body])

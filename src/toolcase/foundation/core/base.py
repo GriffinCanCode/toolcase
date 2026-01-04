@@ -27,6 +27,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PositiveFloat,
+    TypeAdapter,
     computed_field,
     field_serializer,
     field_validator,
@@ -87,11 +88,18 @@ class ToolMetadata(BaseModel):
         frozen=True,
         str_strip_whitespace=True,
         validate_default=True,
+        revalidate_instances="never",  # Performance: skip revalidation when passing instances
+        extra="forbid",  # Catch typos in field names
         json_schema_extra={
             "title": "Tool Metadata",
             "description": "Describes a tool's identity and capabilities for AI agents",
         },
     )
+    
+    # Pre-compiled regex patterns for performance (class-level)
+    _NAME_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]*$")
+    _CAMEL_TO_SNAKE_1: ClassVar[re.Pattern[str]] = re.compile(r"(.)([A-Z][a-z]+)")
+    _CAMEL_TO_SNAKE_2: ClassVar[re.Pattern[str]] = re.compile(r"([a-z0-9])([A-Z])")
     
     name: Annotated[str, Field(
         pattern=r"^[a-z][a-z0-9_]*$",
@@ -108,22 +116,22 @@ class ToolMetadata(BaseModel):
     requires_api_key: bool = False
     enabled: bool = True
     streaming: bool = False
-    tags: frozenset[str] = Field(default_factory=frozenset)
+    tags: frozenset[str] = Field(default_factory=frozenset, repr=False)  # Exclude from repr (can be verbose)
     version: str = Field(default="1.0.0", pattern=r"^\d+\.\d+\.\d+$")
     
     @field_validator("name", mode="before")
     @classmethod
     def _normalize_name(cls, v: str) -> str:
-        """Normalize name to snake_case."""
+        """Normalize name to snake_case using pre-compiled patterns."""
         if not isinstance(v, str):
             return v
         # Convert camelCase or PascalCase to snake_case
-        s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", v)
-        return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
+        s1 = cls._CAMEL_TO_SNAKE_1.sub(r"\1_\2", v)
+        return cls._CAMEL_TO_SNAKE_2.sub(r"\1_\2", s1).lower()
     
     @field_validator("tags", mode="before")
     @classmethod
-    def _normalize_tags(cls, v: frozenset[str] | set[str] | list[str] | None) -> frozenset[str]:
+    def _normalize_tags(cls, v: frozenset[str] | set[str] | list[str] | tuple[str, ...] | None) -> frozenset[str]:
         """Accept various iterables for tags, normalize to frozenset."""
         if v is None:
             return frozenset()
@@ -146,14 +154,28 @@ class ToolMetadata(BaseModel):
     @property
     def short_description(self) -> str:
         """First sentence of description for compact display."""
-        # Split on period followed by space or end
         return self.description.split(". ")[0].rstrip(".")
+    
+    def __hash__(self) -> int:
+        """Explicit hash for frozen model (enables set/dict membership)."""
+        return hash((self.name, self.version))
 
 
 class EmptyParams(BaseModel):
     """Default parameter schema for tools with no required inputs."""
     
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,  # Immutable params for caching
+        revalidate_instances="never",
+    )
+    
+    def __hash__(self) -> int:
+        return hash(())  # Empty params always hash the same
+
+
+# TypeAdapter for high-frequency dict->params validation (bypasses model overhead)
+_EmptyParamsAdapter: TypeAdapter[EmptyParams] = TypeAdapter(EmptyParams)
 
 
 # Type variable for tool parameter schemas

@@ -1,13 +1,14 @@
 """Type aliases and error context tracking for monadic error handling.
 
 Uses Pydantic models for validation and serialization where performance allows.
+Optimized for high-frequency error path creation with minimal allocations.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, computed_field, field_serializer
 
 if TYPE_CHECKING:
     from .result import Result
@@ -38,6 +39,9 @@ class ErrorContext(BaseModel):
     model_config = ConfigDict(
         frozen=True,
         str_strip_whitespace=True,
+        extra="forbid",
+        revalidate_instances="never",  # Performance: contexts are often passed around
+        populate_by_name=True,  # Accept both alias and field name
         json_schema_extra={
             "title": "Error Context",
             "examples": [{"operation": "tool:web_search", "location": "", "metadata": {"attempt": 1}}],
@@ -45,9 +49,11 @@ class ErrorContext(BaseModel):
     )
 
     operation: Annotated[str, Field(min_length=1)]
-    location: str = ""
-    metadata: dict[str, object] = Field(default_factory=dict)
+    location: str = Field(default="", repr=False)  # Often empty, hide from repr
+    metadata: dict[str, object] = Field(default_factory=dict, repr=False)
 
+    __slots__ = ()  # Signal to Pydantic to use slots-compatible mode
+    
     def __str__(self) -> str:
         loc = f" at {self.location}" if self.location else ""
         meta = f" ({', '.join(f'{k}={v}' for k, v in self.metadata.items())})" if self.metadata else ""
@@ -66,6 +72,7 @@ class ErrorTrace(BaseModel):
     """Stack of error contexts forming call chain trace for provenance tracking.
     
     Provides immutable error propagation with rich context for debugging.
+    Optimized for high-frequency error path creation.
     
     Attributes:
         message: Human-readable error message
@@ -79,17 +86,21 @@ class ErrorTrace(BaseModel):
         frozen=True,
         str_strip_whitespace=True,
         validate_default=True,
+        extra="forbid",
+        revalidate_instances="never",  # Performance: traces are passed around frequently
         json_schema_extra={
             "title": "Error Trace",
             "description": "Full error context with provenance tracking",
         },
     )
 
+    __slots__ = ()
+    
     message: Annotated[str, Field(min_length=1)]
     contexts: tuple[ErrorContext, ...] = _EMPTY_CONTEXTS
-    error_code: str | None = None
+    error_code: str | None = Field(default=None, repr=True)
     recoverable: bool = True
-    details: str | None = None
+    details: str | None = Field(default=None, repr=False)  # Often verbose, hide from repr
     
     @field_serializer("contexts")
     def _serialize_contexts(self, v: tuple[ErrorContext, ...]) -> list[dict[str, object]]:
@@ -107,10 +118,17 @@ class ErrorTrace(BaseModel):
     def root_operation(self) -> str | None:
         """First operation in the trace (origin)."""
         return self.contexts[0].operation if self.contexts else None
+    
+    def __hash__(self) -> int:
+        """Hash for frozen model."""
+        return hash((self.message, self.error_code, self.recoverable))
 
     def with_context(self, ctx: ErrorContext) -> "ErrorTrace":
-        """Add context to trace (returns new trace, preserves immutability)."""
-        return ErrorTrace(
+        """Add context to trace (returns new trace, preserves immutability).
+        
+        Uses model_construct for performance when building from validated data.
+        """
+        return ErrorTrace.model_construct(
             message=self.message,
             contexts=(*self.contexts, ctx),
             error_code=self.error_code,
@@ -120,9 +138,14 @@ class ErrorTrace(BaseModel):
 
     def with_operation(self, operation: str, location: str = "", **metadata: object) -> "ErrorTrace":
         """Add context with operation info."""
-        return ErrorTrace(
+        ctx = ErrorContext.model_construct(
+            operation=operation,
+            location=location,
+            metadata=metadata or _EMPTY_META,
+        )
+        return ErrorTrace.model_construct(
             message=self.message,
-            contexts=(*self.contexts, ErrorContext(operation=operation, location=location, metadata=metadata or _EMPTY_META)),
+            contexts=(*self.contexts, ctx),
             error_code=self.error_code,
             recoverable=self.recoverable,
             details=self.details,
@@ -130,7 +153,7 @@ class ErrorTrace(BaseModel):
 
     def with_code(self, code: str) -> "ErrorTrace":
         """Return new trace with error code set."""
-        return ErrorTrace(
+        return ErrorTrace.model_construct(
             message=self.message,
             contexts=self.contexts,
             error_code=code,
@@ -140,7 +163,7 @@ class ErrorTrace(BaseModel):
 
     def as_unrecoverable(self) -> "ErrorTrace":
         """Return new trace marked as unrecoverable."""
-        return ErrorTrace(
+        return ErrorTrace.model_construct(
             message=self.message,
             contexts=self.contexts,
             error_code=self.error_code,
@@ -169,22 +192,52 @@ class ErrorTrace(BaseModel):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Helpers
+# Helpers (use model_construct for hot paths)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# TypeAdapters for validation when needed (cached at module level)
+_ErrorContextAdapter: TypeAdapter[ErrorContext] = TypeAdapter(ErrorContext)
+_ErrorTraceAdapter: TypeAdapter[ErrorTrace] = TypeAdapter(ErrorTrace)
 
 
 def context(operation: str, location: str = "", **metadata: object) -> ErrorContext:
-    """Create ErrorContext concisely."""
-    return ErrorContext(operation=operation, location=location, metadata=metadata or _EMPTY_META)
+    """Create ErrorContext concisely (bypasses validation for performance)."""
+    return ErrorContext.model_construct(
+        operation=operation,
+        location=location,
+        metadata=metadata or _EMPTY_META,
+    )
 
 
 def trace(message: str, *, code: str | None = None, recoverable: bool = True, details: str | None = None) -> ErrorTrace:
-    """Create ErrorTrace concisely."""
-    return ErrorTrace(message=message, contexts=_EMPTY_CONTEXTS, error_code=code, recoverable=recoverable, details=details)
+    """Create ErrorTrace concisely (bypasses validation for performance)."""
+    return ErrorTrace.model_construct(
+        message=message,
+        contexts=_EMPTY_CONTEXTS,
+        error_code=code,
+        recoverable=recoverable,
+        details=details,
+    )
 
 
 def trace_from_exc(exc: Exception, *, operation: str = "", code: str | None = None) -> ErrorTrace:
     """Create ErrorTrace from exception with optional operation context."""
     import traceback
-    t = ErrorTrace(message=str(exc), contexts=_EMPTY_CONTEXTS, error_code=code, recoverable=True, details=traceback.format_exc())
+    t = ErrorTrace.model_construct(
+        message=str(exc),
+        contexts=_EMPTY_CONTEXTS,
+        error_code=code,
+        recoverable=True,
+        details=traceback.format_exc(),
+    )
     return t.with_operation(operation) if operation else t
+
+
+def validate_context(data: dict[str, object]) -> ErrorContext:
+    """Validate dict as ErrorContext (use when validation is needed)."""
+    return _ErrorContextAdapter.validate_python(data)
+
+
+def validate_trace(data: dict[str, object]) -> ErrorTrace:
+    """Validate dict as ErrorTrace (use when validation is needed)."""
+    return _ErrorTraceAdapter.validate_python(data)

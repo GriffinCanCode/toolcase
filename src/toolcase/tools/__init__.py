@@ -41,6 +41,7 @@ from .http import (
     HttpResponse,
     HttpTool,
     NoAuth,
+    get_no_auth,
 )
 
 if TYPE_CHECKING:
@@ -90,6 +91,7 @@ __all__ = [
     "BasicAuth",
     "ApiKeyAuth",
     "CustomAuth",
+    "get_no_auth",  # Singleton accessor
     # Utility
     "standard_tools",
 ]

@@ -23,6 +23,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.2",
+    "pydantic-extra-types>=2.6",
 ]
 
 [project.optional-dependencies]

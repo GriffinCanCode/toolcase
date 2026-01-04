@@ -4,6 +4,7 @@
 - ToolError/ToolException: Structured errors and exceptions
 - Result/Ok/Err: Monadic error handling with railway-oriented programming
 - ErrorTrace/ErrorContext: Error context stacking and provenance tracking
+- TypeAdapter utilities: validate_context, validate_trace for fast validation
 """
 
 from .errors import ErrorCode, ToolError, ToolException, classify_exception
@@ -20,7 +21,16 @@ from .tool import (
     try_tool_operation,
     try_tool_operation_async,
 )
-from .types import ErrorContext, ErrorTrace, ResultT, context, trace, trace_from_exc
+from .types import (
+    ErrorContext,
+    ErrorTrace,
+    ResultT,
+    context,
+    trace,
+    trace_from_exc,
+    validate_context,
+    validate_trace,
+)
 
 __all__ = [
     # Core errors
@@ -32,6 +42,8 @@ __all__ = [
     "batch_results", "from_tool_error", "to_tool_error", "result_to_string", "string_to_result",
     # Error context
     "ErrorContext", "ErrorTrace", "context", "trace", "trace_from_exc",
+    # TypeAdapter validation utilities
+    "validate_context", "validate_trace",
     # Collection ops
     "sequence", "traverse", "collect_results",
 ]
