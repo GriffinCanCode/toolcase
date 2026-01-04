@@ -1,10 +1,6 @@
 """Examples of monadic error handling in toolcase.
 
-Demonstrates:
-- Railway-oriented programming patterns
-- Error context stacking
-- Composition of fallible operations
-- Integration with existing ToolError system
+Demonstrates: Railway-oriented programming, error context stacking, fallible composition, ToolError integration.
 """
 
 from __future__ import annotations
@@ -75,22 +71,9 @@ def example_basic_railway() -> None:
 def fetch_user(user_id: int) -> Result[dict, ErrorTrace]:
     """Fetch user from database."""
     if user_id < 1:
-        trace = ErrorTrace(
-            message="Invalid user ID",
-            error_code=ErrorCode.INVALID_PARAMS.value,
-            recoverable=False,
-        )
-        return Err(trace)
-    
-    # Simulate not found
-    if user_id == 999:
-        trace = ErrorTrace(
-            message=f"User {user_id} not found",
-            error_code=ErrorCode.NOT_FOUND.value,
-            recoverable=False,
-        )
-        return Err(trace)
-    
+        return Err(ErrorTrace(message="Invalid user ID", error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False))
+    if user_id == 999:  # Simulate not found
+        return Err(ErrorTrace(message=f"User {user_id} not found", error_code=ErrorCode.NOT_FOUND.value, recoverable=False))
     return Ok({"id": user_id, "name": f"User{user_id}"})
 
 
@@ -161,43 +144,17 @@ class ValidationTool(BaseTool[ValidatorParams]):
     params_schema: ClassVar[type[ValidatorParams]] = ValidatorParams
     
     def _run_result(self, params: ValidatorParams) -> ToolResult:
-        """Implementation using Result monad.
-        
-        This demonstrates railway-oriented programming for tools.
-        Errors automatically propagate without manual checking.
-        """
-        # Parse all numbers
-        parse_results = [parse_int(s) for s in params.numbers]
-        
-        # Sequence into single Result
+        """Implementation using Result monad. Railway-oriented: errors auto-propagate."""
         from .result import sequence
-        parsed = sequence(parse_results)
         
-        # Map error to ToolResult format
-        if parsed.is_err():
-            return tool_result(
-                self.metadata.name,
-                parsed.unwrap_err(),
-                code=ErrorCode.INVALID_PARAMS,
-            )
+        if (parsed := sequence([parse_int(s) for s in params.numbers])).is_err():
+            return tool_result(self.metadata.name, parsed.unwrap_err(), code=ErrorCode.INVALID_PARAMS)
         
-        numbers = parsed.unwrap()
+        if (validated := sequence([validate_positive(n) for n in parsed.unwrap()])).is_err():
+            return tool_result(self.metadata.name, validated.unwrap_err(), code=ErrorCode.INVALID_PARAMS)
         
-        # Validate all positive
-        validation_results = [validate_positive(n) for n in numbers]
-        validated = sequence(validation_results)
-        
-        if validated.is_err():
-            return tool_result(
-                self.metadata.name,
-                validated.unwrap_err(),
-                code=ErrorCode.INVALID_PARAMS,
-            )
-        
-        # Format result
         valid_numbers = validated.unwrap()
-        result = f"Validated {len(valid_numbers)} numbers: {valid_numbers}"
-        return ok_result(result)
+        return ok_result(f"Validated {len(valid_numbers)} numbers: {valid_numbers}")
     
     def _run(self, params: ValidatorParams) -> str:
         """Fallback string-based implementation (required by ABC)."""
@@ -230,46 +187,28 @@ class DataProcessorTool(BaseTool[ProcessorParams]):
     def _validate_input(self, data: str) -> Result[str, ErrorTrace]:
         """Validation step."""
         if not data:
-            trace = ErrorTrace(
-                message="Input cannot be empty",
-                error_code=ErrorCode.INVALID_PARAMS.value,
-            )
-            return Err(trace.with_operation("validate_input"))
+            return Err(ErrorTrace(message="Input cannot be empty", error_code=ErrorCode.INVALID_PARAMS.value).with_operation("validate_input"))
         return Ok(data)
     
     def _normalize(self, data: str) -> Result[str, ErrorTrace]:
         """Normalization step."""
-        normalized = data.strip().lower()
-        return Ok(normalized)
+        return Ok(data.strip().lower())
     
     def _enrich(self, data: str) -> Result[dict, ErrorTrace]:
         """Enrichment step."""
-        return Ok({
-            "original": data,
-            "length": len(data),
-            "words": len(data.split()),
-        })
+        return Ok({"original": data, "length": len(data), "words": len(data.split())})
     
     def _format_output(self, data: dict) -> str:
         """Format final output."""
         return f"Processed: {data['original']} ({data['words']} words)"
     
     def _run_result(self, params: ProcessorParams) -> ToolResult:
-        """Railway-oriented pipeline.
-        
-        Each step can fail, errors automatically propagate.
-        No manual error checking needed!
-        """
-        return (
-            self._validate_input(params.input_data)
-            .flat_map(self._normalize)
-            .flat_map(self._enrich)
-            .map(self._format_output)
-            .map_err(lambda trace: trace.with_operation(
-                f"tool:{self.metadata.name}",
-                location="toolcase.examples"
-            ))
-        )
+        """Railway-oriented pipeline. Each step can fail, errors auto-propagate."""
+        return (self._validate_input(params.input_data)
+                .flat_map(self._normalize)
+                .flat_map(self._enrich)
+                .map(self._format_output)
+                .map_err(lambda trace: trace.with_operation(f"tool:{self.metadata.name}", location="toolcase.examples")))
     
     def _run(self, params: ProcessorParams) -> str:
         """String-based fallback."""
@@ -305,14 +244,9 @@ class RiskyTool(BaseTool[RiskyParams]):
                 raise ValueError("Value must be non-negative")
             if params.value == 0:
                 raise ZeroDivisionError("Cannot divide by zero")
-            result = 100 / params.value
-            return f"Result: {result}"
+            return f"Result: {100 / params.value}"
         
-        return try_tool_operation(
-            self.metadata.name,
-            risky_operation,
-            context="processing value"
-        )
+        return try_tool_operation(self.metadata.name, risky_operation, context="processing value")
     
     def _run(self, params: RiskyParams) -> str:
         """String-based fallback."""

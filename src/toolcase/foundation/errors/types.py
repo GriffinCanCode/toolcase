@@ -100,64 +100,33 @@ class ErrorTrace(BaseModel):
         return hash((self.message, self.error_code, self.recoverable))
 
     def with_context(self, ctx: ErrorContext) -> "ErrorTrace":
-        """Add context to trace (returns new trace, preserves immutability).
-        
-        Uses model_construct for performance when building from validated data.
-        """
-        return ErrorTrace.model_construct(
-            message=self.message,
-            contexts=(*self.contexts, ctx),
-            error_code=self.error_code,
-            recoverable=self.recoverable,
-            details=self.details,
-        )
+        """Add context to trace (returns new trace). Uses model_construct for performance."""
+        return ErrorTrace.model_construct(message=self.message, contexts=(*self.contexts, ctx),
+                                          error_code=self.error_code, recoverable=self.recoverable, details=self.details)
 
     def with_operation(self, operation: str, location: str = "", **metadata: JsonValue) -> "ErrorTrace":
         """Add context with operation info."""
-        ctx = ErrorContext.model_construct(
-            operation=operation,
-            location=location,
-            metadata=metadata or _EMPTY_META,
-        )
-        return ErrorTrace.model_construct(
-            message=self.message,
-            contexts=(*self.contexts, ctx),
-            error_code=self.error_code,
-            recoverable=self.recoverable,
-            details=self.details,
-        )
+        ctx = ErrorContext.model_construct(operation=operation, location=location, metadata=metadata or _EMPTY_META)
+        return ErrorTrace.model_construct(message=self.message, contexts=(*self.contexts, ctx),
+                                          error_code=self.error_code, recoverable=self.recoverable, details=self.details)
 
     def with_code(self, code: str) -> "ErrorTrace":
         """Return new trace with error code set."""
-        return ErrorTrace.model_construct(
-            message=self.message,
-            contexts=self.contexts,
-            error_code=code,
-            recoverable=self.recoverable,
-            details=self.details,
-        )
+        return ErrorTrace.model_construct(message=self.message, contexts=self.contexts, error_code=code,
+                                          recoverable=self.recoverable, details=self.details)
 
     def as_unrecoverable(self) -> "ErrorTrace":
         """Return new trace marked as unrecoverable."""
-        return ErrorTrace.model_construct(
-            message=self.message,
-            contexts=self.contexts,
-            error_code=self.error_code,
-            recoverable=False,
-            details=self.details,
-        )
+        return ErrorTrace.model_construct(message=self.message, contexts=self.contexts, error_code=self.error_code,
+                                          recoverable=False, details=self.details)
 
     def format(self, *, include_details: bool = False) -> str:
-        """Format trace as human-readable string.
-        
-        Uses StringIO for traces with many contexts (>10) for better performance
-        when building large strings.
-        """
+        """Format trace as human-readable string. Uses StringIO for traces with >10 contexts."""
         # Fast path: minimal error
         if not self.error_code and not self.contexts and not self.recoverable:
-            return self.message if not (include_details and self.details) else f"{self.message}\nDetails:\n{self.details}"
+            return f"{self.message}\nDetails:\n{self.details}" if include_details and self.details else self.message
         
-        # Use StringIO for large traces (many contexts)
+        # Use StringIO for large traces
         if len(self.contexts) > _FORMAT_STRINGIO_THRESHOLD:
             return self._format_large(include_details=include_details)
         
@@ -202,34 +171,20 @@ _ErrorTraceAdapter: TypeAdapter[ErrorTrace] = TypeAdapter(ErrorTrace)
 
 def context(operation: str, location: str = "", **metadata: JsonValue) -> ErrorContext:
     """Create ErrorContext concisely (bypasses validation for performance)."""
-    return ErrorContext.model_construct(
-        operation=operation,
-        location=location,
-        metadata=metadata or _EMPTY_META,
-    )
+    return ErrorContext.model_construct(operation=operation, location=location, metadata=metadata or _EMPTY_META)
 
 
 def trace(message: str, *, code: str | None = None, recoverable: bool = True, details: str | None = None) -> ErrorTrace:
     """Create ErrorTrace concisely (bypasses validation for performance)."""
-    return ErrorTrace.model_construct(
-        message=message,
-        contexts=_EMPTY_CONTEXTS,
-        error_code=code,
-        recoverable=recoverable,
-        details=details,
-    )
+    return ErrorTrace.model_construct(message=message, contexts=_EMPTY_CONTEXTS, error_code=code,
+                                      recoverable=recoverable, details=details)
 
 
 def trace_from_exc(exc: Exception, *, operation: str = "", code: str | None = None) -> ErrorTrace:
     """Create ErrorTrace from exception with optional operation context."""
     import traceback
-    t = ErrorTrace.model_construct(
-        message=str(exc),
-        contexts=_EMPTY_CONTEXTS,
-        error_code=code,
-        recoverable=True,
-        details=traceback.format_exc(),
-    )
+    t = ErrorTrace.model_construct(message=str(exc), contexts=_EMPTY_CONTEXTS, error_code=code,
+                                   recoverable=True, details=traceback.format_exc())
     return t.with_operation(operation) if operation else t
 
 

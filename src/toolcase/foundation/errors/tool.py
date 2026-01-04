@@ -76,12 +76,10 @@ def ok_result(value: str) -> ToolResult:
 
 def _make_error_trace(tool_name: str, e: Exception, ctx: str) -> ErrorTrace:
     """Internal helper to build ErrorTrace from exception."""
-    msg = f"{ctx}: {e}" if ctx else str(e)
-    contexts = (
-        ErrorContext(operation=f"tool:{tool_name}", location="", metadata=_EMPTY_META),
-        ErrorContext(operation=ctx, location="", metadata=_EMPTY_META),
-    ) if ctx else _tool_ctx(tool_name)
-    return ErrorTrace(message=msg, contexts=contexts, error_code=classify_exception(e).value, recoverable=True, details=traceback.format_exc())
+    contexts = (ErrorContext(operation=f"tool:{tool_name}", location="", metadata=_EMPTY_META),
+                ErrorContext(operation=ctx, location="", metadata=_EMPTY_META)) if ctx else _tool_ctx(tool_name)
+    return ErrorTrace(message=f"{ctx}: {e}" if ctx else str(e), contexts=contexts, 
+                      error_code=classify_exception(e).value, recoverable=True, details=traceback.format_exc())
 
 
 def try_tool_operation(tool_name: str, operation: Callable[[], str], *, context: str = "") -> ToolResult:
@@ -130,21 +128,17 @@ def string_to_result(output: str, tool_name: str) -> ToolResult:
 
 def batch_results(results: list[ToolResult], *, accumulate_errors: bool = False) -> ToolResult:
     """Combine multiple ToolResults. accumulate_errors=True collects all errors, False fails fast."""
-    if accumulate_errors:
-        collected = collect_results(results)
-        if collected._is_ok:
-            return Result("\n".join(collected._value), _OK)  # type: ignore[arg-type]
-        errors: list[ErrorTrace] = collected._value  # type: ignore[assignment]
-        return Result(
-            ErrorTrace(
-                message=f"Multiple errors:\n{chr(10).join(e.message for e in errors)}",
-                contexts=_EMPTY_CONTEXTS,
-                error_code=errors[0].error_code if errors else None,
-                recoverable=any(e.recoverable for e in errors),
-            ),
-            _ERR,
-        )
-
-    # Fail fast
-    seq = sequence(results)
-    return Result("\n".join(seq._value), _OK) if seq._is_ok else seq  # type: ignore[arg-type,return-value]
+    if not accumulate_errors:
+        seq = sequence(results)
+        return Result("\n".join(seq._value), _OK) if seq._is_ok else seq  # type: ignore[arg-type,return-value]
+    
+    collected = collect_results(results)
+    if collected._is_ok:
+        return Result("\n".join(collected._value), _OK)  # type: ignore[arg-type]
+    errors: list[ErrorTrace] = collected._value  # type: ignore[assignment]
+    return Result(ErrorTrace(
+        message=f"Multiple errors:\n{chr(10).join(e.message for e in errors)}",
+        contexts=_EMPTY_CONTEXTS,
+        error_code=errors[0].error_code if errors else None,
+        recoverable=any(e.recoverable for e in errors),
+    ), _ERR)
