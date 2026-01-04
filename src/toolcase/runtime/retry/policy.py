@@ -5,7 +5,7 @@ Works with ToolResult error codes, complementing middleware (exception-based).
 
 Optimizations:
 - Frozen for immutability and hashability
-- TypeAdapter for fast validation
+- TypeAdapter for fast dict→policy validation (bypasses model overhead)
 - Pre-computed disabled state
 - Enum value caching
 """
@@ -17,7 +17,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Annotated, Callable
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, computed_field, field_serializer, field_validator
 
 from toolcase.foundation.errors import ErrorCode
 from toolcase.runtime.concurrency import checkpoint
@@ -27,7 +27,7 @@ from .backoff import Backoff, ExponentialBackoff
 if TYPE_CHECKING:
     from collections.abc import Awaitable
 
-    from toolcase.foundation.errors import ToolResult
+    from toolcase.foundation.errors import JsonDict, ToolResult
 
 
 logger = logging.getLogger("toolcase.retry")
@@ -127,6 +127,14 @@ class RetryPolicy(BaseModel):
 
 # Singleton for no-retry policy (optimization)
 NO_RETRY = RetryPolicy(max_retries=0, retryable_codes=frozenset())
+
+# TypeAdapter for fast dict→RetryPolicy validation (bypasses model overhead)
+_RetryPolicyAdapter: TypeAdapter[RetryPolicy] = TypeAdapter(RetryPolicy)
+
+
+def validate_policy(data: "JsonDict") -> RetryPolicy:
+    """Validate dict as RetryPolicy (fast path for config parsing)."""
+    return _RetryPolicyAdapter.validate_python(data)
 
 
 def _log_and_callback(policy: RetryPolicy, tool_name: str, attempt: int, code: str, delay: float) -> None:
