@@ -9,18 +9,9 @@ from __future__ import annotations
 from abc import ABC
 from typing import Annotated, ClassVar, Generic, TypeVar
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    PositiveFloat,
-    PrivateAttr,
-    computed_field,
-    field_validator,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, computed_field
 
-from toolcase.foundation.core import BaseTool, ToolMetadata
+from toolcase.foundation.core import BaseTool
 
 TConfig = TypeVar("TConfig", bound="ToolConfig")
 TParams = TypeVar("TParams", bound=BaseModel)
@@ -114,37 +105,24 @@ class ConfigurableTool(BaseTool[TParams], Generic[TParams, TConfig]):
         """Current configuration (read-only access)."""
         return self._config
     
+    def _config_data(self, **updates: object) -> dict[str, object]:
+        """Get config data filtered to real fields, with optional updates."""
+        fields = self.config_class.model_fields.keys()
+        data = {k: v for k, v in self._config.model_dump().items() if k in fields}
+        return data | updates
+    
     def configure(self, **updates: object) -> None:
-        """Update configuration at runtime.
-        
-        Validates updates against the config schema.
-        
-        Args:
-            **updates: Configuration fields to update
+        """Update configuration at runtime. Validates updates against the config schema.
         
         Example:
             >>> tool.configure(timeout=60.0, max_retries=5)
         """
-        # Exclude computed fields from dump (they can't be passed back to constructor)
-        data = self._config.model_dump(exclude_unset=False, exclude_defaults=False)
-        # Filter out any computed fields that might have been included
-        field_names = set(self.config_class.model_fields.keys())
-        data = {k: v for k, v in data.items() if k in field_names}
-        data.update(updates)
-        self._config = self.config_class(**data)  # type: ignore[assignment]
+        self._config = self.config_class(**self._config_data(**updates))  # type: ignore[assignment]
     
     def with_config(self, **updates: object) -> ConfigurableTool[TParams, TConfig]:
-        """Create a new instance with updated config.
-        
-        Immutable alternative to configure() for functional patterns.
+        """Create a new instance with updated config. Immutable alternative to configure().
         
         Returns:
             New tool instance with updated configuration
         """
-        # Exclude computed fields from dump (they can't be passed back to constructor)
-        data = self._config.model_dump(exclude_unset=False, exclude_defaults=False)
-        # Filter out any computed fields that might have been included
-        field_names = set(self.config_class.model_fields.keys())
-        data = {k: v for k, v in data.items() if k in field_names}
-        data.update(updates)
-        return self.__class__(self.config_class(**data))  # type: ignore[arg-type, return-value]
+        return self.__class__(self.config_class(**self._config_data(**updates)))  # type: ignore[arg-type, return-value]

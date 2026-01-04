@@ -6,6 +6,7 @@ helping them decide which tool to use for a given task.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field
@@ -55,16 +56,13 @@ class DiscoveryTool(BaseTool[DiscoveryParams]):
     def _run_result(self, params: DiscoveryParams) -> ToolResult:
         """Result-based implementation."""
         registry = get_registry()
-        
-        # Get tools, optionally filtered by category
         tools = registry.list_by_category(params.category) if params.category else registry.list_tools()
         
         if not tools:
-            msg = f"No tools found in category '{params.category}'. Try without a filter." if params.category else "No tools are currently available."
-            return Ok(msg)
+            return Ok(f"No tools found in category '{params.category}'. Try without a filter." if params.category else "No tools are currently available.")
         
-        formatted = self._format_brief(tools, params.category) if params.format == "brief" else self._format_detailed(tools, params.category)
-        return Ok(formatted)
+        formatter = self._format_brief if params.format == "brief" else self._format_detailed
+        return Ok(formatter(tools, params.category))
     
     def _run(self, params: DiscoveryParams) -> str:
         """String-based fallback."""
@@ -73,25 +71,17 @@ class DiscoveryTool(BaseTool[DiscoveryParams]):
     
     def _format_brief(self, tools: list[ToolMetadata], category: str | None) -> str:
         """Brief format: grouped by category with one-line descriptions."""
-        cat_suffix = f" in '{category}'" if category else ""
-        header = f"**Available Tools{cat_suffix}**\n"
-        
-        # Group by category
-        by_cat: dict[str, list[ToolMetadata]] = {}
+        by_cat: dict[str, list[ToolMetadata]] = defaultdict(list)
         for tool in tools:
-            by_cat.setdefault(tool.category, []).append(tool)
+            by_cat[tool.category].append(tool)
         
-        lines = [header]
+        suffix = f" in '{category}'" if category else ""
+        lines = [f"**Available Tools{suffix}**\n"]
         for cat, cat_tools in sorted(by_cat.items()):
             lines.append(f"**{cat.title()}:**")
             for t in cat_tools:
-                flags = ""
-                if t.requires_api_key:
-                    flags += " ⚡"
-                if t.streaming:
-                    flags += " 📡"
-                # Truncate description to 80 chars
-                desc = t.description[:77] + "..." if len(t.description) > 80 else t.description
+                flags = (" ⚡" * t.requires_api_key) + (" 📡" * t.streaming)
+                desc = f"{t.description[:77]}..." if len(t.description) > 80 else t.description
                 lines.append(f"- `{t.name}`{flags}: {desc}")
             lines.append("")
         
@@ -100,14 +90,11 @@ class DiscoveryTool(BaseTool[DiscoveryParams]):
     
     def _format_detailed(self, tools: list[ToolMetadata], category: str | None) -> str:
         """Detailed format: full information for each tool."""
-        cat_suffix = f" in '{category}'" if category else ""
-        header = f"**Available Tools{cat_suffix}**\n"
-        lines = [header]
+        suffix = f" in '{category}'" if category else ""
+        lines = [f"**Available Tools{suffix}**\n"]
         
         for t in sorted(tools, key=lambda x: (x.category, x.name)):
-            lines.append(f"### {t.name}")
-            lines.append(f"**Category:** {t.category}")
-            lines.append(f"**Description:** {t.description}")
+            lines += [f"### {t.name}", f"**Category:** {t.category}", f"**Description:** {t.description}"]
             if t.requires_api_key:
                 lines.append("**Note:** Requires API key")
             if t.streaming:
