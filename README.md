@@ -4,37 +4,52 @@ Type-safe, extensible tool framework for AI agents.
 
 ## Features
 
+- **Async-first design** with sync compatibility
 - **Type-safe parameters** via Pydantic generics
-- **Monadic error handling** with Result/Either types (NEW!)
-- **Railway-oriented programming** for automatic error propagation
-- **Standardized error handling** with error codes
-- **Built-in caching** with TTL support
-- **Async/sync interoperability**
-- **Streaming progress** for long-running operations
-- **Optional LangChain integration**
-- **Central registry** for tool discovery
+- **Monadic error handling** with Result types
+- **Multi-framework converters** (OpenAI, Anthropic, Google)
+- **MCP protocol & HTTP server** for Cursor/Claude Desktop
+- **Middleware pipeline** (logging, retry, timeout, rate limiting)
+- **Agentic primitives** (router, fallback, race, gate)
+- **Structured concurrency** with TaskGroup and CancelScope
+- **Distributed tracing** with multiple exporters
+- **Built-in caching** with TTL and Redis support
 
 ## Installation
 
 ```bash
 pip install toolcase
 
-# With LangChain support
-pip install toolcase[langchain]
+# With optional integrations
+pip install toolcase[langchain]  # LangChain
+pip install toolcase[mcp]        # MCP protocol
+pip install toolcase[http]       # HTTP server
 ```
 
 ## Quick Start
 
 ```python
-from pydantic import BaseModel, Field
-from toolcase import BaseTool, ToolMetadata, init_tools
+from toolcase import tool, get_registry
 
-# Define parameters
+@tool(description="Search the web for information")
+async def search(query: str, limit: int = 5) -> str:
+    return f"Found {limit} results for: {query}"
+
+registry = get_registry()
+registry.register(search)
+result = await registry.execute("search", {"query": "python", "limit": 3})
+```
+
+### Class-Based Tools
+
+```python
+from pydantic import BaseModel, Field
+from toolcase import BaseTool, ToolMetadata
+
 class SearchParams(BaseModel):
     query: str = Field(..., description="Search query")
     limit: int = Field(default=5, ge=1, le=20)
 
-# Create a tool
 class SearchTool(BaseTool[SearchParams]):
     metadata = ToolMetadata(
         name="web_search",
@@ -43,192 +58,117 @@ class SearchTool(BaseTool[SearchParams]):
     )
     params_schema = SearchParams
 
-    def _run(self, params: SearchParams) -> str:
-        # Your implementation here
+    async def _async_run(self, params: SearchParams) -> str:
         return f"Found {params.limit} results for: {params.query}"
-
-# Register and use
-registry = init_tools(SearchTool())
-result = registry["web_search"](query="python tutorials", limit=3)
 ```
 
 ## Core Concepts
 
-### BaseTool
-
-All tools inherit from `BaseTool[TParams]` where `TParams` is a Pydantic model:
+### Middleware
 
 ```python
-class MyTool(BaseTool[MyParams]):
-    metadata = ToolMetadata(...)
-    params_schema = MyParams
-    
-    # Caching (optional)
-    cache_enabled = True  # default
-    cache_ttl = 300.0     # 5 minutes default
-    
-    def _run(self, params: MyParams) -> str:
-        """Synchronous execution."""
-        ...
-    
-    async def _async_run(self, params: MyParams) -> str:
-        """Native async (optional override)."""
-        ...
+from toolcase import LoggingMiddleware, RetryMiddleware, TimeoutMiddleware
+
+registry.use(LoggingMiddleware())
+registry.use(RetryMiddleware(max_retries=3))
+registry.use(TimeoutMiddleware(30.0))
 ```
 
 ### Error Handling
 
-#### String-Based (Traditional)
-
-Use built-in error methods for consistent responses:
-
 ```python
-def _run(self, params: MyParams) -> str:
-    try:
-        result = external_api_call()
-        return format_result(result)
-    except TimeoutError as e:
-        return self._error("Request timed out", ErrorCode.TIMEOUT)
-    except Exception as e:
-        return self._error_from_exception(e, "API call failed")
-```
+from toolcase import Ok, Err, try_tool_operation
 
-#### Result-Based (Recommended - NEW!)
-
-Use monadic Result types for type-safe error handling:
-
-```python
-from toolcase import Ok, ToolResult, try_tool_operation
-
-def _run_result(self, params: MyParams) -> ToolResult:
-    """Railway-oriented programming - errors propagate automatically."""
+def _run_result(self, params):
     return (
-        self._validate_input(params)
-        .flat_map(lambda p: self._fetch_data(p))
-        .flat_map(lambda data: self._process_data(data))
-        .map(lambda result: self._format_output(result))
+        self._validate(params)
+        .flat_map(lambda p: self._fetch(p))
+        .map(lambda d: self._format(d))
     )
 
-def _validate_input(self, params: MyParams) -> ToolResult:
-    if not params.query:
-        return tool_result(
-            self.metadata.name,
-            "Query required",
-            code=ErrorCode.INVALID_PARAMS
-        )
-    return Ok(params)
+# Or automatic exception handling
+result = try_tool_operation("my_tool", lambda: risky_call())
 ```
 
-Or use automatic exception handling:
+See [docs/MONADIC_ERRORS.md](docs/MONADIC_ERRORS.md) for complete guide.
+
+### Agentic Composition
 
 ```python
-def _run_result(self, params: MyParams) -> ToolResult:
-    return try_tool_operation(
-        self.metadata.name,
-        lambda: format_result(external_api_call()),
-        context="calling external API"
-    )
+from toolcase import router, fallback, race, Route
+
+# Conditional routing
+smart_search = router(
+    Route(lambda p: "code" in p["query"], code_search),
+    default=web_search,
+)
+
+# Fallback chain
+resilient = fallback(primary_api, backup_api, cache)
+
+# Race (first success wins)
+fastest = race(api_a, api_b, timeout=5.0)
 ```
 
-**Benefits**:
-- ✅ Type-safe - compiler enforces error handling
-- ✅ Composable - chain operations elegantly
-- ✅ No manual error checking - errors propagate automatically
-- ✅ Error context stacking - track provenance through call chains
-
-See [MONADIC_ERRORS.md](MONADIC_ERRORS.md) for complete guide.
-
-### Progress Streaming
-
-For long-running tools, stream progress updates:
+### Multi-Framework Export
 
 ```python
-from toolcase import ToolProgress, step, complete, status
+from toolcase.ext.integrations.frontiers import to_openai, to_anthropic, to_google
 
-class LongRunningTool(BaseTool[Params]):
-    metadata = ToolMetadata(..., streaming=True)
-    
-    async def stream_run(self, params: Params) -> AsyncIterator[ToolProgress]:
-        yield status("Starting...")
-        
-        for i, item in enumerate(params.items, 1):
-            result = await process(item)
-            yield step(f"Processed {item}", current=i, total=len(params.items))
-        
-        yield complete("All done!")
+openai_tools = to_openai(registry)
+anthropic_tools = to_anthropic(registry)
+gemini_tools = to_google(registry)
 ```
 
-### Caching
-
-Results are cached by default. Configure per-tool:
+### MCP & HTTP Server
 
 ```python
-class NoCacheTool(BaseTool[Params]):
-    cache_enabled = False  # Disable caching
+from toolcase.ext.mcp import serve_mcp, serve_http
 
-class ShortCacheTool(BaseTool[Params]):
-    cache_ttl = 60.0  # 1 minute TTL
+# For Cursor/Claude Desktop
+serve_mcp(registry, transport="stdio")
+
+# HTTP REST API
+serve_http(registry, port=8000)
 ```
 
-Or use a custom cache backend:
+### Batch Execution
 
 ```python
-from toolcase import set_cache, ToolCache
+from toolcase import BatchConfig
 
-class RedisCache(ToolCache):
-    def get(self, tool_name, params): ...
-    def set(self, tool_name, params, value, ttl): ...
-    # ... implement other methods
-
-set_cache(RedisCache())
+params_list = [{"query": q} for q in ["python", "rust", "go"]]
+results = await tool.batch_run(params_list, BatchConfig(concurrency=5))
+print(f"Success rate: {results.success_rate:.0%}")
 ```
 
-## LangChain Integration
+## CLI Help
 
-```python
-from toolcase import get_registry
-from toolcase.integrations import to_langchain_tools
-
-# Convert all tools to LangChain format
-registry = get_registry()
-lc_tools = to_langchain_tools(registry)
-
-# Use with LangChain agents
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-executor = AgentExecutor(agent=agent, tools=lc_tools)
+```bash
+toolcase help              # List topics
+toolcase help tool         # Tool creation
+toolcase help middleware   # Middleware pipeline
+toolcase help agents       # Agentic patterns
+toolcase help mcp          # MCP/HTTP server
 ```
 
 ## API Reference
 
 ### Core
-
-- `BaseTool[TParams]` - Abstract base class for tools
-- `ToolMetadata` - Tool metadata (name, description, category, etc.)
-- `EmptyParams` - Default params for tools with no inputs
+- `BaseTool[T]`, `ToolMetadata`, `ToolCapabilities`, `@tool`
 
 ### Errors
+- `Result`, `Ok`, `Err`, `ErrorCode`, `ToolError`
 
-- `ErrorCode` - Enum of standard error codes
-- `ToolError` - Structured error response model
-- `ToolException` - Exception wrapper for ToolError
+### Runtime
+- `Middleware`, `compose`, `pipeline`, `parallel`
+- `router`, `fallback`, `race`, `gate`
+- `Concurrency`, `TaskGroup`, `CancelScope`
+- `BatchConfig`, `batch_execute`
 
-### Progress
-
-- `ToolProgress` - Progress event dataclass
-- `ProgressKind` - Event types (status, step, complete, error)
-- `status()`, `step()`, `complete()`, `error()` - Factory functions
-
-### Cache
-
-- `ToolCache` - Abstract cache interface
-- `MemoryCache` - In-memory implementation
-- `get_cache()`, `set_cache()`, `reset_cache()` - Global cache management
-
-### Registry
-
-- `ToolRegistry` - Tool container with discovery
-- `get_registry()`, `set_registry()`, `reset_registry()` - Global registry
-- `init_tools(*tools)` - Initialize registry with tools
+### Observability
+- `configure_tracing`, `configure_logging`
+- `TracingMiddleware`, `LoggingMiddleware`
 
 ## License
 
