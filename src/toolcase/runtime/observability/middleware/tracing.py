@@ -16,8 +16,7 @@ from pydantic import BaseModel
 
 from toolcase.foundation.errors import JsonDict, ToolException, classify_exception
 from toolcase.runtime.middleware.middleware import Context, Next
-from .span import SpanKind, SpanStatus
-from .tracer import Tracer
+from ..tracing import SpanKind, SpanStatus, Tracer
 
 if TYPE_CHECKING:
     from toolcase.foundation.core import BaseTool

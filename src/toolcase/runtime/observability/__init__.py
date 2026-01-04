@@ -3,7 +3,7 @@
 Provides distributed tracing optimized for AI agent debugging:
 - Automatic instrumentation via middleware
 - Manual instrumentation via decorators/context managers
-- Pluggable exporters (console, JSON, OTLP)
+- Pluggable exporters (console, JSON, OTLP, Datadog, Honeycomb, Zipkin)
 - Context propagation for correlated traces
 
 Quick Start:
@@ -41,17 +41,22 @@ Production Export:
     ... )
 """
 
-from .context import SpanContext, TraceContext, trace_context
-from .exporter import (
-    BatchExporter,
-    CompositeExporter,
-    ConsoleExporter,
-    Exporter,
-    JsonExporter,
-    NoOpExporter,
-    OTLPBridge,
-    create_otlp_exporter,
+# Tracing
+from .tracing import (
+    Span,
+    SpanContext,
+    SpanEvent,
+    SpanKind,
+    SpanStatus,
+    TraceContext,
+    Tracer,
+    configure_tracing,
+    get_tracer,
+    trace_context,
+    traced,
 )
+
+# Logging
 from .logging import (
     BoundLogger,
     LogEntry,
@@ -62,9 +67,34 @@ from .logging import (
     log_context,
     timed,
 )
+
+# Middleware
 from .middleware import CorrelationMiddleware, TracingMiddleware
-from .span import Span, SpanEvent, SpanKind, SpanStatus
-from .tracer import Tracer, configure_tracing, get_tracer, traced
+
+# Exporters
+from .exporters import (
+    AsyncBatchExporter,
+    BatchExporter,
+    CompositeExporter,
+    ConsoleExporter,
+    DatadogExporter,
+    Exporter,
+    FilteredExporter,
+    HoneycombExporter,
+    JsonExporter,
+    NoOpExporter,
+    OTLPBridge,
+    OTLPHttpBridge,
+    SampledExporter,
+    SpanPredicate,
+    ZipkinExporter,
+    create_otlp_exporter,
+    datadog,
+    errors_only,
+    honeycomb,
+    slow_spans,
+    zipkin,
+)
 
 __all__ = [
     # Context
@@ -90,15 +120,31 @@ __all__ = [
     "get_logger",
     "log_context",
     "timed",
-    # Exporters
+    # Exporters - Core
     "Exporter",
     "ConsoleExporter",
     "JsonExporter",
     "NoOpExporter",
     "BatchExporter",
+    "AsyncBatchExporter",
     "CompositeExporter",
+    # Exporters - OTLP
     "OTLPBridge",
+    "OTLPHttpBridge",
     "create_otlp_exporter",
+    # Exporters - Vendors
+    "DatadogExporter",
+    "HoneycombExporter",
+    "ZipkinExporter",
+    "datadog",
+    "honeycomb",
+    "zipkin",
+    # Exporters - Filtering
+    "SampledExporter",
+    "FilteredExporter",
+    "SpanPredicate",
+    "errors_only",
+    "slow_spans",
     # Middleware
     "TracingMiddleware",
     "CorrelationMiddleware",

@@ -261,7 +261,7 @@ def _get_renderer() -> LogRenderer:
 def _get_trace_context() -> JsonDict:
     """Extract trace context if tracing is configured."""
     try:
-        from .context import TraceContext
+        from ..tracing import TraceContext
         if ctx := TraceContext.get():
             return {"trace_id": ctx.span_context.trace_id, "span_id": ctx.span_context.span_id}
     except ImportError:

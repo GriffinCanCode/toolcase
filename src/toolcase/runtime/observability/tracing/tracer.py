@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING, Callable, ParamSpec, TypeVar
 from toolcase.foundation.errors import JsonDict
 
 from .context import SpanContext, TraceContext
-from .exporter import ConsoleExporter, Exporter, NoOpExporter
 from .span import Span, SpanKind, SpanStatus
+from ..exporters import ConsoleExporter, Exporter, NoOpExporter
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -203,14 +203,23 @@ def configure_tracing(
     *,
     endpoint: str | None = None,
     verbose: bool = False,
+    async_export: bool = False,
+    sample_rate: float | None = None,
+    api_key: str | None = None,
+    env: str = "",
 ) -> Tracer:
     """Configure global tracing with common defaults.
     
     Args:
         service_name: Name for this service in traces
-        exporter: "console", "json", "otlp", "none", or Exporter instance
-        endpoint: OTLP endpoint (only for otlp exporter)
+        exporter: "console", "json", "otlp", "otlp_http", "datadog", "honeycomb", 
+                  "zipkin", "none", or Exporter instance
+        endpoint: Collector endpoint (for otlp, zipkin)
         verbose: Show detailed attributes in console output
+        async_export: Wrap in AsyncBatchExporter for background export
+        sample_rate: If set, wrap in SampledExporter (0.0-1.0)
+        api_key: API key (for datadog, honeycomb)
+        env: Environment name (for datadog)
     
     Returns:
         Configured global Tracer instance
@@ -225,21 +234,53 @@ def configure_tracing(
         ...     exporter="otlp",
         ...     endpoint="http://otel-collector:4317",
         ... )
+        >>> 
+        >>> # Datadog with async export and 10% sampling
+        >>> configure_tracing(
+        ...     service_name="my-agent",
+        ...     exporter="datadog",
+        ...     api_key="dd-xxx",
+        ...     env="production",
+        ...     async_export=True,
+        ...     sample_rate=0.1,
+        ... )
     """
-    from .exporter import ConsoleExporter, JsonExporter, NoOpExporter, create_otlp_exporter
+    from ..exporters import (
+        AsyncBatchExporter,
+        ConsoleExporter,
+        DatadogExporter,
+        HoneycombExporter,
+        JsonExporter,
+        NoOpExporter,
+        SampledExporter,
+        ZipkinExporter,
+        create_otlp_exporter,
+    )
     
     if isinstance(exporter, str):
-        exporters = {
+        exporters: dict[str, object] = {
             "console": lambda: ConsoleExporter(verbose=verbose),
             "json": JsonExporter,
             "otlp": lambda: create_otlp_exporter(endpoint=endpoint or "http://localhost:4317", service_name=service_name),
+            "otlp_http": lambda: create_otlp_exporter(endpoint=endpoint or "http://localhost:4318/v1/traces", service_name=service_name, use_http=True),
+            "datadog": lambda: DatadogExporter(api_key=api_key, service_name=service_name, env=env),
+            "honeycomb": lambda: HoneycombExporter(api_key=api_key, service_name=service_name),
+            "zipkin": lambda: ZipkinExporter(endpoint=endpoint or "http://localhost:9411/api/v2/spans", service_name=service_name),
             "none": NoOpExporter,
         }
         if exporter not in exporters:
-            raise ValueError(f"Unknown exporter: {exporter}. Use 'console', 'json', 'otlp', or 'none'")
-        exp = exporters[exporter]()
+            raise ValueError(f"Unknown exporter: {exporter}. Use: {', '.join(sorted(exporters))}")
+        exp: Exporter = exporters[exporter]()  # type: ignore[assignment]
     else:
         exp = exporter
+    
+    # Apply sampling if configured
+    if sample_rate is not None:
+        exp = SampledExporter(exp, rate=sample_rate)
+    
+    # Apply async batching if configured
+    if async_export:
+        exp = AsyncBatchExporter(exp)
     
     tracer = Tracer(service_name=service_name, exporter=exp, enabled=True)
     tracer.configure_global()
