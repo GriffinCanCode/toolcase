@@ -7,6 +7,11 @@ error formatting for LLM feedback.
 Optimizations:
 - TypeAdapter cache for fast dict→params validation (bypasses full model overhead)
 - Per-tool adapter caching at first validation (lazy initialization)
+
+DSL Integration:
+- Use Schema builder from rules.py for complex validation
+- add_schema() method registers declarative schemas
+- Schemas compose with existing add_rule() validators
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from toolcase.foundation.errors import ErrorCode, ToolError, ValidationToolException, format_validation_error
 from toolcase.io.streaming import StreamChunk
 from toolcase.runtime.middleware import Context, Next
+from .rules import Schema, ValidationResult, Violation
 
 if TYPE_CHECKING:
     from toolcase.foundation.core import BaseTool
@@ -44,6 +50,7 @@ class ValidationMiddleware:
     - Dict→BaseModel conversion with TypeAdapter (faster than direct model instantiation)
     - Custom field validators with chainable API
     - Cross-field constraints via rule composition
+    - Schema DSL for complex declarative validation
     - Consistent LLM-friendly error formatting
     
     Should be first in chain for fail-fast behavior. Works with both
@@ -52,7 +59,7 @@ class ValidationMiddleware:
     Performance: Uses cached TypeAdapters per tool params_schema for ~15-30%
     faster dict→model validation vs direct model(**dict) instantiation.
     
-    Example:
+    Example (legacy API):
         >>> validation = ValidationMiddleware()
         >>> validation.add_rule("http_request", "url", lambda u: u.startswith("https://"), "must use HTTPS")
         >>> validation.add_rule("search", "query", lambda q: len(q) >= 3, "must be at least 3 characters")
@@ -62,10 +69,21 @@ class ValidationMiddleware:
         >>> def check_date_range(params):
         ...     return params.start <= params.end or "start must be before end"
         >>> validation.add_constraint("report", check_date_range)
+    
+    Schema DSL (recommended for complex validation):
+        >>> from toolcase.runtime.middleware.plugins.rules import Schema, required, url, https, in_range, less_than
+        >>> schema = (
+        ...     Schema("http_request")
+        ...     .field("url", required() & url() & https())
+        ...     .field("timeout", in_range(1, 60))
+        ...     .cross(less_than("start_time", "end_time"))
+        ... )
+        >>> validation.add_schema(schema)
     """
     
     _rules: dict[str, list[FieldRule]] = field(default_factory=dict)
     _constraints: dict[str, list[Validator]] = field(default_factory=dict)
+    _schemas: dict[str, Schema] = field(default_factory=dict)  # DSL schemas per tool
     _adapters: dict[str, TypeAdapter[BaseModel]] = field(default_factory=dict)  # Cached TypeAdapters per tool
     revalidate: bool = False  # Re-run Pydantic validation on existing BaseModel
     
@@ -86,6 +104,28 @@ class ValidationMiddleware:
         self._constraints.setdefault(tool_name, []).append(check)
         return self
     
+    def add_schema(self, schema: Schema) -> "ValidationMiddleware":
+        """Register declarative validation schema. Chainable.
+        
+        Schemas compose with existing add_rule() validators (both are applied).
+        For complex validation, schemas are recommended over add_rule().
+        
+        Args:
+            schema: Schema instance from rules.py DSL
+        """
+        self._schemas[schema.tool_name] = schema
+        return self
+    
+    def schema(self, tool_name: str) -> Schema:
+        """Get or create schema for tool. Enables fluent in-place building.
+        
+        Example:
+            >>> middleware.schema("my_tool").field("url", required() & https())
+        """
+        if tool_name not in self._schemas:
+            self._schemas[tool_name] = Schema(tool_name)
+        return self._schemas[tool_name]
+    
     def _get_adapter(self, tool: "BaseTool[BaseModel]") -> TypeAdapter[BaseModel]:
         """Get or create cached TypeAdapter for tool's params_schema."""
         name = tool.metadata.name
@@ -93,6 +133,13 @@ class ValidationMiddleware:
             adapter = TypeAdapter(tool.params_schema)
             self._adapters[name] = adapter
         return adapter
+    
+    def _format_violations(self, violations: tuple[Violation, ...], tool_name: str) -> str:
+        """Format DSL violations into LLM-friendly error string."""
+        if len(violations) == 1:
+            return ToolError.create(tool_name, str(violations[0]), ErrorCode.INVALID_PARAMS, recoverable=False).render()
+        msgs = "\n".join(f"  • {v}" for v in violations)
+        return ToolError.create(tool_name, f"{len(violations)} validation errors:\n{msgs}", ErrorCode.INVALID_PARAMS, recoverable=False).render()
     
     def _validate(self, tool: "BaseTool[BaseModel]", params: BaseModel | dict[str, object]) -> tuple[BaseModel | None, str | None]:
         """Validate params. Returns (validated_params, None) or (None, error_string)."""
@@ -112,7 +159,13 @@ class ValidationMiddleware:
             except ValidationError as e:
                 return None, ToolError.create(name, format_validation_error(e, tool_name=name), ErrorCode.INVALID_PARAMS, recoverable=False).render()
         
-        # Field rules
+        # Schema DSL validation (preferred for complex rules)
+        if (schema := self._schemas.get(name)):
+            result = schema.validate(params)
+            if not result.is_valid:
+                return None, self._format_violations(result.violations, name)
+        
+        # Field rules (legacy API, still supported)
         for rule in self._rules.get(name, []):
             val = getattr(params, rule.field, None)
             result = rule.check(val)
@@ -120,7 +173,7 @@ class ValidationMiddleware:
                 msg = result if isinstance(result, str) else rule.message
                 return None, ToolError.create(name, f"'{rule.field}' {msg}", ErrorCode.INVALID_PARAMS, recoverable=False).render()
         
-        # Cross-field constraints
+        # Cross-field constraints (legacy API, still supported)
         for constraint in self._constraints.get(name, []):
             result = constraint(params)
             if result is False:

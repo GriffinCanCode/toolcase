@@ -23,6 +23,9 @@ from .http import HTTP
 from .discovery import DISCOVERY
 from .imports import IMPORTS
 from .logging import LOGGING
+from .batch import BATCH
+from .capabilities import CAPABILITIES
+from .validation import VALIDATION
 
 TOPICS: dict[str, str] = {
     "help": HELP,
@@ -48,6 +51,9 @@ TOPICS: dict[str, str] = {
     "discovery": DISCOVERY,
     "imports": IMPORTS,
     "logging": LOGGING,
+    "batch": BATCH,
+    "capabilities": CAPABILITIES,
+    "validation": VALIDATION,
 }
 
 __all__ = ["TOPICS"]
