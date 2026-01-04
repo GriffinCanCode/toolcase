@@ -9,18 +9,11 @@ from __future__ import annotations
 import secrets
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 # Global trace context - propagates automatically across async calls
 _current_context: ContextVar[TraceContext | None] = ContextVar("trace_context", default=None)
 
-
-def _generate_id(length: int = 16) -> str:
-    """Generate cryptographically random hex ID."""
-    return secrets.token_hex(length)
+_gen_id = secrets.token_hex  # Cryptographically random hex ID generator
 
 
 @dataclass(slots=True, frozen=True)
@@ -46,15 +39,11 @@ class SpanContext:
     @classmethod
     def new(cls) -> SpanContext:
         """Create new root span context."""
-        return cls(trace_id=_generate_id(16), span_id=_generate_id(8))
+        return cls(trace_id=_gen_id(16), span_id=_gen_id(8))
     
     def child(self) -> SpanContext:
         """Create child context with same trace_id."""
-        return SpanContext(
-            trace_id=self.trace_id,
-            span_id=_generate_id(8),
-            parent_id=self.span_id,
-        )
+        return SpanContext(trace_id=self.trace_id, span_id=_gen_id(8), parent_id=self.span_id)
     
     @property
     def traceparent(self) -> str:
@@ -65,9 +54,7 @@ class SpanContext:
     def from_traceparent(cls, header: str) -> SpanContext | None:
         """Parse W3C traceparent header."""
         parts = header.split("-")
-        if len(parts) != 4 or parts[0] != "00":
-            return None
-        return cls(trace_id=parts[1], span_id=parts[2])
+        return cls(trace_id=parts[1], span_id=parts[2]) if len(parts) == 4 and parts[0] == "00" else None
 
 
 @dataclass(slots=True)
@@ -90,10 +77,8 @@ class TraceContext:
     @classmethod
     def current(cls) -> TraceContext:
         """Get or create current trace context."""
-        ctx = _current_context.get()
-        if ctx is None:
-            ctx = cls()
-            _current_context.set(ctx)
+        if (ctx := _current_context.get()) is None:
+            _current_context.set(ctx := cls())
         return ctx
     
     @classmethod
@@ -113,8 +98,7 @@ class TraceContext:
     
     def pop_span(self) -> SpanContext:
         """Pop span from stack, return to parent."""
-        current = self.span_context
-        self.span_context = self._span_stack.pop() if self._span_stack else SpanContext.new()
+        current, self.span_context = self.span_context, (self._span_stack.pop() if self._span_stack else SpanContext.new())
         return current
     
     @property
@@ -143,5 +127,4 @@ class trace_context:
         return self._ctx
     
     def __exit__(self, *_: object) -> None:
-        if self._token is not None:
-            _current_context.reset(self._token)
+        self._token and _current_context.reset(self._token)  # type: ignore[func-returns-value]
