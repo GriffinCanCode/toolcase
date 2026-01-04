@@ -8,9 +8,12 @@ from .logger import (
     LogRenderer,
     LogScope,
     NoOpRenderer,
+    TracedLogger,
     configure_logging,
+    configure_observability,
     get_logger,
     log_context,
+    span_logger,
     timed,
 )
 
@@ -22,8 +25,11 @@ __all__ = [
     "LogRenderer",
     "LogScope",
     "NoOpRenderer",
+    "TracedLogger",
     "configure_logging",
+    "configure_observability",
     "get_logger",
     "log_context",
+    "span_logger",
     "timed",
 ]
