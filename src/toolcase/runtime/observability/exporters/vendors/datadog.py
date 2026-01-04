@@ -41,62 +41,40 @@ class DatadogExporter:
     timeout: float = 10.0
     
     def __post_init__(self) -> None:
-        self.api_key = self.api_key or os.environ.get("DD_API_KEY")
-        if not self.api_key and not self.agent_url:
+        api_key = self.api_key or os.environ.get("DD_API_KEY")
+        if not api_key and not self.agent_url:
             raise ValueError("DatadogExporter requires api_key or agent_url")
+        object.__setattr__(self, "api_key", api_key)
     
     def export(self, spans: list[Span]) -> None:
-        if not spans:
-            return
-        traces = self._group_by_trace(spans)
-        payload = [[self._to_dd_span(s) for s in trace] for trace in traces.values()]
-        self._send(payload)
-    
-    def _group_by_trace(self, spans: list[Span]) -> dict[str, list[Span]]:
-        groups: dict[str, list[Span]] = {}
-        for span in spans:
-            groups.setdefault(span.context.trace_id, []).append(span)
-        return groups
+        if spans:
+            traces = {s.context.trace_id: [] for s in spans}
+            for s in spans:
+                traces[s.context.trace_id].append(s)
+            self._send([[self._to_dd_span(s) for s in t] for t in traces.values()])
     
     def _to_dd_span(self, span: Span) -> JsonDict:
-        trace_id = int(span.context.trace_id[:16], 16) if span.context.trace_id else 0
-        span_id = int(span.context.span_id, 16) if span.context.span_id else 0
-        parent_id = int(span.context.parent_id, 16) if span.context.parent_id else 0
-        
-        dd_span: JsonDict = {
-            "trace_id": trace_id, "span_id": span_id, "parent_id": parent_id,
+        ctx, _int = span.context, lambda x: int(x, 16) if x else 0
+        meta = {k: str(v) for k, v in span.attributes.items()}
+        meta |= {k: v for k, v in {"env": self.env, "version": self.version, "error.msg": span.error, "tool.name": span.tool_name}.items() if v}
+        return {
+            "trace_id": _int(ctx.trace_id[:16]) if ctx.trace_id else 0,
+            "span_id": _int(ctx.span_id), "parent_id": _int(ctx.parent_id),
             "name": f"{span.kind.value}.{span.name}" if span.kind else span.name,
             "resource": span.tool_name or span.name,
             "service": self.service_name, "type": "custom",
             "start": int(span.start_time * 1e9),
             "duration": int((span.duration_ms or 0) * 1e6),
-            "error": 1 if span.status.value == "error" else 0,
-            "meta": {k: str(v) for k, v in span.attributes.items()},
-            "metrics": {},
+            "error": int(span.status.value == "error"),
+            "meta": meta,
+            "metrics": {"duration_ms": span.duration_ms} if span.duration_ms else {},
         }
-        if self.env:
-            dd_span["meta"]["env"] = self.env
-        if self.version:
-            dd_span["meta"]["version"] = self.version
-        if span.error:
-            dd_span["meta"]["error.msg"] = span.error
-        if span.tool_name:
-            dd_span["meta"]["tool.name"] = span.tool_name
-        if span.duration_ms:
-            dd_span["metrics"]["duration_ms"] = span.duration_ms
-        return dd_span
     
     def _send(self, payload: list[list[JsonDict]]) -> None:
-        if self.agent_url:
-            url = f"{self.agent_url.rstrip('/')}/v0.3/traces"
-            headers = {"Content-Type": "application/json"}
-        else:
-            url = f"https://trace.agent.{self.site}/api/v0.2/traces"
-            headers = {"Content-Type": "application/json", "DD-API-KEY": self.api_key or ""}
-        
-        req = urllib.request.Request(url, data=orjson.dumps(payload), headers=headers, method="PUT")
+        url, headers = (f"{self.agent_url.rstrip('/')}/v0.3/traces", {"Content-Type": "application/json"}) if self.agent_url else (
+            f"https://trace.agent.{self.site}/api/v0.2/traces", {"Content-Type": "application/json", "DD-API-KEY": self.api_key or ""})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout):
+            with urllib.request.urlopen(urllib.request.Request(url, data=orjson.dumps(payload), headers=headers, method="PUT"), timeout=self.timeout):
                 pass
         except Exception:  # noqa: BLE001
             pass

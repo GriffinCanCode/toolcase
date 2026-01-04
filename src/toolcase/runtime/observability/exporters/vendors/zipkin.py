@@ -34,33 +34,22 @@ class ZipkinExporter:
     def export(self, spans: list[Span]) -> None:
         if not spans:
             return
-        payload = [self._to_zipkin_span(s) for s in spans]
-        req = urllib.request.Request(self.endpoint, data=orjson.dumps(payload),
-                                      headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout):
+            with urllib.request.urlopen(urllib.request.Request(self.endpoint, data=orjson.dumps([self._to_zipkin_span(s) for s in spans]),
+                                                               headers={"Content-Type": "application/json"}, method="POST"), timeout=self.timeout):
                 pass
         except Exception:  # noqa: BLE001
             pass
     
     def _to_zipkin_span(self, span: Span) -> JsonDict:
-        zipkin_span: JsonDict = {
-            "traceId": span.context.trace_id.lower(),
-            "id": span.context.span_id.lower(),
-            "name": span.name,
-            "timestamp": int(span.start_time * 1e6),
-            "duration": int((span.duration_ms or 0) * 1000),
+        tags = {k: str(v) for k, v in span.attributes.items()} | {k: v for k, v in {"error": span.error, "tool.name": span.tool_name}.items() if v}
+        return {
+            "traceId": span.context.trace_id.lower(), "id": span.context.span_id.lower(), "name": span.name,
+            "timestamp": int(span.start_time * 1e6), "duration": int((span.duration_ms or 0) * 1000),
             "localEndpoint": {"serviceName": self.service_name},
             "kind": {"tool": "CLIENT", "internal": "LOCAL", "external": "CLIENT", "pipeline": "LOCAL"}.get(span.kind.value, "LOCAL"),
-            "tags": {k: str(v) for k, v in span.attributes.items()},
-        }
-        if span.context.parent_id:
-            zipkin_span["parentId"] = span.context.parent_id.lower()
-        if span.error:
-            zipkin_span["tags"]["error"] = span.error
-        if span.tool_name:
-            zipkin_span["tags"]["tool.name"] = span.tool_name
-        return zipkin_span
+            "tags": tags,
+        } | ({"parentId": span.context.parent_id.lower()} if span.context.parent_id else {})
     
     def shutdown(self) -> None:
         pass

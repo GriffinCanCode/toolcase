@@ -36,47 +36,34 @@ class HoneycombExporter:
     _endpoint: str = field(default="https://api.honeycomb.io/v1/traces", init=False, repr=False)
     
     def __post_init__(self) -> None:
-        self.api_key = self.api_key or os.environ.get("HONEYCOMB_API_KEY")
-        if not self.api_key:
+        api_key = self.api_key or os.environ.get("HONEYCOMB_API_KEY")
+        if not api_key:
             raise ValueError("HoneycombExporter requires api_key or HONEYCOMB_API_KEY env var")
+        object.__setattr__(self, "api_key", api_key)
     
     def export(self, spans: list[Span]) -> None:
         if not spans:
             return
-        payload = self._build_otlp_payload(spans)
-        headers = {"Content-Type": "application/json", "x-honeycomb-team": self.api_key or ""}
-        if self.dataset:
-            headers["x-honeycomb-dataset"] = self.dataset
-        
-        req = urllib.request.Request(self._endpoint, data=orjson.dumps(payload), headers=headers, method="POST")
+        headers = {"Content-Type": "application/json", "x-honeycomb-team": self.api_key or ""} | ({"x-honeycomb-dataset": self.dataset} if self.dataset else {})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout):
+            with urllib.request.urlopen(urllib.request.Request(self._endpoint, data=orjson.dumps(self._build_otlp_payload(spans)), headers=headers, method="POST"), timeout=self.timeout):
                 pass
         except Exception:  # noqa: BLE001
             pass
     
     def _build_otlp_payload(self, spans: list[Span]) -> JsonDict:
-        return {
-            "resourceSpans": [{
-                "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": self.service_name}}]},
-                "scopeSpans": [{"scope": {"name": "toolcase"}, "spans": [self._to_otlp_span(s) for s in spans]}],
-            }],
-        }
+        return {"resourceSpans": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": self.service_name}}]},
+                                   "scopeSpans": [{"scope": {"name": "toolcase"}, "spans": [self._to_otlp_span(s) for s in spans]}]}]}
     
     def _to_otlp_span(self, span: Span) -> JsonDict:
         attrs = [{"key": k, "value": {"stringValue": str(v)}} for k, v in span.attributes.items()]
         if span.tool_name:
             attrs.append({"key": "tool.name", "value": {"stringValue": span.tool_name}})
-        
         return {
-            "traceId": span.context.trace_id, "spanId": span.context.span_id,
-            "parentSpanId": span.context.parent_id or "",
-            "name": span.name,
-            "startTimeUnixNano": str(int(span.start_time * 1e9)),
-            "endTimeUnixNano": str(int((span.end_time or span.start_time) * 1e9)),
+            "traceId": span.context.trace_id, "spanId": span.context.span_id, "parentSpanId": span.context.parent_id or "", "name": span.name,
+            "startTimeUnixNano": str(int(span.start_time * 1e9)), "endTimeUnixNano": str(int((span.end_time or span.start_time) * 1e9)),
             "kind": {"tool": 3, "internal": 1, "external": 3, "pipeline": 1}.get(span.kind.value, 1),
-            "status": {"code": {"ok": 1, "error": 2}.get(span.status.value, 0), "message": span.error or ""},
-            "attributes": attrs,
+            "status": {"code": {"ok": 1, "error": 2}.get(span.status.value, 0), "message": span.error or ""}, "attributes": attrs,
         }
     
     def shutdown(self) -> None:
