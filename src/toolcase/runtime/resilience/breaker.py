@@ -38,33 +38,19 @@ class CircuitState:
     last_failure: float = 0.0
     last_state_change: float = field(default_factory=time.time)
     
-    @property
-    def is_open(self) -> bool:
-        """Check if circuit is in OPEN state (fail-fast mode)."""
-        return self.state == State.OPEN
-    
-    @property
-    def is_closed(self) -> bool:
-        """Check if circuit is in CLOSED state (normal operation)."""
-        return self.state == State.CLOSED
-    
-    @property
-    def is_half_open(self) -> bool:
-        """Check if circuit is in HALF_OPEN state (testing recovery)."""
-        return self.state == State.HALF_OPEN
+    is_open = property(lambda s: s.state == State.OPEN)  # Check if circuit is in OPEN state (fail-fast mode)
+    is_closed = property(lambda s: s.state == State.CLOSED)  # Check if circuit is in CLOSED state (normal operation)
+    is_half_open = property(lambda s: s.state == State.HALF_OPEN)  # Check if circuit is in HALF_OPEN state (testing recovery)
     
     def to_dict(self) -> CircuitStateDict:
         """Serialize for distributed storage."""
-        return {
-            "state": self.state, "failures": self.failures, "successes": self.successes,
-            "last_failure": self.last_failure, "last_state_change": self.last_state_change,
-        }
+        return {"state": self.state, "failures": self.failures, "successes": self.successes,
+                "last_failure": self.last_failure, "last_state_change": self.last_state_change}
     
     @classmethod
     def from_dict(cls, d: CircuitStateDict) -> CircuitState:
         """Deserialize from distributed storage."""
-        return cls(State(d["state"]), int(d["failures"]), int(d["successes"]),
-                   float(d["last_failure"]), float(d["last_state_change"]))
+        return cls(State(d["state"]), int(d["failures"]), int(d["successes"]), float(d["last_failure"]), float(d["last_state_change"]))
 
 
 @runtime_checkable
@@ -77,27 +63,16 @@ class StateStore(Protocol):
 
 
 class MemoryStateStore:
-    """Thread-safe in-memory state store (default).
-    
-    Suitable for single-instance deployments. For distributed systems,
-    use RedisStateStore to share circuit state across instances.
-    """
+    """Thread-safe in-memory state store. For distributed systems, use RedisStateStore."""
     __slots__ = ("_states",)
     
     def __init__(self) -> None:
         self._states: dict[str, CircuitState] = {}
     
-    def get(self, key: str) -> CircuitState | None:
-        return self._states.get(key)
-    
-    def set(self, key: str, state: CircuitState) -> None:
-        self._states[key] = state
-    
-    def delete(self, key: str) -> bool:
-        return self._states.pop(key, None) is not None
-    
-    def keys(self) -> list[str]:
-        return list(self._states)
+    def get(self, key: str) -> CircuitState | None: return self._states.get(key)
+    def set(self, key: str, state: CircuitState) -> None: self._states[key] = state
+    def delete(self, key: str) -> bool: return self._states.pop(key, None) is not None
+    def keys(self) -> list[str]: return list(self._states)
 
 
 @dataclass(slots=True)
@@ -172,24 +147,24 @@ class CircuitBreaker:
     
     def record_success(self) -> None:
         """Record successful execution."""
-        circuit = self._circuit()
-        if circuit.state == State.HALF_OPEN:
-            circuit.successes += 1
-            if circuit.successes >= self.success_threshold:  # Recovery confirmed
-                circuit.state, circuit.failures, circuit.last_state_change = State.CLOSED, 0, time.time()
-            self._save(circuit)
-        elif circuit.state == State.CLOSED and circuit.failures > 0:
-            circuit.failures = max(0, circuit.failures - 1)
-            self._save(circuit)
+        c = self._circuit()
+        if c.state == State.HALF_OPEN:
+            c.successes += 1
+            if c.successes >= self.success_threshold:  # Recovery confirmed
+                c.state, c.failures, c.last_state_change = State.CLOSED, 0, time.time()
+            self._save(c)
+        elif c.state == State.CLOSED and c.failures > 0:
+            c.failures -= 1
+            self._save(c)
     
     def record_failure(self) -> None:
         """Record failed execution."""
-        circuit = self._circuit()
-        circuit.failures += 1
-        circuit.last_failure = time.time()
-        if circuit.state == State.HALF_OPEN or (circuit.state == State.CLOSED and circuit.failures >= self.failure_threshold):
-            circuit.state, circuit.last_state_change = State.OPEN, time.time()
-        self._save(circuit)
+        c = self._circuit()
+        c.failures += 1
+        c.last_failure = time.time()
+        if c.state == State.HALF_OPEN or (c.state == State.CLOSED and c.failures >= self.failure_threshold):
+            c.state, c.last_state_change = State.OPEN, time.time()
+        self._save(c)
     
     def reset(self) -> None:
         """Manually reset circuit to closed state."""
@@ -204,36 +179,14 @@ class CircuitBreaker:
         """Current circuit state (evaluates transitions)."""
         return self._evaluate_state(self._circuit())
     
-    @property
-    def failures(self) -> int:
-        """Current failure count."""
-        return self._circuit().failures
-    
-    @property
-    def successes(self) -> int:
-        """Current success count (meaningful in HALF_OPEN)."""
-        return self._circuit().successes
-    
-    @property
-    def is_open(self) -> bool:
-        """Check if circuit is open (fail-fast mode)."""
-        return self.state == State.OPEN
-    
-    @property
-    def is_closed(self) -> bool:
-        """Check if circuit is closed (normal operation)."""
-        return self.state == State.CLOSED
+    failures = property(lambda s: s._circuit().failures)  # Current failure count
+    successes = property(lambda s: s._circuit().successes)  # Current success count (meaningful in HALF_OPEN)
+    is_open = property(lambda s: s.state == State.OPEN)  # Check if circuit is open (fail-fast mode)
+    is_closed = property(lambda s: s.state == State.CLOSED)  # Check if circuit is closed (normal operation)
+    stats = property(lambda s: s._circuit().to_dict())  # Get circuit statistics for monitoring
     
     @property
     def retry_after(self) -> float | None:
         """Seconds until circuit transitions to half-open, or None if not open."""
-        circuit = self._circuit()
-        if circuit.state != State.OPEN:
-            return None
-        remaining = self.recovery_time - (time.time() - circuit.last_state_change)
-        return max(0.0, remaining)
-    
-    @property
-    def stats(self) -> CircuitStateDict:
-        """Get circuit statistics for monitoring."""
-        return self._circuit().to_dict()
+        c = self._circuit()
+        return max(0.0, self.recovery_time - (time.time() - c.last_state_change)) if c.state == State.OPEN else None
