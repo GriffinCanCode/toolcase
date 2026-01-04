@@ -6,80 +6,53 @@ Implements a discriminated union for success/failure with full monadic operation
 - Monad: flat_map (bind)
 - Bifunctor: bimap
 - Railway-oriented composition
+
+Performance notes:
+- Uses __slots__ for minimal memory footprint
+- Direct attribute access (no method calls) in hot paths
+- Optimized sequence/traverse with early bailout
 """
 
 from __future__ import annotations
 
-from typing import (
-    TYPE_CHECKING,
-    Callable,
-    Generic,
-    Literal,
-    NoReturn,
-    TypeVar,
-    cast,
-    overload,
-)
+from typing import TYPE_CHECKING, Callable, Generic, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-# Type variables for generic Result
-T = TypeVar("T")  # Success type
-E = TypeVar("E")  # Error type
-U = TypeVar("U")  # Mapped success type
-F = TypeVar("F")  # Mapped error type
+T = TypeVar("T")
+E = TypeVar("E")
+U = TypeVar("U")
+F = TypeVar("F")
+
+# Sentinel for faster Ok/Err construction
+_OK = True
+_ERR = False
 
 
 class Result(Generic[T, E]):
     """Discriminated union representing success (Ok) or failure (Err).
     
-    This is a sum type that enforces exhaustive error handling at the type level.
-    Inspired by Rust's Result and Haskell's Either.
-    
-    The Result type implements:
-    - Functor: map, map_err
-    - Applicative: apply
-    - Monad: flat_map (>>=)
-    - Bifunctor: bimap
+    Sum type enforcing exhaustive error handling. Implements Functor, Applicative,
+    Monad, and Bifunctor interfaces for railway-oriented programming.
     
     Examples:
-        >>> result: Result[int, str] = Ok(42)
-        >>> result.map(lambda x: x * 2).unwrap()
+        >>> Ok(42).map(lambda x: x * 2).unwrap()
         84
-        
-        >>> error: Result[int, str] = Err("failed")
-        >>> error.map(lambda x: x * 2).unwrap_err()
-        'failed'
-        
-        Railway-oriented programming:
-        >>> def validate_positive(x: int) -> Result[int, str]:
-        ...     return Ok(x) if x > 0 else Err("must be positive")
-        >>> 
-        >>> result = (
-        ...     Ok(5)
-        ...     .flat_map(validate_positive)
-        ...     .map(lambda x: x * 2)
-        ... )
-        >>> assert result.unwrap() == 10
-    
-    Notes:
-        - Uses __slots__ for zero overhead
-        - Immutable by design (all operations return new Result)
-        - Pattern matching via is_ok()/is_err() + match()
+        >>> Err("fail").map(lambda x: x * 2).unwrap_err()
+        'fail'
+        >>> Ok(5).flat_map(lambda x: Ok(x * 2) if x > 0 else Err("neg")).unwrap()
+        10
     """
     
     __slots__ = ("_value", "_is_ok")
     __match_args__ = ("_value",)
     
     def __init__(self, value: T | E, is_ok: bool) -> None:
-        """Private constructor. Use Ok() or Err() instead."""
-        self._value: T | E = value
-        self._is_ok: bool = is_ok
+        self._value = value
+        self._is_ok = is_ok
     
-    # ─────────────────────────────────────────────────────────────────
-    # Type Checking
-    # ─────────────────────────────────────────────────────────────────
+    # ─── Type Checking ───────────────────────────────────────────────
     
     def is_ok(self) -> bool:
         """Check if Result is Ok variant."""
@@ -89,384 +62,191 @@ class Result(Generic[T, E]):
         """Check if Result is Err variant."""
         return not self._is_ok
     
-    # ─────────────────────────────────────────────────────────────────
-    # Value Extraction
-    # ─────────────────────────────────────────────────────────────────
+    # ─── Value Extraction ──────────────────────────────────────────────
     
     def unwrap(self) -> T:
-        """Extract Ok value, panic on Err.
-        
-        Raises:
-            RuntimeError: If Result is Err
-        """
+        """Extract Ok value. Raises RuntimeError on Err."""
         if self._is_ok:
-            return cast(T, self._value)
-        raise RuntimeError(f"Called unwrap() on Err value: {self._value}")
+            return self._value  # type: ignore[return-value]
+        raise RuntimeError(f"unwrap() on Err: {self._value}")
     
     def unwrap_err(self) -> E:
-        """Extract Err value, panic on Ok.
-        
-        Raises:
-            RuntimeError: If Result is Ok
-        """
+        """Extract Err value. Raises RuntimeError on Ok."""
         if not self._is_ok:
-            return cast(E, self._value)
-        raise RuntimeError(f"Called unwrap_err() on Ok value: {self._value}")
+            return self._value  # type: ignore[return-value]
+        raise RuntimeError(f"unwrap_err() on Ok: {self._value}")
     
     def unwrap_or(self, default: T) -> T:
         """Extract Ok value or return default."""
-        return cast(T, self._value) if self._is_ok else default
+        return self._value if self._is_ok else default  # type: ignore[return-value]
     
     def unwrap_or_else(self, f: Callable[[E], T]) -> T:
-        """Extract Ok value or compute from error."""
-        return cast(T, self._value) if self._is_ok else f(cast(E, self._value))
+        """Extract Ok value or compute from error via f."""
+        return self._value if self._is_ok else f(self._value)  # type: ignore[return-value,arg-type]
     
     def expect(self, msg: str) -> T:
-        """Extract Ok value with custom panic message.
-        
-        Raises:
-            RuntimeError: If Result is Err with custom message
-        """
+        """Extract Ok value with custom error message."""
         if self._is_ok:
-            return cast(T, self._value)
+            return self._value  # type: ignore[return-value]
         raise RuntimeError(f"{msg}: {self._value}")
     
     def expect_err(self, msg: str) -> E:
-        """Extract Err value with custom panic message.
-        
-        Raises:
-            RuntimeError: If Result is Ok with custom message
-        """
+        """Extract Err value with custom error message."""
         if not self._is_ok:
-            return cast(E, self._value)
+            return self._value  # type: ignore[return-value]
         raise RuntimeError(f"{msg}: {self._value}")
     
-    # ─────────────────────────────────────────────────────────────────
-    # Functor Operations
-    # ─────────────────────────────────────────────────────────────────
+    # ─── Functor Operations ────────────────────────────────────────────
     
     def map(self, f: Callable[[T], U]) -> Result[U, E]:
-        """Map function over Ok value (Functor).
-        
-        This is the fundamental functor operation. Applies f only if Ok,
-        preserves Err unchanged.
-        
-        Type signature: Result[T, E] -> (T -> U) -> Result[U, E]
-        """
-        if self._is_ok:
-            return Ok(f(cast(T, self._value)))
-        return Err(cast(E, self._value))
+        """Apply f to Ok value. Signature: Result[T,E] → (T→U) → Result[U,E]"""
+        return Result(f(self._value), _OK) if self._is_ok else Result(self._value, _ERR)  # type: ignore[arg-type]
     
     def map_err(self, f: Callable[[E], F]) -> Result[T, F]:
-        """Map function over Err value (Error Functor).
-        
-        Useful for transforming error types while preserving Ok values.
-        
-        Type signature: Result[T, E] -> (E -> F) -> Result[T, F]
-        """
-        if not self._is_ok:
-            return Err(f(cast(E, self._value)))
-        return Ok(cast(T, self._value))
+        """Apply f to Err value. Signature: Result[T,E] → (E→F) → Result[T,F]"""
+        return Result(f(self._value), _ERR) if not self._is_ok else Result(self._value, _OK)  # type: ignore[arg-type]
     
-    # ─────────────────────────────────────────────────────────────────
-    # Bifunctor Operations
-    # ─────────────────────────────────────────────────────────────────
+    # ─── Bifunctor Operations ──────────────────────────────────────────
     
     def bimap(self, ok_fn: Callable[[T], U], err_fn: Callable[[E], F]) -> Result[U, F]:
-        """Map both Ok and Err values (Bifunctor).
-        
-        Applies ok_fn if Ok, err_fn if Err.
-        
-        Type signature: Result[T, E] -> (T -> U, E -> F) -> Result[U, F]
-        """
-        if self._is_ok:
-            return Ok(ok_fn(cast(T, self._value)))
-        return Err(err_fn(cast(E, self._value)))
+        """Apply ok_fn if Ok, err_fn if Err. Signature: Result[T,E] → (T→U, E→F) → Result[U,F]"""
+        return Result(ok_fn(self._value), _OK) if self._is_ok else Result(err_fn(self._value), _ERR)  # type: ignore[arg-type]
     
-    # ─────────────────────────────────────────────────────────────────
-    # Monad Operations
-    # ─────────────────────────────────────────────────────────────────
+    # ─── Monad Operations ──────────────────────────────────────────────
     
     def flat_map(self, f: Callable[[T], Result[U, E]]) -> Result[U, E]:
-        """Monadic bind (>>=) - chain operations that can fail.
-        
-        This is the key operation for railway-oriented programming.
-        Enables chaining operations where each step can fail.
-        
-        Type signature: Result[T, E] -> (T -> Result[U, E]) -> Result[U, E]
+        """Monadic bind (>>=). Chain operations that can fail.
         
         Example:
-            >>> def parse_int(s: str) -> Result[int, str]:
-            ...     try:
-            ...         return Ok(int(s))
-            ...     except ValueError:
-            ...         return Err(f"invalid int: {s}")
-            >>> 
-            >>> def validate_positive(n: int) -> Result[int, str]:
-            ...     return Ok(n) if n > 0 else Err("must be positive")
-            >>> 
-            >>> result = (
-            ...     Ok("42")
-            ...     .flat_map(parse_int)
-            ...     .flat_map(validate_positive)
-            ... )
-            >>> assert result.unwrap() == 42
+            >>> Ok("42").flat_map(lambda s: Ok(int(s))).flat_map(lambda n: Ok(n*2) if n>0 else Err("neg"))
         """
-        if self._is_ok:
-            return f(cast(T, self._value))
-        return Err(cast(E, self._value))
+        return f(self._value) if self._is_ok else Result(self._value, _ERR)  # type: ignore[arg-type]
     
     def and_then(self, f: Callable[[T], Result[U, E]]) -> Result[U, E]:
-        """Alias for flat_map for better readability."""
-        return self.flat_map(f)
+        """Alias for flat_map."""
+        return f(self._value) if self._is_ok else Result(self._value, _ERR)  # type: ignore[arg-type]
     
     def or_else(self, f: Callable[[E], Result[T, F]]) -> Result[T, F]:
-        """Chain alternative on Err.
-        
-        If Err, applies f to transform/recover. If Ok, passes through.
-        
-        Type signature: Result[T, E] -> (E -> Result[T, F]) -> Result[T, F]
-        """
-        if not self._is_ok:
-            return f(cast(E, self._value))
-        return Ok(cast(T, self._value))
+        """On Err, apply f to recover. On Ok, pass through."""
+        return f(self._value) if not self._is_ok else Result(self._value, _OK)  # type: ignore[arg-type]
     
-    # ─────────────────────────────────────────────────────────────────
-    # Applicative Operations
-    # ─────────────────────────────────────────────────────────────────
+    # ─── Applicative Operations ─────────────────────────────────────────
     
     def apply(self, f_result: Result[Callable[[T], U], E]) -> Result[U, E]:
-        """Apply wrapped function to wrapped value (Applicative).
-        
-        Enables parallel validation and accumulation patterns.
-        
-        Type signature: Result[T, E] -> Result[T -> U, E] -> Result[U, E]
-        """
-        if f_result.is_ok() and self._is_ok:
-            fn = f_result.unwrap()
-            return Ok(fn(cast(T, self._value)))
-        if f_result.is_err():
-            return Err(f_result.unwrap_err())
-        return Err(cast(E, self._value))
+        """Apply wrapped function to wrapped value (Applicative)."""
+        if f_result._is_ok and self._is_ok:
+            return Result(f_result._value(self._value), _OK)  # type: ignore[operator]
+        return Result(f_result._value if not f_result._is_ok else self._value, _ERR)  # type: ignore[arg-type]
     
-    # ─────────────────────────────────────────────────────────────────
-    # Logical Combinators
-    # ─────────────────────────────────────────────────────────────────
+    # ─── Logical Combinators ─────────────────────────────────────────────
     
     def and_(self, other: Result[U, E]) -> Result[U, E]:
-        """Return other if self is Ok, otherwise return self's Err.
-        
-        Short-circuit AND - useful for sequencing.
-        """
-        return other if self._is_ok else Err(cast(E, self._value))
+        """Return other if Ok, else self's Err. Short-circuit AND."""
+        return other if self._is_ok else Result(self._value, _ERR)  # type: ignore[arg-type]
     
     def or_(self, other: Result[T, F]) -> Result[T, F]:
-        """Return self if Ok, otherwise return other.
-        
-        Short-circuit OR - useful for fallbacks.
-        """
-        return Ok(cast(T, self._value)) if self._is_ok else other
+        """Return self if Ok, else other. Short-circuit OR."""
+        return Result(self._value, _OK) if self._is_ok else other  # type: ignore[arg-type]
     
-    # ─────────────────────────────────────────────────────────────────
-    # Inspection & Utilities
-    # ─────────────────────────────────────────────────────────────────
+    # ─── Inspection & Utilities ──────────────────────────────────────────
     
     def ok(self) -> T | None:
-        """Convert to Option-like: Some(T) if Ok, None if Err."""
-        return cast(T, self._value) if self._is_ok else None
+        """Some(T) if Ok, None if Err."""
+        return self._value if self._is_ok else None  # type: ignore[return-value]
     
     def err(self) -> E | None:
-        """Convert to Option-like: Some(E) if Err, None if Ok."""
-        return cast(E, self._value) if not self._is_ok else None
+        """Some(E) if Err, None if Ok."""
+        return self._value if not self._is_ok else None  # type: ignore[return-value]
     
     def inspect(self, f: Callable[[T], None]) -> Result[T, E]:
-        """Call function with Ok value for side effects, return self."""
+        """Call f with Ok value for side effects, return self."""
         if self._is_ok:
-            f(cast(T, self._value))
+            f(self._value)  # type: ignore[arg-type]
         return self
     
     def inspect_err(self, f: Callable[[E], None]) -> Result[T, E]:
-        """Call function with Err value for side effects, return self."""
+        """Call f with Err value for side effects, return self."""
         if not self._is_ok:
-            f(cast(E, self._value))
+            f(self._value)  # type: ignore[arg-type]
         return self
     
-    # ─────────────────────────────────────────────────────────────────
-    # Pattern Matching
-    # ─────────────────────────────────────────────────────────────────
+    # ─── Pattern Matching ────────────────────────────────────────────────
     
-    def match(
-        self,
-        *,
-        ok: Callable[[T], U],
-        err: Callable[[E], U],
-    ) -> U:
-        """Pattern match on Result variants.
-        
-        Exhaustive case analysis - forces handling both cases.
-        
-        Example:
-            >>> result = Ok(42)
-            >>> output = result.match(
-            ...     ok=lambda x: f"success: {x}",
-            ...     err=lambda e: f"failed: {e}"
-            ... )
-            >>> assert output == "success: 42"
-        """
-        if self._is_ok:
-            return ok(cast(T, self._value))
-        return err(cast(E, self._value))
+    def match(self, *, ok: Callable[[T], U], err: Callable[[E], U]) -> U:
+        """Exhaustive pattern match. Forces handling both Ok and Err."""
+        return ok(self._value) if self._is_ok else err(self._value)  # type: ignore[arg-type]
     
-    # ─────────────────────────────────────────────────────────────────
-    # Conversion
-    # ─────────────────────────────────────────────────────────────────
+    # ─── Conversion ────────────────────────────────────────────────────────
     
     def to_tuple(self) -> tuple[T | None, E | None]:
         """Convert to (ok_value, err_value) tuple."""
-        if self._is_ok:
-            return (cast(T, self._value), None)
-        return (None, cast(E, self._value))
+        return (self._value, None) if self._is_ok else (None, self._value)  # type: ignore[return-value]
     
     def flatten(self: Result[Result[T, E], E]) -> Result[T, E]:
-        """Flatten nested Result (join in monad terms).
-        
-        Result[Result[T, E], E] -> Result[T, E]
-        """
-        if self._is_ok:
-            return cast(Result[T, E], self._value)
-        return Err(cast(E, self._value))
+        """Flatten nested Result. Result[Result[T,E],E] → Result[T,E]"""
+        return self._value if self._is_ok else Result(self._value, _ERR)  # type: ignore[return-value,arg-type]
     
-    # ─────────────────────────────────────────────────────────────────
-    # Dunder Methods
-    # ─────────────────────────────────────────────────────────────────
+    # ─── Dunder Methods ──────────────────────────────────────────────────
     
-    def __bool__(self) -> bool:
-        """Enable truthiness checking (True if Ok)."""
-        return self._is_ok
-    
-    def __repr__(self) -> str:
-        """Debug representation."""
-        variant = "Ok" if self._is_ok else "Err"
-        return f"{variant}({self._value!r})"
-    
-    def __str__(self) -> str:
-        """String representation."""
-        return repr(self)
+    __bool__ = lambda self: self._is_ok  # noqa: E731
+    __hash__ = lambda self: hash((self._is_ok, self._value))  # noqa: E731
+    __repr__ = lambda self: f"{'Ok' if self._is_ok else 'Err'}({self._value!r})"  # noqa: E731
+    __str__ = __repr__
     
     def __eq__(self, other: object) -> bool:
-        """Structural equality."""
-        if not isinstance(other, Result):
-            return NotImplemented
-        return self._is_ok == other._is_ok and self._value == other._value
-    
-    def __hash__(self) -> int:
-        """Make Result hashable."""
-        return hash((self._is_ok, self._value))
+        return self._is_ok == other._is_ok and self._value == other._value if isinstance(other, Result) else NotImplemented
     
     def __iter__(self) -> Iterator[T]:
-        """Iterate over Ok value (yields 0 or 1 element).
-        
-        Enables use in for loops and comprehensions.
-        """
+        """Iterate: yields value if Ok, nothing if Err."""
         if self._is_ok:
-            yield cast(T, self._value)
+            yield self._value  # type: ignore[misc]
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Constructor Functions
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# Constructors
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def Ok(value: T) -> Result[T, E]:  # noqa: N802
-    """Construct Ok variant (success).
-    
-    Type signature: T -> Result[T, E]
-    """
-    return Result(value, is_ok=True)
+    """Construct Ok variant (success)."""
+    return Result(value, _OK)
 
 
 def Err(error: E) -> Result[T, E]:  # noqa: N802
-    """Construct Err variant (failure).
-    
-    Type signature: E -> Result[T, E]
-    """
-    return Result(error, is_ok=False)
+    """Construct Err variant (failure)."""
+    return Result(error, _ERR)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 # Collection Operations
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def sequence(results: list[Result[T, E]]) -> Result[list[T], E]:
-    """Convert list of Results to Result of list.
-    
-    Fails fast on first Err, returns Ok with all values if all succeed.
-    
-    Type signature: [Result[T, E]] -> Result[[T], E]
-    
-    Example:
-        >>> results = [Ok(1), Ok(2), Ok(3)]
-        >>> sequence(results).unwrap()
-        [1, 2, 3]
-        
-        >>> results = [Ok(1), Err("fail"), Ok(3)]
-        >>> sequence(results).unwrap_err()
-        'fail'
-    """
+    """List[Result[T,E]] → Result[List[T], E]. Fail-fast on first Err."""
     values: list[T] = []
-    for result in results:
-        if result.is_err():
-            return Err(result.unwrap_err())
-        values.append(result.unwrap())
-    return Ok(values)
+    for r in results:
+        if not r._is_ok:
+            return Result(r._value, _ERR)  # type: ignore[arg-type]
+        values.append(r._value)  # type: ignore[arg-type]
+    return Result(values, _OK)
 
 
-def traverse(
-    items: list[T],
-    f: Callable[[T], Result[U, E]],
-) -> Result[list[U], E]:
-    """Map function returning Result over list, collect into Result of list.
-    
-    Combines map and sequence - fails fast on first error.
-    
-    Type signature: [T] -> (T -> Result[U, E]) -> Result[[U], E]
-    
-    Example:
-        >>> def parse_int(s: str) -> Result[int, str]:
-        ...     try:
-        ...         return Ok(int(s))
-        ...     except ValueError:
-        ...         return Err(f"invalid: {s}")
-        >>> 
-        >>> traverse(["1", "2", "3"], parse_int).unwrap()
-        [1, 2, 3]
-        
-        >>> traverse(["1", "bad", "3"], parse_int).unwrap_err()
-        'invalid: bad'
-    """
-    return sequence([f(item) for item in items])
+def traverse(items: list[T], f: Callable[[T], Result[U, E]]) -> Result[list[U], E]:
+    """Map f over items, sequence results. Fail-fast on first Err."""
+    values: list[U] = []
+    for item in items:
+        r = f(item)
+        if not r._is_ok:
+            return Result(r._value, _ERR)  # type: ignore[arg-type]
+        values.append(r._value)  # type: ignore[arg-type]
+    return Result(values, _OK)
 
 
 def collect_results(results: list[Result[T, E]]) -> Result[list[T], list[E]]:
-    """Collect all Results, accumulating all errors if any fail.
-    
-    Unlike sequence, this doesn't fail fast - it collects ALL errors.
-    
-    Type signature: [Result[T, E]] -> Result[[T], [E]]
-    
-    Example:
-        >>> results = [Ok(1), Err("e1"), Ok(3), Err("e2")]
-        >>> collect_results(results).unwrap_err()
-        ['e1', 'e2']
-    """
+    """Collect all Results, accumulating ALL errors (not fail-fast)."""
     values: list[T] = []
     errors: list[E] = []
-    
-    for result in results:
-        if result.is_ok():
-            values.append(result.unwrap())
-        else:
-            errors.append(result.unwrap_err())
-    
-    return Ok(values) if not errors else Err(errors)
+    for r in results:
+        (values if r._is_ok else errors).append(r._value)  # type: ignore[arg-type]
+    return Result(values, _OK) if not errors else Result(errors, _ERR)
