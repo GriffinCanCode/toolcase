@@ -31,7 +31,6 @@ from pydantic import (
     AliasChoices,
     ByteSize,
     Field,
-    NonNegativeFloat,
     PositiveFloat,
     PositiveInt,
     SecretStr,
@@ -200,31 +199,14 @@ class RateLimitSettings(BaseSettings):
     @property
     def calls_per_second(self) -> float:
         """Compute calls per second rate."""
-        return self.max_calls / self.window_seconds if self.window_seconds > 0 else 0.0
+        return self.max_calls / self.window_seconds  # PositiveFloat guarantees > 0
     
     def __hash__(self) -> int:
         return hash((self.enabled, self.max_calls, self.window_seconds))
 
 
 class ToolcaseSettings(BaseSettings):
-    """Root settings for Toolcase framework.
-    
-    Loads configuration from environment variables with TOOLCASE_ prefix.
-    Supports nested configuration and .env files.
-    
-    Optimizations:
-    - Frozen for immutability (settings shouldn't change at runtime)
-    - AliasChoices for flexible env var naming
-    - Computed fields for derived values
-    - Cached singleton instance via get_settings()
-    
-    Example environment variables:
-        TOOLCASE_DEBUG=true
-        TOOLCASE_CACHE_TTL=7200
-        TOOLCASE_LOG_LEVEL=DEBUG
-        TOOLCASE_HTTP_TIMEOUT=60
-        TOOLCASE_TRACING_ENABLED=true
-    """
+    """Root settings for Toolcase framework. Loads from env vars (TOOLCASE_ prefix), .env files, nested config. Frozen/immutable with cached singleton via get_settings()."""
     
     model_config = SettingsConfigDict(
         env_prefix="TOOLCASE_",
@@ -288,23 +270,10 @@ class ToolcaseSettings(BaseSettings):
 # Singleton pattern for settings
 @lru_cache(maxsize=1)
 def get_settings() -> ToolcaseSettings:
-    """Get the global settings instance (cached).
-    
-    Returns:
-        Cached ToolcaseSettings instance
-    
-    Example:
-        >>> settings = get_settings()
-        >>> settings.debug
-        False
-    """
+    """Get the cached global settings instance."""
     return ToolcaseSettings()
 
 
 def clear_settings_cache() -> None:
-    """Clear the settings cache (useful for testing).
-    
-    After calling this, the next get_settings() call will
-    reload configuration from environment.
-    """
+    """Clear settings cache; next get_settings() reloads from env."""
     get_settings.cache_clear()
