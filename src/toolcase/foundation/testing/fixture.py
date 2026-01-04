@@ -14,7 +14,7 @@ from typing import Callable, ParamSpec, TypeVar, overload
 
 import orjson
 
-from toolcase.foundation.errors import JsonDict, JsonValue
+from toolcase.foundation.errors import JsonDict, JsonValue, RequestRecordDict
 
 T = TypeVar("T")
 P = ParamSpec("P")
@@ -129,7 +129,7 @@ class MockAPI:
     responses: dict[str, str | JsonDict | MockResponse] = field(default_factory=dict)
     default_response: str = "mock response"
     default_status: int = 200
-    requests: list[JsonDict] = field(default_factory=list)
+    requests: list[RequestRecordDict] = field(default_factory=list)
     
     @property
     def request_count(self) -> int:
@@ -137,13 +137,18 @@ class MockAPI:
         return len(self.requests)
     
     @property
-    def last_request(self) -> JsonDict | None:
+    def last_request(self) -> RequestRecordDict | None:
         """Most recent request, if any."""
         return self.requests[-1] if self.requests else None
     
     def _record(self, method: str, endpoint: str, **kwargs: JsonValue) -> None:
         """Record a request."""
-        self.requests.append({"method": method, "endpoint": endpoint, **kwargs})
+        record: RequestRecordDict = {"method": method, "endpoint": endpoint}
+        if "params" in kwargs and isinstance(kwargs["params"], dict):
+            record["params"] = kwargs["params"]  # type: ignore[typeddict-item]
+        if "data" in kwargs and isinstance(kwargs["data"], dict):
+            record["data"] = kwargs["data"]  # type: ignore[typeddict-item]
+        self.requests.append(record)
     
     def _wrap_response(self, resp: str | JsonDict | MockResponse) -> MockResponse:
         """Wrap raw response in MockResponse if needed."""

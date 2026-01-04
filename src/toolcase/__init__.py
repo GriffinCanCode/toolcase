@@ -318,13 +318,11 @@ from .runtime.batch import (
     BatchResult,
     BatchRetryPolicy,
     BatchRetryStrategy,
+    CacheIdempotencyAdapter,
     IdempotencyStore,
     IdempotentBatchConfig,
     IdempotentBatchResult,
-    MemoryIdempotencyStore,
     NO_BATCH_RETRY,
-    RedisIdempotencyStore,
-    StoredResult,
     batch_execute,
     batch_execute_idempotent,
     batch_execute_idempotent_sync,
@@ -471,7 +469,7 @@ __all__ = [
     "IdempotentBatchConfig", "IdempotentBatchResult",
     "BatchRetryPolicy", "BatchRetryStrategy", "NO_BATCH_RETRY",
     "batch_execute_idempotent", "batch_execute_idempotent_sync",
-    "IdempotencyStore", "StoredResult", "MemoryIdempotencyStore", "RedisIdempotencyStore",
+    "IdempotencyStore", "CacheIdempotencyAdapter",
     # Convenience
     "init_tools",
 ]

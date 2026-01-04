@@ -16,7 +16,9 @@ from typing import TYPE_CHECKING
 import msgpack
 import orjson
 
-from toolcase.foundation.errors import ErrorCode, ErrorTrace, JsonDict, JsonValue
+from toolcase.foundation.errors import (
+    ErrorCode, ErrorTrace, ErrorTraceSerialized, JsonDict, JsonMapping, JsonValue, SpanDict, SpanEventDict,
+)
 
 if TYPE_CHECKING:
     from .context import SpanContext
@@ -108,14 +110,14 @@ class Span:
         self.attributes[key] = value
         return self
     
-    def set_attributes(self, attrs: JsonDict) -> Span:
+    def set_attributes(self, attrs: JsonMapping) -> Span:
         """Set multiple attributes."""
         self.attributes.update(attrs)
         return self
     
-    def add_event(self, name: str, attributes: JsonDict | None = None) -> Span:
+    def add_event(self, name: str, attributes: JsonMapping | None = None) -> Span:
         """Add timestamped event to span."""
-        self.events.append(SpanEvent(name=name, attributes=attributes or {}))
+        self.events.append(SpanEvent(name=name, attributes=dict(attributes) if attributes else {}))
         return self
     
     def set_status(self, status: SpanStatus, error: str | None = None) -> Span:
@@ -137,9 +139,10 @@ class Span:
         actual_code = code or classify_exception(exc)
         return self.record_error(trace_from_exc(exc, operation=self.name, code=actual_code.value))
     
-    def set_tool_context(self, tool_name: str, category: str, params: JsonDict | None = None) -> Span:
+    def set_tool_context(self, tool_name: str, category: str, params: JsonMapping | None = None) -> Span:
         """Set tool-specific context for AI observability."""
-        self.tool_name, self.tool_category, self.params, self.kind = tool_name, category, params, SpanKind.TOOL
+        self.tool_name, self.tool_category, self.params = tool_name, category, dict(params) if params else None
+        self.kind = SpanKind.TOOL
         return self
     
     def set_result_preview(self, result: str, max_len: int = 200) -> Span:
@@ -158,25 +161,29 @@ class Span:
             self.error, self.status = error, SpanStatus.ERROR
         return self
     
-    def to_dict(self) -> JsonDict:
+    def to_dict(self) -> SpanDict:
         """Serialize span for export."""
         ctx = self.context
-        result: JsonDict = {
+        events: list[SpanEventDict] = [
+            {"name": e.name, "timestamp": e.timestamp, "attributes": e.attributes}
+            for e in self.events
+        ]
+        result: SpanDict = {
             "name": self.name, "trace_id": ctx.trace_id, "span_id": ctx.span_id,
             "parent_id": ctx.parent_id, "kind": self.kind.value,
             "start_time": self.start_time, "end_time": self.end_time,
             "duration_ms": self.duration_ms, "status": self.status.value, "error": self.error,
-            "attributes": self.attributes,
-            "events": [{"name": e.name, "timestamp": e.timestamp, "attributes": e.attributes} for e in self.events],
+            "attributes": self.attributes, "events": events,
             "tool": {"name": self.tool_name, "category": self.tool_category,
                      "params": self.params, "result_preview": self.result_preview} if self.tool_name else None,
         }
         if self.error_trace:
             et = self.error_trace
-            result["error_trace"] = {
+            err_ser: ErrorTraceSerialized = {
                 "message": et.message, "code": et.error_code, "recoverable": et.recoverable,
                 "contexts": [str(c) for c in et.contexts], "details": et.details,
             }
+            result["error_trace"] = err_ser
         return result
     
     def to_json(self) -> bytes:

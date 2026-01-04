@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from toolcase.foundation.errors import JsonDict, JsonValue
+from toolcase.foundation.errors import JsonDict, JsonValue, StreamChunkDict, StreamEventDict
 
 from .codec import Codec, fast_decode, fast_encode, get_codec
 
@@ -50,10 +50,12 @@ class StreamChunk:
     def __len__(self) -> int:
         return len(self.content)
     
-    def to_dict(self) -> JsonDict:
+    def to_dict(self) -> StreamChunkDict:
         """Serialize for JSON transport."""
-        d = {"content": self.content, "index": self.index, "timestamp": self.timestamp}
-        return d | {"metadata": self.metadata} if self.metadata else d
+        d: StreamChunkDict = {"content": self.content, "index": self.index, "timestamp": self.timestamp}
+        if self.metadata:
+            d["metadata"] = self.metadata
+        return d
 
 
 @dataclass(slots=True)
@@ -66,14 +68,16 @@ class StreamEvent:
     error: str | None = None
     timestamp: float = field(default_factory=lambda: time.time() * 1000)
     
-    def to_dict(self) -> JsonDict:
+    def to_dict(self) -> StreamEventDict:
         """Serialize for JSON transport."""
-        return {
-            "kind": self.kind, "tool": self.tool_name, "timestamp": self.timestamp,
-            **({"data": self.data.to_dict()} if self.data else {}),
-            **({"accumulated": self.accumulated} if self.accumulated is not None else {}),
-            **({"error": self.error} if self.error else {}),
-        }
+        d: StreamEventDict = {"kind": self.kind.value, "tool": self.tool_name, "timestamp": self.timestamp}
+        if self.data:
+            d["data"] = self.data.to_dict()
+        if self.accumulated is not None:
+            d["accumulated"] = self.accumulated
+        if self.error:
+            d["error"] = self.error
+        return d
     
     def to_json(self) -> str:
         """JSON string for transport (uses orjson if available)."""

@@ -6,8 +6,9 @@ Integrates beartype for O(1) runtime type checking via guard functions.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from io import StringIO
-from typing import TYPE_CHECKING, Annotated, TypeAlias
+from typing import TYPE_CHECKING, Annotated, TypeAlias, TypedDict
 
 from beartype import beartype
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, computed_field, field_serializer
@@ -29,7 +30,99 @@ JsonPrimitive: TypeAlias = str | int | float | bool | None
 JsonArray: TypeAlias = list[PydanticJsonValue]
 JsonObject: TypeAlias = dict[str, PydanticJsonValue]
 JsonValue: TypeAlias = PydanticJsonValue  # Re-export Pydantic's properly recursive type
-JsonDict: TypeAlias = dict[str, PydanticJsonValue]
+JsonDict: TypeAlias = dict[str, PydanticJsonValue]  # Mutable dict for building/modifying
+JsonMapping: TypeAlias = Mapping[str, PydanticJsonValue]  # Read-only view for params/returns
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TypedDicts for Well-Known Structures (type-safe serialization)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CircuitStateDict(TypedDict):
+    """Serialized circuit breaker state."""
+    state: int
+    failures: int
+    successes: int
+    last_failure: float
+    last_state_change: float
+
+
+class CacheStatsDict(TypedDict):
+    """Cache statistics for monitoring."""
+    backend: str
+    total_entries: int
+    expired_entries: int
+    active_entries: int
+    default_ttl: float
+    max_entries: int
+
+
+class SpanEventDict(TypedDict, total=False):
+    """Serialized span event."""
+    name: str
+    timestamp: float
+    attributes: JsonMapping
+
+
+class SpanToolDict(TypedDict, total=False):
+    """Serialized tool context within span."""
+    name: str | None
+    category: str | None
+    params: JsonMapping | None
+    result_preview: str | None
+
+
+class ErrorTraceSerialized(TypedDict, total=False):
+    """Serialized ErrorTrace for span export - stricter than JsonDict."""
+    message: str
+    code: str | None
+    recoverable: bool
+    contexts: list[str]
+    details: str | None
+
+
+class SpanDict(TypedDict, total=False):
+    """Serialized span for export."""
+    name: str
+    trace_id: str
+    span_id: str
+    parent_id: str | None
+    kind: str
+    start_time: float
+    end_time: float | None
+    duration_ms: float | None
+    status: str
+    error: str | None
+    attributes: JsonMapping
+    events: list[SpanEventDict]
+    tool: SpanToolDict | None
+    error_trace: ErrorTraceSerialized | None
+
+
+class StreamChunkDict(TypedDict, total=False):
+    """Serialized stream chunk."""
+    content: str
+    index: int
+    timestamp: float
+    metadata: JsonMapping
+
+
+class StreamEventDict(TypedDict, total=False):
+    """Serialized stream event."""
+    kind: str
+    tool: str
+    timestamp: float
+    data: StreamChunkDict
+    accumulated: str
+    error: str
+
+
+class RequestRecordDict(TypedDict, total=False):
+    """Recorded HTTP request in MockAPI."""
+    method: str
+    endpoint: str
+    params: JsonMapping
+    data: JsonMapping
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Runtime Type Checking (beartype)
@@ -151,7 +244,7 @@ class ErrorTrace(BaseModel):
     details: str | None = Field(default=None, repr=False)  # Often verbose, hide from repr
     
     @field_serializer("contexts")
-    def _serialize_contexts(self, v: tuple[ErrorContext, ...]) -> list[JsonDict]:
+    def _serialize_contexts(self, v: tuple[ErrorContext, ...]) -> list[JsonMapping]:
         """Serialize tuple of contexts to list of dicts."""
         return [ctx.model_dump() for ctx in v]
     
@@ -260,11 +353,11 @@ def trace_from_exc(exc: Exception, *, operation: str = "", code: str | None = No
     return t.with_operation(operation) if operation else t
 
 
-def validate_context(data: JsonDict) -> ErrorContext:
+def validate_context(data: JsonMapping) -> ErrorContext:
     """Validate dict as ErrorContext (use when validation is needed)."""
     return _ErrorContextAdapter.validate_python(data)
 
 
-def validate_trace(data: JsonDict) -> ErrorTrace:
+def validate_trace(data: JsonMapping) -> ErrorTrace:
     """Validate dict as ErrorTrace (use when validation is needed)."""
     return _ErrorTraceAdapter.validate_python(data)

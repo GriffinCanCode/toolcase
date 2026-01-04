@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Callable, Protocol, TypeVar, runtime_checkable
 import msgpack
 import orjson
 
-from toolcase.foundation.errors import Err, ErrorTrace, JsonDict, Ok, Result
+from toolcase.foundation.errors import CacheStatsDict, Err, ErrorTrace, JsonDict, JsonMapping, Ok, Result
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -69,7 +69,7 @@ class ToolCache(ABC):
     """Abstract base for sync tool caches."""
     
     @abstractmethod
-    def get(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
+    def get(self, tool_name: str, params: BaseModel | JsonMapping) -> str | None:
         """Get cached result if exists and not expired."""
         ...
     
@@ -77,7 +77,7 @@ class ToolCache(ABC):
     def set(
         self,
         tool_name: str,
-        params: BaseModel | JsonDict,
+        params: BaseModel | JsonMapping,
         value: str,
         ttl: float | None = None,
     ) -> None:
@@ -85,7 +85,7 @@ class ToolCache(ABC):
         ...
     
     @abstractmethod
-    def invalidate(self, tool_name: str, params: BaseModel | JsonDict) -> bool:
+    def invalidate(self, tool_name: str, params: BaseModel | JsonMapping) -> bool:
         """Remove specific entry from cache."""
         ...
     
@@ -110,25 +110,19 @@ class ToolCache(ABC):
         ...
     
     @staticmethod
-    def make_key(tool_name: str, params: BaseModel | JsonDict) -> str:
+    def make_key(tool_name: str, params: BaseModel | JsonMapping) -> str:
         """Generate cache key from tool name and parameters."""
-        if hasattr(params, "model_dump"):
-            params_dict = params.model_dump(mode="json")  # type: ignore[union-attr]
-        else:
-            params_dict = params
-        
+        params_dict = params.model_dump(mode="json") if hasattr(params, "model_dump") else dict(params)
         # Sort keys for consistent hashing (orjson sorts by default)
         params_bytes = orjson.dumps(params_dict, option=orjson.OPT_SORT_KEYS | orjson.OPT_NON_STR_KEYS)
-        params_hash = hashlib.md5(params_bytes, usedforsecurity=False).hexdigest()[:12]
-        
-        return f"{tool_name}:{params_hash}"
+        return f"{tool_name}:{hashlib.md5(params_bytes, usedforsecurity=False).hexdigest()[:12]}"
 
 
 class AsyncToolCache(ABC):
     """Abstract base for async tool caches."""
     
     @abstractmethod
-    async def aget(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
+    async def aget(self, tool_name: str, params: BaseModel | JsonMapping) -> str | None:
         """Get cached result if exists and not expired."""
         ...
     
@@ -136,7 +130,7 @@ class AsyncToolCache(ABC):
     async def aset(
         self,
         tool_name: str,
-        params: BaseModel | JsonDict,
+        params: BaseModel | JsonMapping,
         value: str,
         ttl: float | None = None,
     ) -> None:
@@ -144,7 +138,7 @@ class AsyncToolCache(ABC):
         ...
     
     @abstractmethod
-    async def ainvalidate(self, tool_name: str, params: BaseModel | JsonDict) -> bool:
+    async def ainvalidate(self, tool_name: str, params: BaseModel | JsonMapping) -> bool:
         """Remove specific entry from cache."""
         ...
     
@@ -169,7 +163,7 @@ class AsyncToolCache(ABC):
         ...
     
     @staticmethod
-    def make_key(tool_name: str, params: BaseModel | JsonDict) -> str:
+    def make_key(tool_name: str, params: BaseModel | JsonMapping) -> str:
         """Generate cache key from tool name and parameters."""
         return ToolCache.make_key(tool_name, params)
 
@@ -199,7 +193,7 @@ class MemoryCache(ToolCache):
         self._max_entries = max_entries
         self._lock = threading.RLock()  # RLock allows reentrant calls (e.g. set -> _evict)
     
-    def get(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
+    def get(self, tool_name: str, params: BaseModel | JsonMapping) -> str | None:
         key = self.make_key(tool_name, params)
         with self._lock:
             if not (entry := self._cache.get(key)):
@@ -212,7 +206,7 @@ class MemoryCache(ToolCache):
     def set(
         self,
         tool_name: str,
-        params: BaseModel | JsonDict,
+        params: BaseModel | JsonMapping,
         value: str,
         ttl: float | None = None,
     ) -> None:
@@ -220,12 +214,9 @@ class MemoryCache(ToolCache):
         with self._lock:
             if len(self._cache) >= self._max_entries:
                 self._evict_unlocked()
-            self._cache[key] = CacheEntry(
-                value=value,
-                expires_at=time.time() + (ttl or self._default_ttl),
-            )
+            self._cache[key] = CacheEntry(value=value, expires_at=time.time() + (ttl or self._default_ttl))
     
-    def invalidate(self, tool_name: str, params: BaseModel | JsonDict) -> bool:
+    def invalidate(self, tool_name: str, params: BaseModel | JsonMapping) -> bool:
         with self._lock:
             return self._cache.pop(self.make_key(tool_name, params), None) is not None
     
@@ -258,7 +249,7 @@ class MemoryCache(ToolCache):
         with self._lock:
             return len(self._cache)
     
-    def stats(self) -> JsonDict:
+    def stats(self) -> CacheStatsDict:
         """Get cache statistics for monitoring."""
         with self._lock:
             expired = sum(1 for v in self._cache.values() if v.expired)
@@ -306,7 +297,7 @@ def reset_cache() -> None:
 def cache_through(
     cache: ToolCache,
     tool_name: str,
-    params: BaseModel | JsonDict,
+    params: BaseModel | JsonMapping,
     operation: Callable[[], T],
     *,
     ttl: float | None = None,
@@ -352,7 +343,7 @@ def cache_through(
 async def cache_through_async(
     cache: ToolCache,
     tool_name: str,
-    params: BaseModel | JsonDict,
+    params: BaseModel | JsonMapping,
     operation: Callable[[], T],
     *,
     ttl: float | None = None,

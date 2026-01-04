@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from toolcase.foundation.errors import JsonDict, JsonValue
+from toolcase.foundation.errors import JsonDict, JsonValue, StreamEventDict
 
 from .codec import Codec, fast_encode, get_codec
 from .stream import StreamChunk, StreamEvent, StreamEventKind
@@ -120,7 +120,7 @@ class BinaryAdapter:
     def format_chunk(self, chunk: StreamChunk, tool_name: str) -> bytes:
         return StreamEvent(kind=StreamEventKind.CHUNK, tool_name=tool_name, data=chunk).to_bytes(self._codec)
     
-    def decode_event(self, data: bytes) -> JsonDict:
+    def decode_event(self, data: bytes) -> StreamEventDict:
         """Decode received binary data."""
         return self._codec.decode(data)  # type: ignore[return-value]
 

@@ -32,14 +32,24 @@ from .tool import (
     try_tool_operation_async,
 )
 from .types import (
+    CacheStatsDict,
+    CircuitStateDict,
     ErrorContext,
     ErrorTrace,
+    ErrorTraceSerialized,
     JsonArray,
     JsonDict,
+    JsonMapping,
     JsonObject,
     JsonPrimitive,
     JsonValue,
+    RequestRecordDict,
     ResultT,
+    SpanDict,
+    SpanEventDict,
+    SpanToolDict,
+    StreamChunkDict,
+    StreamEventDict,
     TypeViolation,
     TypeViolationError,
     as_json_dict,
@@ -71,7 +81,10 @@ __all__ = [
     # Collection ops
     "sequence", "traverse", "collect_results",
     # JSON types
-    "JsonPrimitive", "JsonValue", "JsonArray", "JsonObject", "JsonDict",
+    "JsonPrimitive", "JsonValue", "JsonArray", "JsonObject", "JsonDict", "JsonMapping",
+    # TypedDicts for well-known structures
+    "CircuitStateDict", "CacheStatsDict", "SpanDict", "SpanEventDict", "SpanToolDict",
+    "StreamChunkDict", "StreamEventDict", "RequestRecordDict", "ErrorTraceSerialized",
     # Runtime type checking (beartype)
     "typechecked", "TypeViolation", "TypeViolationError", "is_json_value", "is_json_dict", "as_json_value", "as_json_dict",
 ]

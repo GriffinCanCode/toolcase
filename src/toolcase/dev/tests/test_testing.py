@@ -288,7 +288,7 @@ def test_mock_response_ok():
 def test_mock_response_text():
     """Test MockResponse text property."""
     assert MockResponse(data="hello").text == "hello"
-    assert MockResponse(data={"key": "value"}).text == '{"key": "value"}'
+    assert MockResponse(data={"key": "value"}).text == '{"key":"value"}'  # orjson compact format
     assert MockResponse(data=None).text == ""
 
 

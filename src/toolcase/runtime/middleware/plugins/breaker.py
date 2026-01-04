@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from pydantic import BaseModel
 
 from toolcase.foundation.errors import (
+    CircuitStateDict,
     ErrorCode,
     ErrorTrace,
     JsonDict,
@@ -56,13 +57,13 @@ class CircuitState:
     last_failure: float = 0.0
     last_state_change: float = field(default_factory=time.time)
     
-    def to_dict(self) -> JsonDict:
+    def to_dict(self) -> CircuitStateDict:
         """Serialize for distributed storage."""
         return {"state": self.state, "failures": self.failures, "successes": self.successes,
                 "last_failure": self.last_failure, "last_state_change": self.last_state_change}
     
     @classmethod
-    def from_dict(cls, d: JsonDict) -> CircuitState:
+    def from_dict(cls, d: CircuitStateDict) -> CircuitState:
         """Deserialize from distributed storage."""
         return cls(State(d["state"]), int(d["failures"]), int(d["successes"]),
                    float(d["last_failure"]), float(d["last_state_change"]))
@@ -248,9 +249,10 @@ class CircuitBreakerMiddleware:
             for key in self.store.keys():
                 self.store.delete(key)
     
-    def stats(self) -> dict[str, JsonDict]:
+    def stats(self) -> dict[str, CircuitStateDict]:
         """Get statistics for all circuits (for monitoring)."""
         return {
-            key: (circuit.to_dict() if (circuit := self.store.get(key)) else {})
+            key: circuit.to_dict()
             for key in self.store.keys()
+            if (circuit := self.store.get(key))
         }

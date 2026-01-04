@@ -223,7 +223,7 @@ class TestTransportAdapters:
         formatted = sse_adapter.format_event(event)
         
         assert "event: start" in formatted
-        assert '"tool": "test_tool"' in formatted
+        assert '"tool":"test_tool"' in formatted  # orjson compact format
         assert formatted.endswith("\n\n")
     
     def test_sse_adapter_formats_chunk(self) -> None:
@@ -232,8 +232,8 @@ class TestTransportAdapters:
         formatted = sse_adapter.format_chunk(chunk, "my_tool")
         
         assert "event: chunk" in formatted
-        assert '"content": "Hello"' in formatted
-        assert '"index": 0' in formatted
+        assert '"content":"Hello"' in formatted  # orjson compact format
+        assert '"index":0' in formatted  # orjson compact format
     
     def test_ws_adapter_formats_as_json(self) -> None:
         """WebSocket adapter formats as JSON."""
