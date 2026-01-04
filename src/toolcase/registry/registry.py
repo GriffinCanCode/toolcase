@@ -4,16 +4,20 @@ The registry provides:
 - Tool registration and lookup by name
 - Category-based filtering
 - Formatted tool descriptions for LLM prompts
+- Middleware pipeline for cross-cutting concerns
 - Integration adapters (e.g., LangChain)
 """
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, TypeVar
 
 from pydantic import BaseModel
 
 from ..core import BaseTool, ToolMetadata
+from ..middleware import Context, Middleware, Next, compose
 
 if TYPE_CHECKING:
     pass
@@ -25,21 +29,22 @@ T = TypeVar("T", bound=BaseTool[BaseModel])
 class ToolRegistry:
     """Central registry for all available tools.
     
-    Provides tool discovery, filtering, and format conversion for agent use.
+    Provides tool discovery, filtering, middleware pipeline, and format
+    conversion for agent use.
     
     Example:
         >>> registry = ToolRegistry()
         >>> registry.register(MyTool())
-        >>> registry.get("my_tool")
-        <MyTool ...>
-        >>> registry.list_tools()
-        [ToolMetadata(name='my_tool', ...)]
+        >>> registry.use(LoggingMiddleware())
+        >>> result = await registry.execute("my_tool", {"query": "test"})
     """
     
-    __slots__ = ("_tools",)
+    __slots__ = ("_tools", "_middleware", "_chain")
     
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool[BaseModel]] = {}
+        self._middleware: list[Middleware] = []
+        self._chain: Next | None = None
     
     def register(self, tool: BaseTool[BaseModel]) -> None:
         """Register a tool instance with validation."""
@@ -71,8 +76,91 @@ class ToolRegistry:
     def __len__(self) -> int:
         return len(self._tools)
     
-    def __iter__(self):
+    def __iter__(self) -> Iterator[BaseTool[BaseModel]]:
         return iter(self._tools.values())
+    
+    # ─────────────────────────────────────────────────────────────────
+    # Middleware
+    # ─────────────────────────────────────────────────────────────────
+    
+    def use(self, middleware: Middleware) -> None:
+        """Add middleware to the execution pipeline.
+        
+        Middleware is applied in order: first added = outermost (runs first).
+        Invalidates the compiled chain, forcing recompilation on next execute.
+        
+        Args:
+            middleware: Middleware instance implementing the Middleware protocol
+        
+        Example:
+            >>> registry.use(LoggingMiddleware())
+            >>> registry.use(RateLimitMiddleware(max_calls=10, window_seconds=60))
+        """
+        self._middleware.append(middleware)
+        self._chain = None  # Invalidate cached chain
+    
+    def _get_chain(self) -> Next:
+        """Get or compile the middleware chain."""
+        if self._chain is None:
+            self._chain = compose(self._middleware)
+        return self._chain
+    
+    async def execute(
+        self,
+        name: str,
+        params: dict[str, object] | BaseModel,
+        *,
+        ctx: Context | None = None,
+    ) -> str:
+        """Execute a tool through the middleware pipeline.
+        
+        This is the primary execution method when middleware is configured.
+        Validates params, builds context, and runs through the chain.
+        
+        Args:
+            name: Tool name to execute
+            params: Parameters as dict or BaseModel
+            ctx: Optional pre-built context (default: new Context)
+        
+        Returns:
+            Tool result string
+        
+        Raises:
+            KeyError: If tool not found
+            ValidationError: If params fail validation
+        
+        Example:
+            >>> result = await registry.execute("search", {"query": "python"})
+        """
+        tool = self._tools[name]
+        
+        # Validate params if dict
+        if isinstance(params, dict):
+            validated = tool.params_schema(**params)
+        else:
+            validated = params
+        
+        # Build context
+        context = ctx or Context()
+        context["tool_name"] = name
+        
+        # Execute through chain
+        chain = self._get_chain()
+        return await chain(tool, validated, context)
+    
+    def execute_sync(
+        self,
+        name: str,
+        params: dict[str, object] | BaseModel,
+        *,
+        ctx: Context | None = None,
+    ) -> str:
+        """Synchronous wrapper for execute().
+        
+        For sync callers that need middleware support. Uses asyncio.run()
+        internally, so cannot be called from within an async context.
+        """
+        return asyncio.run(self.execute(name, params, ctx=ctx))
     
     # ─────────────────────────────────────────────────────────────────
     # Querying
@@ -130,8 +218,10 @@ class ToolRegistry:
             self.register(tool)
     
     def clear(self) -> None:
-        """Remove all registered tools."""
+        """Remove all registered tools and middleware."""
         self._tools.clear()
+        self._middleware.clear()
+        self._chain = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
