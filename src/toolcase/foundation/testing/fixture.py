@@ -8,9 +8,10 @@ Provides:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import TYPE_CHECKING, Callable, Generic, ParamSpec, TypeVar, overload
+from typing import TYPE_CHECKING, Callable, ParamSpec, TypeVar, overload
 
 from toolcase.foundation.errors import JsonDict, JsonValue
 
@@ -28,14 +29,8 @@ P = ParamSpec("P")
 
 @overload
 def fixture(func: Callable[P, T]) -> Callable[P, T]: ...
-
 @overload
-def fixture(
-    *,
-    scope: str = "function",
-    autouse: bool = False,
-) -> Callable[[Callable[P, T]], Callable[P, T]]: ...
-
+def fixture(*, scope: str = "function", autouse: bool = False) -> Callable[[Callable[P, T]], Callable[P, T]]: ...
 
 def fixture(
     func: Callable[P, T] | None = None,
@@ -78,16 +73,9 @@ def fixture(
         # Fallback: just mark and return function
         fn._fixture_scope = scope  # type: ignore[attr-defined]
         fn._fixture_autouse = autouse  # type: ignore[attr-defined]
-        
-        @wraps(fn)
-        def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
-            return fn(*args, **kwargs)
-        
-        return wrapper  # type: ignore[return-value]
+        return wraps(fn)(lambda *a, **kw: fn(*a, **kw))  # type: ignore[return-value]
     
-    if func is not None:
-        return decorator(func)
-    return decorator
+    return decorator(func) if func else decorator
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -116,12 +104,7 @@ class MockResponse:
     @property
     def text(self) -> str:
         """Return data as string."""
-        if isinstance(self.data, str):
-            return self.data
-        if self.data is not None:
-            import json
-            return json.dumps(self.data)
-        return ""
+        return self.data if isinstance(self.data, str) else json.dumps(self.data) if self.data else ""
 
 
 @dataclass
@@ -164,58 +147,43 @@ class MockAPI:
         """Record a request."""
         self.requests.append({"method": method, "endpoint": endpoint, **kwargs})
     
+    def _wrap_response(self, resp: str | JsonDict | MockResponse) -> MockResponse:
+        """Wrap raw response in MockResponse if needed."""
+        return resp if isinstance(resp, MockResponse) else MockResponse(status=self.default_status, data=resp)
+    
     def _get_response(self, endpoint: str) -> MockResponse:
         """Get response for endpoint."""
         if endpoint in self.responses:
-            resp = self.responses[endpoint]
-            if isinstance(resp, MockResponse):
-                return resp
-            return MockResponse(status=self.default_status, data=resp)
-        
-        # Check for pattern matches (simple glob)
-        for pattern, resp in self.responses.items():
-            if '*' in pattern:
-                prefix = pattern.split('*')[0]
-                if endpoint.startswith(prefix):
-                    if isinstance(resp, MockResponse):
-                        return resp
-                    return MockResponse(status=self.default_status, data=resp)
-        
+            return self._wrap_response(self.responses[endpoint])
+        for pat, resp in self.responses.items():
+            if '*' in pat and endpoint.startswith(pat.split('*')[0]):
+                return self._wrap_response(resp)
         return MockResponse(status=self.default_status, data=self.default_response)
     
-    async def _delay(self, response: MockResponse) -> None:
-        """Apply simulated delay."""
-        if response.delay_ms > 0:
+    async def _request(self, method: str, endpoint: str, **kwargs: JsonValue) -> MockResponse:
+        """Execute a simulated request with recording and delay."""
+        self._record(method, endpoint, **kwargs)
+        resp = self._get_response(endpoint)
+        if resp.delay_ms > 0:
             import asyncio
-            await asyncio.sleep(response.delay_ms / 1000)
+            await asyncio.sleep(resp.delay_ms / 1000)
+        return resp
     
     async def get(self, endpoint: str, **params: JsonValue) -> MockResponse:
         """Simulate GET request."""
-        self._record("GET", endpoint, params=dict(params))
-        response = self._get_response(endpoint)
-        await self._delay(response)
-        return response
+        return await self._request("GET", endpoint, params=dict(params))
     
     async def post(self, endpoint: str, data: JsonDict | None = None, **kwargs: JsonValue) -> MockResponse:
         """Simulate POST request."""
-        self._record("POST", endpoint, data=data, **kwargs)
-        response = self._get_response(endpoint)
-        await self._delay(response)
-        return response
+        return await self._request("POST", endpoint, data=data, **kwargs)
     
     async def put(self, endpoint: str, data: JsonDict | None = None, **kwargs: JsonValue) -> MockResponse:
         """Simulate PUT request."""
-        self._record("PUT", endpoint, data=data, **kwargs)
-        response = self._get_response(endpoint)
-        await self._delay(response)
-        return response
+        return await self._request("PUT", endpoint, data=data, **kwargs)
     
     async def delete(self, endpoint: str, **kwargs: JsonValue) -> MockResponse:
         """Simulate DELETE request."""
-        self._record("DELETE", endpoint, **kwargs)
-        response = self._get_response(endpoint)
-        await self._delay(response)
-        return response
+        return await self._request("DELETE", endpoint, **kwargs)
     
     def clear(self) -> None:
         """Clear recorded requests."""
@@ -225,17 +193,9 @@ class MockAPI:
         """Set response for endpoint."""
         self.responses[endpoint] = response
     
-    def set_error(
-        self,
-        endpoint: str,
-        status: int = 500,
-        message: str = "Internal Server Error",
-    ) -> None:
+    def set_error(self, endpoint: str, status: int = 500, message: str = "Internal Server Error") -> None:
         """Configure endpoint to return error."""
-        self.responses[endpoint] = MockResponse(
-            status=status,
-            data={"error": message},
-        )
+        self.responses[endpoint] = MockResponse(status=status, data={"error": message})
     
     def assert_called(self) -> None:
         """Assert API was called at least once."""
@@ -244,10 +204,8 @@ class MockAPI:
     
     def assert_endpoint_called(self, endpoint: str) -> None:
         """Assert specific endpoint was called."""
-        for req in self.requests:
-            if req["endpoint"] == endpoint:
-                return
-        raise AssertionError(f"Endpoint '{endpoint}' was not called")
+        if not any(req["endpoint"] == endpoint for req in self.requests):
+            raise AssertionError(f"Endpoint '{endpoint}' was not called")
 
 
 # ═════════════════════════════════════════════════════════════════════════════

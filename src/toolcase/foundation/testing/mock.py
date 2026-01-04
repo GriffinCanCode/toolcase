@@ -47,7 +47,7 @@ class MockTool(Generic[T]):
     
     @property
     def called(self) -> bool:
-        return self.call_count > 0
+        return bool(self.invocations)
     
     @property
     def last_call(self) -> Invocation | None:
@@ -62,57 +62,36 @@ class MockTool(Generic[T]):
             raise AssertionError(f"Tool called {self.call_count} times")
     
     def assert_called_with(self, **kwargs: object) -> None:
-        if not self.called:
+        if not (last := self.last_call):
             raise AssertionError("Expected tool to be called")
-        last = self.last_call
-        assert last is not None
-        for key, expected in kwargs.items():
-            if key not in last.params:
-                raise AssertionError(f"Parameter '{key}' not in call")
-            if last.params[key] != expected:
-                raise AssertionError(
-                    f"'{key}': expected {expected!r}, got {last.params[key]!r}"
-                )
+        for k, v in kwargs.items():
+            if k not in last.params:
+                raise AssertionError(f"Parameter '{k}' not in call")
+            if last.params[k] != v:
+                raise AssertionError(f"'{k}': expected {v!r}, got {last.params[k]!r}")
     
     def _get_tool_name(self) -> str:
         if isinstance(self.original, type):
-            meta = getattr(self.original, 'metadata', None)
-            return meta.name if meta else 'mock_tool'
+            return meta.name if (meta := getattr(self.original, 'metadata', None)) else 'mock_tool'
         return self.original.metadata.name
     
+    def _make_err(self, message: str, code: ErrorCode) -> ToolResult:
+        """Create error result with trace."""
+        return Err(ErrorTrace(message=message, error_code=code.value, recoverable=True).with_operation(f"tool:{self._get_tool_name()}"))
+    
     def _execute(self, params: JsonDict) -> ToolResult:
-        result: ToolResult
         exc: Exception | None = None
-        tool_name = self._get_tool_name()
-        
         try:
             if self.raises is not None:
-                exc_to_raise = self.raises() if isinstance(self.raises, type) else self.raises
-                raise exc_to_raise
-            
-            if self.side_effect is not None:
-                result = Ok(self.side_effect(params))
-            elif self.return_value is not None:
-                result = Ok(self.return_value)
-            elif self.error_code is not None:
-                trace = ErrorTrace(
-                    message=f"Mock error: {self.error_code}",
-                    error_code=self.error_code.value,
-                    recoverable=True,
-                ).with_operation(f"tool:{tool_name}")
-                result = Err(trace)
-            else:
-                result = Ok("mock result")
+                raise self.raises() if isinstance(self.raises, type) else self.raises
+            result = (
+                Ok(self.side_effect(params)) if self.side_effect is not None
+                else Ok(self.return_value) if self.return_value is not None
+                else self._make_err(f"Mock error: {self.error_code}", self.error_code) if self.error_code is not None
+                else Ok("mock result")
+            )
         except Exception as e:
-            exc = e
-            code = classify_exception(e)
-            trace = ErrorTrace(
-                message=str(e),
-                error_code=code.value,
-                recoverable=True,
-            ).with_operation(f"tool:{tool_name}")
-            result = Err(trace)
-        
+            exc, result = e, self._make_err(str(e), classify_exception(e))
         self.invocations.append(Invocation(params=params, result=result, exception=exc))
         return result
 
@@ -129,33 +108,19 @@ def mock_tool(
     side_effect: Callable[[JsonDict], str] | None = None,
     error_code: ErrorCode | None = None,
 ) -> Generator[MockTool[T], None, None]:
-    """Context manager for mocking tool behavior.
-    
-    Replaces tool execution with controlled responses for testing.
-    Records all invocations for verification.
-    """
-    mock = MockTool(
-        original=tool,
-        return_value=return_value,
-        raises=raises,
-        side_effect=side_effect,
-        error_code=error_code,
-    )
-    
+    """Context manager for mocking tool behavior. Replaces tool execution with controlled responses for testing and records all invocations for verification."""
+    mock: MockTool[T] = MockTool(original=tool, return_value=return_value, raises=raises, side_effect=side_effect, error_code=error_code)
     tool_name = mock._get_tool_name()
-    tool_cls = type(tool) if not isinstance(tool, type) else tool
+    tool_cls = tool if isinstance(tool, type) else type(tool)
     
     # Store original methods
-    orig_run = tool_cls._run_result
-    orig_async = tool_cls._async_run_result
+    orig_run, orig_async = tool_cls._run_result, tool_cls._async_run_result
     
     def patched_run(self: BaseTool[BaseModel], params: BaseModel) -> ToolResult:
-        m = _active_mocks.get(self.metadata.name)
-        return m._execute(params.model_dump()) if m else orig_run(self, params)
+        return m._execute(params.model_dump()) if (m := _active_mocks.get(self.metadata.name)) else orig_run(self, params)
     
     async def patched_async(self: BaseTool[BaseModel], params: BaseModel) -> ToolResult:
-        m = _active_mocks.get(self.metadata.name)
-        return m._execute(params.model_dump()) if m else await orig_async(self, params)
+        return m._execute(params.model_dump()) if (m := _active_mocks.get(self.metadata.name)) else await orig_async(self, params)
     
     tool_cls._run_result = patched_run  # type: ignore[method-assign]
     tool_cls._async_run_result = patched_async  # type: ignore[method-assign]
@@ -165,5 +130,4 @@ def mock_tool(
         yield mock
     finally:
         _active_mocks.pop(tool_name, None)
-        tool_cls._run_result = orig_run  # type: ignore[method-assign]
-        tool_cls._async_run_result = orig_async  # type: ignore[method-assign]
+        tool_cls._run_result, tool_cls._async_run_result = orig_run, orig_async  # type: ignore[method-assign]

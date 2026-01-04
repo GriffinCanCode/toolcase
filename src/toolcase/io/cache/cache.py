@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Protocol, TypeVar, runtime_checkable
 
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, Result
+from toolcase.foundation.errors import Err, ErrorTrace, JsonDict, Ok, Result
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -121,8 +121,7 @@ class MemoryCache(ToolCache):
     def get(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
         key = self.make_key(tool_name, params)
         with self._lock:
-            entry = self._cache.get(key)
-            if entry is None:
+            if not (entry := self._cache.get(key)):
                 return None
             if entry.expired:
                 del self._cache[key]
@@ -146,19 +145,15 @@ class MemoryCache(ToolCache):
             )
     
     def invalidate(self, tool_name: str, params: BaseModel | JsonDict) -> bool:
-        key = self.make_key(tool_name, params)
         with self._lock:
-            if key in self._cache:
-                del self._cache[key]
-                return True
-            return False
+            return self._cache.pop(self.make_key(tool_name, params), None) is not None
     
     def invalidate_tool(self, tool_name: str) -> int:
         prefix = f"{tool_name}:"
         with self._lock:
             keys = [k for k in self._cache if k.startswith(prefix)]
-            for key in keys:
-                del self._cache[key]
+            for k in keys:
+                del self._cache[k]
             return len(keys)
     
     def clear(self) -> None:
@@ -167,16 +162,11 @@ class MemoryCache(ToolCache):
     
     def _evict_unlocked(self) -> None:
         """Remove expired entries, then oldest if still over capacity. Caller must hold lock."""
-        # First pass: remove expired
-        expired = [k for k, v in self._cache.items() if v.expired]
-        for key in expired:
-            del self._cache[key]
-        
-        # If still over capacity, remove oldest quarter
+        for k in [k for k, v in self._cache.items() if v.expired]:
+            del self._cache[k]
         if len(self._cache) >= self._max_entries:
-            sorted_keys = sorted(self._cache, key=lambda k: self._cache[k].expires_at)
-            for key in sorted_keys[: self._max_entries // 4]:
-                del self._cache[key]
+            for k in sorted(self._cache, key=lambda k: self._cache[k].expires_at)[:self._max_entries // 4]:
+                del self._cache[k]
     
     @property
     def size(self) -> int:
@@ -257,27 +247,19 @@ def cache_through(
         ... )
         >>> output = result.unwrap_or("fallback")
     """
-    # Check cache
-    cached = cache.get(tool_name, params)
-    if cached is not None:
+    if (cached := cache.get(tool_name, params)) is not None:
         return Ok(cached)  # type: ignore[return-value]
-    
-    # Execute operation with exception handling
     try:
         result = operation()
     except Exception as e:
         from toolcase.foundation.errors import classify_exception
-        trace = ErrorTrace(
+        return Err(ErrorTrace(
             message=str(e),
             error_code=classify_exception(e).value,
             recoverable=True,
-        ).with_operation(f"cache_through:{tool_name}")
-        return Err(trace)
-    
-    # Cache successful result (only strings are cached)
+        ).with_operation(f"cache_through:{tool_name}"))
     if isinstance(result, str):
         cache.set(tool_name, params, result, ttl)
-    
     return Ok(result)
 
 
@@ -304,29 +286,17 @@ async def cache_through_async(
         Result[T, ErrorTrace] with cached or computed value
     """
     import asyncio
-    
-    # Check cache
-    cached = cache.get(tool_name, params)
-    if cached is not None:
+    if (cached := cache.get(tool_name, params)) is not None:
         return Ok(cached)  # type: ignore[return-value]
-    
-    # Execute operation with exception handling
     try:
-        if asyncio.iscoroutinefunction(operation):
-            result = await operation()  # type: ignore[misc]
-        else:
-            result = await asyncio.to_thread(operation)
+        result = await operation() if asyncio.iscoroutinefunction(operation) else await asyncio.to_thread(operation)  # type: ignore[misc]
     except Exception as e:
         from toolcase.foundation.errors import classify_exception
-        trace = ErrorTrace(
+        return Err(ErrorTrace(
             message=str(e),
             error_code=classify_exception(e).value,
             recoverable=True,
-        ).with_operation(f"cache_through:{tool_name}")
-        return Err(trace)
-    
-    # Cache successful result (only strings are cached)
+        ).with_operation(f"cache_through:{tool_name}"))
     if isinstance(result, str):
         cache.set(tool_name, params, result, ttl)
-    
     return Ok(result)

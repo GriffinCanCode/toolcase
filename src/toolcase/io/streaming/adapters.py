@@ -35,53 +35,29 @@ class StreamAdapter(Protocol):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SSEAdapter:
-    """Format streams as Server-Sent Events.
-    
-    SSE format:
-        event: <event_type>
-        data: <json_payload>
-        
-    Perfect for browser EventSource consumption.
-    """
+    """Format streams as Server-Sent Events. SSE format: event: <type>\ndata: <json>\n\n"""
     
     __slots__ = ()
     
     def format_event(self, event: StreamEvent) -> str:
         """Format as SSE event."""
-        data = json.dumps(event.to_dict())
-        return f"event: {event.kind}\ndata: {data}\n\n"
+        return f"event: {event.kind}\ndata: {json.dumps(event.to_dict())}\n\n"
     
     def format_chunk(self, chunk: StreamChunk, tool_name: str) -> str:
         """Format chunk as SSE data event."""
-        event = StreamEvent(
-            kind=StreamEventKind.CHUNK,
-            tool_name=tool_name,
-            data=chunk,
-        )
-        return self.format_event(event)
+        return self.format_event(StreamEvent(kind=StreamEventKind.CHUNK, tool_name=tool_name, data=chunk))
     
     def format_start(self, tool_name: str) -> str:
         """Format stream start event."""
-        event = StreamEvent(kind=StreamEventKind.START, tool_name=tool_name)
-        return self.format_event(event)
+        return self.format_event(StreamEvent(kind=StreamEventKind.START, tool_name=tool_name))
     
     def format_complete(self, tool_name: str, accumulated: str) -> str:
         """Format stream complete event."""
-        event = StreamEvent(
-            kind=StreamEventKind.COMPLETE,
-            tool_name=tool_name,
-            accumulated=accumulated,
-        )
-        return self.format_event(event)
+        return self.format_event(StreamEvent(kind=StreamEventKind.COMPLETE, tool_name=tool_name, accumulated=accumulated))
     
     def format_error(self, tool_name: str, error: str) -> str:
         """Format error event."""
-        event = StreamEvent(
-            kind=StreamEventKind.ERROR,
-            tool_name=tool_name,
-            error=error,
-        )
-        return self.format_event(event)
+        return self.format_event(StreamEvent(kind=StreamEventKind.ERROR, tool_name=tool_name, error=error))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,11 +65,7 @@ class SSEAdapter:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class WebSocketAdapter:
-    """Format streams for WebSocket delivery.
-    
-    Uses JSON messages with explicit type field for client routing.
-    Compatible with any WebSocket library (websockets, FastAPI, etc.)
-    """
+    """Format streams for WebSocket delivery. Uses JSON messages with explicit type field for client routing."""
     
     __slots__ = ()
     
@@ -103,17 +75,11 @@ class WebSocketAdapter:
     
     def format_chunk(self, chunk: StreamChunk, tool_name: str) -> str:
         """Format chunk as JSON message."""
-        event = StreamEvent(
-            kind=StreamEventKind.CHUNK,
-            tool_name=tool_name,
-            data=chunk,
-        )
-        return event.to_json()
+        return StreamEvent(kind=StreamEventKind.CHUNK, tool_name=tool_name, data=chunk).to_json()
     
     def format_message(self, tool_name: str, kind: StreamEventKind, **kwargs: JsonValue) -> str:
         """Create a formatted WebSocket message."""
-        msg: JsonDict = {"kind": kind.value, "tool": tool_name, **kwargs}
-        return json.dumps(msg)
+        return json.dumps({"kind": kind.value, "tool": tool_name, **kwargs})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,26 +87,17 @@ class WebSocketAdapter:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class JSONLinesAdapter:
-    """Format streams as newline-delimited JSON (NDJSON).
-    
-    Each line is a complete JSON object - simple to parse and
-    works well with standard streaming HTTP responses.
-    """
+    """Format streams as newline-delimited JSON (NDJSON). Each line is a complete JSON object."""
     
     __slots__ = ()
     
     def format_event(self, event: StreamEvent) -> str:
         """Format as JSON line."""
-        return event.to_json() + "\n"
+        return f"{event.to_json()}\n"
     
     def format_chunk(self, chunk: StreamChunk, tool_name: str) -> str:
         """Format chunk as JSON line."""
-        event = StreamEvent(
-            kind=StreamEventKind.CHUNK,
-            tool_name=tool_name,
-            data=chunk,
-        )
-        return event.to_json() + "\n"
+        return self.format_event(StreamEvent(kind=StreamEventKind.CHUNK, tool_name=tool_name, data=chunk))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,56 +118,16 @@ async def adapt_stream(
     tool_name: str,
     adapter: SSEAdapter | WebSocketAdapter | JSONLinesAdapter,
 ) -> AsyncIterator[str]:
-    """Transform a raw stream into formatted transport events.
-    
-    Wraps chunks in proper start/chunk/complete event sequence
-    with the specified adapter format.
-    
-    Args:
-        stream: Raw async stream yielding strings or StreamChunks
-        tool_name: Name of the streaming tool
-        adapter: Transport adapter to use for formatting
-    
-    Yields:
-        Formatted strings ready for transport
-    
-    Example:
-        >>> async for msg in adapt_stream(tool_stream, "llm_gen", sse_adapter):
-        ...     await response.write(msg)
-    """
-    # Emit start
-    yield adapter.format_event(
-        StreamEvent(kind=StreamEventKind.START, tool_name=tool_name)
-    )
-    
-    accumulated: list[str] = []
-    index = 0
-    
+    """Transform a raw stream into formatted transport events with start/chunk/complete sequence."""
+    yield adapter.format_event(StreamEvent(kind=StreamEventKind.START, tool_name=tool_name))
+    accumulated, idx = [], 0
     try:
         async for item in stream:
-            # Normalize to StreamChunk
-            if isinstance(item, str):
-                item = StreamChunk(content=item, index=index)
-            
-            accumulated.append(item.content)
-            yield adapter.format_chunk(item, tool_name)
-            index += 1
-        
-        # Emit complete
-        yield adapter.format_event(
-            StreamEvent(
-                kind=StreamEventKind.COMPLETE,
-                tool_name=tool_name,
-                accumulated="".join(accumulated),
-            )
-        )
+            chunk = StreamChunk(content=item, index=idx) if isinstance(item, str) else item
+            accumulated.append(chunk.content)
+            yield adapter.format_chunk(chunk, tool_name)
+            idx += 1
+        yield adapter.format_event(StreamEvent(kind=StreamEventKind.COMPLETE, tool_name=tool_name, accumulated="".join(accumulated)))
     except Exception as e:
-        # Emit error
-        yield adapter.format_event(
-            StreamEvent(
-                kind=StreamEventKind.ERROR,
-                tool_name=tool_name,
-                error=str(e),
-            )
-        )
+        yield adapter.format_event(StreamEvent(kind=StreamEventKind.ERROR, tool_name=tool_name, error=str(e)))
         raise

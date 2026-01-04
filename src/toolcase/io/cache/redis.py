@@ -109,8 +109,7 @@ class RedisCache(ToolCache):
         return f"{self._prefix}{self.make_key(tool_name, params)}"
     
     def get(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
-        key = self._key(tool_name, params)
-        val = self._client.get(key)
+        val = self._client.get(self._key(tool_name, params))
         return val.decode() if val else None
     
     def set(
@@ -120,23 +119,19 @@ class RedisCache(ToolCache):
         value: str,
         ttl: float | None = None,
     ) -> None:
-        key = self._key(tool_name, params)
-        self._client.setex(key, int(ttl or self._default_ttl), value)
+        self._client.setex(self._key(tool_name, params), int(ttl or self._default_ttl), value)
     
     def invalidate(self, tool_name: str, params: BaseModel | JsonDict) -> bool:
         return self._client.delete(self._key(tool_name, params)) > 0
     
     def invalidate_tool(self, tool_name: str) -> int:
         """Remove all entries for a tool using SCAN (production-safe)."""
-        pattern = f"{self._prefix}{tool_name}:*"
-        keys = list(self._client.scan_iter(match=pattern))
+        keys = list(self._client.scan_iter(match=f"{self._prefix}{tool_name}:*"))
         return self._client.delete(*keys) if keys else 0
     
     def clear(self) -> None:
         """Clear all toolcase keys using SCAN."""
-        pattern = f"{self._prefix}*"
-        keys = list(self._client.scan_iter(match=pattern))
-        if keys:
+        if keys := list(self._client.scan_iter(match=f"{self._prefix}*")):
             self._client.delete(*keys)
 
 
@@ -218,8 +213,7 @@ class AsyncRedisCache(ToolCache):
     
     # Async variants
     async def aget(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
-        key = self._key(tool_name, params)
-        val = await self._client.get(key)
+        val = await self._client.get(self._key(tool_name, params))
         return val.decode() if val else None
     
     async def aset(
@@ -229,19 +223,15 @@ class AsyncRedisCache(ToolCache):
         value: str,
         ttl: float | None = None,
     ) -> None:
-        key = self._key(tool_name, params)
-        await self._client.setex(key, int(ttl or self._default_ttl), value)
+        await self._client.setex(self._key(tool_name, params), int(ttl or self._default_ttl), value)
     
     async def ainvalidate(self, tool_name: str, params: BaseModel | JsonDict) -> bool:
         return await self._client.delete(self._key(tool_name, params)) > 0
     
     async def ainvalidate_tool(self, tool_name: str) -> int:
-        pattern = f"{self._prefix}{tool_name}:*"
-        keys = [k async for k in self._client.scan_iter(match=pattern)]
+        keys = [k async for k in self._client.scan_iter(match=f"{self._prefix}{tool_name}:*")]
         return await self._client.delete(*keys) if keys else 0
     
     async def aclear(self) -> None:
-        pattern = f"{self._prefix}*"
-        keys = [k async for k in self._client.scan_iter(match=pattern)]
-        if keys:
+        if keys := [k async for k in self._client.scan_iter(match=f"{self._prefix}*")]:
             await self._client.delete(*keys)
