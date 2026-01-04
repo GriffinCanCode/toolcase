@@ -1,13 +1,11 @@
-"""Structured logging module: context-aware logging with trace correlation."""
+"""Structured logging module: context-aware logging with trace correlation.
+
+Built on structlog for maximum flexibility and readability.
+"""
 
 from .logger import (
     BoundLogger,
-    ConsoleRenderer,
-    JsonRenderer,
-    LogEntry,
-    LogRenderer,
     LogScope,
-    NoOpRenderer,
     TracedLogger,
     configure_logging,
     configure_observability,
@@ -19,12 +17,7 @@ from .logger import (
 
 __all__ = [
     "BoundLogger",
-    "ConsoleRenderer",
-    "JsonRenderer",
-    "LogEntry",
-    "LogRenderer",
     "LogScope",
-    "NoOpRenderer",
     "TracedLogger",
     "configure_logging",
     "configure_observability",

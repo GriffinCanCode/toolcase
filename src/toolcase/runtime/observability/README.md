@@ -10,8 +10,8 @@ observability/
 │   ├── context.py    # SpanContext, TraceContext, trace_context
 │   ├── span.py       # Span, SpanEvent, SpanKind, SpanStatus
 │   └── tracer.py     # Tracer, configure_tracing, get_tracer, traced
-├── logging/          # Structured logging
-│   └── logger.py     # BoundLogger, LogEntry, configure_logging, get_logger
+├── logging/          # Logging
+│   └── logger.py     # BoundLogger, configure_logging, get_logger, span_logger
 ├── middleware/       # Auto-instrumentation
 │   └── tracing.py    # TracingMiddleware, CorrelationMiddleware
 └── exporters/        # Span export backends
