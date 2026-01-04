@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 from pydantic import BaseModel
 
-from .core import BaseTool, ToolMetadata
+from ..core import BaseTool, ToolMetadata
 
 if TYPE_CHECKING:
     pass

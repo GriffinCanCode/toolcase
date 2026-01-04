@@ -1,11 +1,29 @@
 """Toolcase - Type-safe, extensible tool framework for AI agents.
 
 A minimal yet powerful framework for creating tools that AI agents can invoke.
-Supports type-safe parameters, caching, progress streaming, and optional
-LangChain integration.
+Supports type-safe parameters, caching, progress streaming, and multi-framework
+format converters for OpenAI, Anthropic, Google Gemini, and LangChain.
 
-Quick Start:
-    >>> from toolcase import BaseTool, ToolMetadata, get_registry
+Quick Start (Decorator - Recommended):
+    >>> from toolcase import tool, get_registry
+    >>>
+    >>> @tool(description="Search for information", category="search")
+    ... def search(query: str, limit: int = 5) -> str:
+    ...     '''Search the web.
+    ...     
+    ...     Args:
+    ...         query: Search query string
+    ...         limit: Max results to return
+    ...     '''
+    ...     return f"Results for: {query}"
+    >>>
+    >>> registry = get_registry()
+    >>> registry.register(search)
+    >>> search(query="python")
+    'Results for: python'
+
+Class-Based (For Complex Tools):
+    >>> from toolcase import BaseTool, ToolMetadata
     >>> from pydantic import BaseModel, Field
     >>>
     >>> class SearchParams(BaseModel):
@@ -21,13 +39,20 @@ Quick Start:
     ...
     ...     def _run(self, params: SearchParams) -> str:
     ...         return f"Results for: {params.query}"
-    >>>
-    >>> registry = get_registry()
-    >>> registry.register(SearchTool())
-    >>> registry["search"](query="python")
-    'Results for: python'
 
-For LangChain integration:
+Multi-Framework Format Converters:
+    >>> from toolcase.formats import to_openai, to_anthropic, to_google
+    >>>
+    >>> # OpenAI function calling format
+    >>> openai_tools = to_openai(registry)
+    >>> 
+    >>> # Anthropic tool_use format
+    >>> anthropic_tools = to_anthropic(registry)
+    >>> 
+    >>> # Google Gemini function declarations
+    >>> gemini_tools = to_google(registry)
+
+LangChain Integration:
     >>> from toolcase.integrations import to_langchain_tools
     >>> lc_tools = to_langchain_tools(registry)
 """
@@ -37,7 +62,7 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 # Core
-from .core import BaseTool, EmptyParams, ToolMetadata
+from .core import BaseTool, EmptyParams, FunctionTool, StreamingFunctionTool, ToolMetadata, tool
 
 # Errors
 from .errors import ErrorCode, ToolError, ToolException, classify_exception
@@ -83,6 +108,9 @@ __all__ = [
     "BaseTool",
     "ToolMetadata",
     "EmptyParams",
+    "tool",
+    "FunctionTool",
+    "StreamingFunctionTool",
     # Errors
     "ErrorCode",
     "ToolError",

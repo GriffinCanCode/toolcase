@@ -40,8 +40,8 @@ from typing import (
 
 from pydantic import BaseModel, Field, create_model
 
-from .cache import DEFAULT_TTL
-from .core import BaseTool, ToolMetadata
+from ..cache import DEFAULT_TTL
+from .base import BaseTool, ToolMetadata
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable
