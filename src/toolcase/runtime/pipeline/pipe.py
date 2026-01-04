@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, TypeVar
+from typing import Callable
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -21,12 +21,6 @@ from toolcase.foundation.core.base import BaseTool, ToolMetadata
 from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult, collect_results, format_validation_error, sequence
 from toolcase.io.streaming import StreamChunk, StreamEvent, StreamEventKind, stream_error
 from toolcase.runtime.concurrency import Concurrency
-
-if TYPE_CHECKING:
-    pass
-
-T = TypeVar("T", bound=BaseModel)
-U = TypeVar("U", bound=BaseModel)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Transform Types
@@ -49,11 +43,9 @@ def identity_dict(s: str) -> JsonDict:
     """Default transform: wrap result in 'input' key."""
     return {"input": s}
 
-
 def identity_chunk(s: str) -> str:
     """Default chunk transform: pass through unchanged."""
     return s
-
 
 def concat_merge(results: list[str], sep: str = "\n\n") -> str:
     """Default merge: concatenate with separator."""
@@ -67,11 +59,7 @@ def concat_merge(results: list[str], sep: str = "\n\n") -> str:
 
 @dataclass(frozen=True, slots=True)
 class Step:
-    """A pipeline step: tool with optional output transform.
-    
-    The transform maps this step's output to the next step's input params.
-    """
-    
+    """A pipeline step: tool with optional output transform. Maps output to next step's input params."""
     tool: BaseTool[BaseModel]
     transform: Transform = field(default=identity_dict)
     
@@ -86,17 +74,7 @@ class Step:
 
 @dataclass(frozen=True, slots=True)
 class StreamStep:
-    """A streaming pipeline step with chunk-aware transforms.
-    
-    Supports both in-flight chunk transformation and accumulated output
-    transformation for preparing next step's parameters.
-    
-    Attributes:
-        tool: The tool to execute (should support streaming)
-        chunk_transform: Applied to each chunk as it flows through
-        accumulate_transform: Applied to accumulated output for next params
-    """
-    
+    """Streaming pipeline step with chunk-aware transforms for in-flight and accumulated output."""
     tool: BaseTool[BaseModel]
     chunk_transform: ChunkTransform = field(default=identity_chunk)
     accumulate_transform: Transform = field(default=identity_dict)
@@ -169,36 +147,23 @@ class PipelineTool(BaseTool[PipelineParams]):
     params_schema = PipelineParams
     cache_enabled = False  # Pipelines delegate caching to inner tools
     
-    def __init__(
-        self,
-        steps: list[Step],
-        *,
-        name: str | None = None,
-        description: str | None = None,
-    ) -> None:
+    def __init__(self, steps: list[Step], *, name: str | None = None, description: str | None = None) -> None:
         if not steps:
             raise ValueError("Pipeline requires at least one step")
-        
-        # Derive name from tools
         tool_names = [s.tool.metadata.name for s in steps]
-        derived_name = name or "_then_".join(tool_names)
-        derived_desc = description or f"Pipeline: {' → '.join(tool_names)}"
-        
         self._steps = steps
         self._meta = ToolMetadata(
-            name=derived_name,
-            description=derived_desc,
+            name=name or "_then_".join(tool_names),
+            description=description or f"Pipeline: {' → '.join(tool_names)}",
             category="pipeline",
             streaming=any(s.tool.metadata.streaming for s in steps),
         )
     
     @property
-    def metadata(self) -> ToolMetadata:
-        return self._meta
+    def metadata(self) -> ToolMetadata: return self._meta
     
     @property
-    def steps(self) -> list[Step]:
-        return self._steps
+    def steps(self) -> list[Step]: return self._steps
     
     def _run(self, params: PipelineParams) -> str:
         """Sync execution via async bridge."""
@@ -206,57 +171,26 @@ class PipelineTool(BaseTool[PipelineParams]):
     
     async def _async_run(self, params: PipelineParams) -> str:
         """Execute pipeline sequentially."""
-        result = await self._async_run_result(params)
-        return result.unwrap_or(result.unwrap_err().message)
+        return (r := await self._async_run_result(params)).unwrap_or(r.unwrap_err().message)
     
     async def _async_run_result(self, params: PipelineParams) -> ToolResult:
         """Execute with Result-based error handling."""
-        current_params = params.input
-        output = ""
-        
+        current_params, output, op = params.input, "", f"pipeline:{self._meta.name}"
         for i, step in enumerate(self._steps):
-            # Build params for this step with validation error handling
-            try:
-                step_params = step.tool.params_schema(**current_params)
+            try: step_params = step.tool.params_schema(**current_params)
             except ValidationError as e:
-                trace = ErrorTrace(
-                    message=format_validation_error(e, tool_name=step.tool.metadata.name),
-                    error_code=ErrorCode.INVALID_PARAMS.value,
-                    recoverable=False,
-                ).with_operation(f"pipeline:{self._meta.name}")
-                return Err(trace)
-            
-            # Execute step
-            result = await step.execute(step_params)
-            
-            # Short-circuit on error (railway-oriented)
-            if result.is_err():
-                return result.map_err(
-                    lambda e: e.with_operation(f"pipeline:{self._meta.name}")
-                )
-            
-            # Transform output for next step with exception handling
+                return Err(ErrorTrace(message=format_validation_error(e, tool_name=step.tool.metadata.name), error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False).with_operation(op))
+            if (result := await step.execute(step_params)).is_err():
+                return result.map_err(lambda e: e.with_operation(op))
             output = result.unwrap()
-            try:
-                current_params = step.prepare_next(output)
+            try: current_params = step.prepare_next(output)
             except Exception as e:
-                trace = ErrorTrace(
-                    message=f"Transform after step {i+1} failed: {e}",
-                    error_code=ErrorCode.PARSE_ERROR.value,
-                    recoverable=False,
-                ).with_operation(f"pipeline:{self._meta.name}")
-                return Err(trace)
-        
-        # Return final output
+                return Err(ErrorTrace(message=f"Transform after step {i+1} failed: {e}", error_code=ErrorCode.PARSE_ERROR.value, recoverable=False).with_operation(op))
         return Ok(output)
     
     def __rshift__(self, other: BaseTool[BaseModel] | Step) -> PipelineTool:
         """Chain another tool: self >> other."""
-        next_step = other if isinstance(other, Step) else Step(other)
-        return PipelineTool(
-            steps=[*self._steps, next_step],
-            name=None,  # Re-derive from combined steps
-        )
+        return PipelineTool(steps=[*self._steps, other if isinstance(other, Step) else Step(other)])
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -296,39 +230,25 @@ class StreamingPipelineTool(BaseTool[PipelineParams]):
     params_schema = PipelineParams
     cache_enabled = False
     
-    def __init__(
-        self,
-        steps: list[StreamStep],
-        *,
-        name: str | None = None,
-        description: str | None = None,
-    ) -> None:
+    def __init__(self, steps: list[StreamStep], *, name: str | None = None, description: str | None = None) -> None:
         if not steps:
             raise ValueError("StreamingPipeline requires at least one step")
-        
         tool_names = [s.tool.metadata.name for s in steps]
-        derived_name = name or "_stream_".join(tool_names)
-        derived_desc = description or f"Streaming: {' → '.join(tool_names)}"
-        
         self._steps = steps
         self._meta = ToolMetadata(
-            name=derived_name,
-            description=derived_desc,
-            category="pipeline",
-            streaming=True,  # Always streaming
+            name=name or "_stream_".join(tool_names),
+            description=description or f"Streaming: {' → '.join(tool_names)}",
+            category="pipeline", streaming=True,
         )
     
     @property
-    def metadata(self) -> ToolMetadata:
-        return self._meta
+    def metadata(self) -> ToolMetadata: return self._meta
     
     @property
-    def steps(self) -> list[StreamStep]:
-        return self._steps
+    def steps(self) -> list[StreamStep]: return self._steps
     
     @property
-    def supports_result_streaming(self) -> bool:
-        return True
+    def supports_result_streaming(self) -> bool: return True
     
     def _run(self, params: PipelineParams) -> str:
         """Sync execution collects all streaming output."""
@@ -336,94 +256,42 @@ class StreamingPipelineTool(BaseTool[PipelineParams]):
     
     async def _async_run(self, params: PipelineParams) -> str:
         """Collect all chunks into final result."""
-        chunks: list[str] = []
-        async for chunk in self.stream_result(params):
-            chunks.append(chunk)
-        return "".join(chunks)
+        return "".join([chunk async for chunk in self.stream_result(params)])
     
     async def _async_run_result(self, params: PipelineParams) -> ToolResult:
         """Execute with Result-based error handling."""
-        try:
-            result = await self._async_run(params)
-            return Ok(result)
-        except Exception as e:
-            return self._err_from_exc(e, "streaming pipeline")
+        try: return Ok(await self._async_run(params))
+        except Exception as e: return self._err_from_exc(e, "streaming pipeline")
     
     async def stream_result(self, params: PipelineParams) -> AsyncIterator[str]:
-        """Stream through pipeline steps, propagating chunks.
-        
-        For each step:
-        1. If step's tool supports streaming, stream through with chunk_transform
-        2. If not, collect result then pass accumulated to next step
-        3. Final step's chunks are yielded to caller
-        
-        Yields:
-            Transformed chunks from the final streaming step
-        """
+        """Stream through pipeline steps, propagating chunks. Final step's chunks yielded to caller."""
         current_params = params.input
-        
         for i, step in enumerate(self._steps):
-            is_final = i == len(self._steps) - 1
-            
-            # Build params for this step
-            try:
-                step_params = step.tool.params_schema(**current_params)
+            try: step_params = step.tool.params_schema(**current_params)
             except ValidationError as e:
-                # Yield error as single chunk on validation failure
-                yield f"[Pipeline Error] {format_validation_error(e, tool_name=step.tool.metadata.name)}"
-                return
-            
-            if is_final:
-                # Final step: yield all chunks to caller
-                async for chunk in step.stream(step_params):
-                    yield chunk
+                yield f"[Pipeline Error] {format_validation_error(e, tool_name=step.tool.metadata.name)}"; return
+            if i == len(self._steps) - 1:
+                async for chunk in step.stream(step_params): yield chunk
             else:
-                # Intermediate step: collect chunks, prepare next params
-                accumulated: list[str] = []
-                async for chunk in step.stream(step_params):
-                    accumulated.append(chunk)
-                
-                # Transform accumulated for next step
-                try:
-                    current_params = step.prepare_next("".join(accumulated))
+                accumulated = [chunk async for chunk in step.stream(step_params)]
+                try: current_params = step.prepare_next("".join(accumulated))
                 except Exception as e:
-                    yield f"[Pipeline Error] Transform after step {i+1} failed: {e}"
-                    return
+                    yield f"[Pipeline Error] Transform after step {i+1} failed: {e}"; return
     
     async def stream_result_events(self, params: PipelineParams) -> AsyncIterator[StreamEvent]:
-        """Stream as typed events with lifecycle management.
-        
-        Wraps stream_result() with start/chunk/complete/error events.
-        """
-        tool_name = self._meta.name
-        yield StreamEvent(kind=StreamEventKind.START, tool_name=tool_name)
-        
-        accumulated: list[str] = []
-        index = 0
-        
+        """Stream as typed events with lifecycle management. Wraps stream_result() with start/chunk/complete/error events."""
+        name, acc, idx = self._meta.name, [], 0
+        yield StreamEvent(kind=StreamEventKind.START, tool_name=name)
         try:
             async for content in self.stream_result(params):
-                accumulated.append(content)
-                yield StreamEvent(
-                    kind=StreamEventKind.CHUNK,
-                    tool_name=tool_name,
-                    data=StreamChunk(content=content, index=index),
-                )
-                index += 1
-            
-            yield StreamEvent(
-                kind=StreamEventKind.COMPLETE,
-                tool_name=tool_name,
-                accumulated="".join(accumulated),
-            )
-        except Exception as e:
-            yield stream_error(tool_name, str(e))
-            raise
+                acc.append(content)
+                yield StreamEvent(kind=StreamEventKind.CHUNK, tool_name=name, data=StreamChunk(content=content, index=idx)); idx += 1
+            yield StreamEvent(kind=StreamEventKind.COMPLETE, tool_name=name, accumulated="".join(acc))
+        except Exception as e: yield stream_error(name, str(e)); raise
     
     def __rshift__(self, other: BaseTool[BaseModel] | StreamStep) -> StreamingPipelineTool:
         """Chain another tool: self >> other."""
-        next_step = other if isinstance(other, StreamStep) else StreamStep(other)
-        return StreamingPipelineTool(steps=[*self._steps, next_step], name=None)
+        return StreamingPipelineTool(steps=[*self._steps, other if isinstance(other, StreamStep) else StreamStep(other)])
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -456,96 +324,47 @@ class ParallelTool(BaseTool[ParallelParams]):
     params_schema = ParallelParams
     cache_enabled = False
     
-    def __init__(
-        self,
-        tools: list[BaseTool[BaseModel]],
-        *,
-        merge: Merge | None = None,
-        fail_fast: bool = True,
-        name: str | None = None,
-        description: str | None = None,
-    ) -> None:
+    def __init__(self, tools: list[BaseTool[BaseModel]], *, merge: Merge | None = None, fail_fast: bool = True, name: str | None = None, description: str | None = None) -> None:
         if not tools:
             raise ValueError("Parallel requires at least one tool")
-        
         tool_names = [t.metadata.name for t in tools]
-        derived_name = name or "_and_".join(tool_names)
-        derived_desc = description or f"Parallel: {', '.join(tool_names)}"
-        
-        self._tools = tools
-        self._merge = merge or concat_merge
-        self._fail_fast = fail_fast
+        self._tools, self._merge, self._fail_fast = tools, merge or concat_merge, fail_fast
         self._meta = ToolMetadata(
-            name=derived_name,
-            description=derived_desc,
-            category="pipeline",
-            streaming=any(t.metadata.streaming for t in tools),
+            name=name or "_and_".join(tool_names),
+            description=description or f"Parallel: {', '.join(tool_names)}",
+            category="pipeline", streaming=any(t.metadata.streaming for t in tools),
         )
     
     @property
-    def metadata(self) -> ToolMetadata:
-        return self._meta
+    def metadata(self) -> ToolMetadata: return self._meta
     
     @property
-    def tools(self) -> list[BaseTool[BaseModel]]:
-        return self._tools
+    def tools(self) -> list[BaseTool[BaseModel]]: return self._tools
     
     def _run(self, params: ParallelParams) -> str:
         return self._run_async_sync(self._async_run(params))
     
     async def _async_run(self, params: ParallelParams) -> str:
-        result = await self._async_run_result(params)
-        return result.unwrap_or(result.unwrap_err().message)
+        return (r := await self._async_run_result(params)).unwrap_or(r.unwrap_err().message)
     
     async def _async_run_result(self, params: ParallelParams) -> ToolResult:
         """Execute all tools concurrently using Concurrency.gather."""
         async def run_tool(tool: BaseTool[BaseModel]) -> ToolResult:
-            try:
-                tool_params = tool.params_schema(**params.input)
+            try: return await tool.arun_result(tool.params_schema(**params.input))
             except ValidationError as e:
-                return Err(ErrorTrace(
-                    message=format_validation_error(e, tool_name=tool.metadata.name),
-                    error_code=ErrorCode.INVALID_PARAMS.value,
-                    recoverable=False,
-                ))
-            return await tool.arun_result(tool_params)
+                return Err(ErrorTrace(message=format_validation_error(e, tool_name=tool.metadata.name), error_code=ErrorCode.INVALID_PARAMS.value, recoverable=False))
         
-        # Execute all concurrently using Concurrency facade
-        results = await Concurrency.gather(*[run_tool(t) for t in self._tools])
+        results, name = await Concurrency.gather(*[run_tool(t) for t in self._tools]), self._meta.name
+        def merge_safe(values: list[str]) -> ToolResult:
+            try: return Ok(self._merge(values))
+            except Exception as e: return Err(ErrorTrace(message=f"Merge failed in {name}: {e}", error_code=ErrorCode.PARSE_ERROR.value, recoverable=False))
         
-        # Combine results
         if self._fail_fast:
-            sequenced = sequence(list(results))
-            if sequenced.is_err():
-                return Err(sequenced.unwrap_err().with_operation(f"parallel:{self._meta.name}"))
-            try:
-                return Ok(self._merge(sequenced.unwrap()))
-            except Exception as e:
-                return Err(ErrorTrace(
-                    message=f"Merge failed in {self._meta.name}: {e}",
-                    error_code=ErrorCode.PARSE_ERROR.value,
-                    recoverable=False,
-                ))
-        
-        # Collect all (accumulate errors)
-        collected = collect_results(list(results))
-        if collected.is_err():
-            errors = collected.unwrap_err()
-            return Err(ErrorTrace(
-                message=f"Multiple failures in {self._meta.name}",
-                contexts=[],
-                error_code=errors[0].error_code if errors else None,
-                recoverable=any(e.recoverable for e in errors),
-            ))
-        
-        try:
-            return Ok(self._merge(collected.unwrap()))
-        except Exception as e:
-            return Err(ErrorTrace(
-                message=f"Merge failed in {self._meta.name}: {e}",
-                error_code=ErrorCode.PARSE_ERROR.value,
-                recoverable=False,
-            ))
+            return merge_safe((seq := sequence(list(results))).unwrap()) if seq.is_ok() else Err(seq.unwrap_err().with_operation(f"parallel:{name}"))
+        if (collected := collect_results(list(results))).is_err():
+            errs = collected.unwrap_err()
+            return Err(ErrorTrace(message=f"Multiple failures in {name}", contexts=[], error_code=errs[0].error_code if errs else None, recoverable=any(e.recoverable for e in errs)))
+        return merge_safe(collected.unwrap())
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -558,37 +377,23 @@ StreamMerge = Callable[[list[AsyncIterator[str]]], AsyncIterator[str]]
 
 
 async def interleave_streams(streams: list[AsyncIterator[str]]) -> AsyncIterator[str]:
-    """Default stream merge: interleave chunks round-robin as they arrive.
-    
-    Uses cooperative cancellation via checkpoint() for clean shutdown.
-    """
+    """Default stream merge: interleave chunks round-robin as they arrive. Uses cooperative cancellation via checkpoint()."""
     from toolcase.runtime.concurrency import checkpoint
     
-    pending: dict[int, asyncio.Task[tuple[int, str | None]]] = {}
-    active_streams: set[int] = set(range(len(streams)))
-    
     async def get_next(idx: int, stream: AsyncIterator[str]) -> tuple[int, str | None]:
-        try:
-            return (idx, await stream.__anext__())
-        except StopAsyncIteration:
-            return (idx, None)
+        try: return (idx, await stream.__anext__())
+        except StopAsyncIteration: return (idx, None)
     
-    # Initialize tasks
-    for i, stream in enumerate(streams):
-        pending[i] = asyncio.create_task(get_next(i, stream))
-    
+    active, pending = set(range(len(streams))), {i: asyncio.create_task(get_next(i, s)) for i, s in enumerate(streams)}
     while pending:
-        await checkpoint()  # Cooperative cancellation point
-        done, _ = await asyncio.wait(pending.values(), return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
+        await checkpoint()
+        for task in (await asyncio.wait(pending.values(), return_when=asyncio.FIRST_COMPLETED))[0]:
             idx, chunk = task.result()
             if chunk is None:
-                active_streams.discard(idx)
-                del pending[idx]
+                active.discard(idx); del pending[idx]
             else:
                 yield chunk
-                if idx in active_streams:
-                    pending[idx] = asyncio.create_task(get_next(idx, streams[idx]))
+                if idx in active: pending[idx] = asyncio.create_task(get_next(idx, streams[idx]))
 
 
 class StreamingParallelTool(BaseTool[ParallelParams]):
@@ -616,103 +421,56 @@ class StreamingParallelTool(BaseTool[ParallelParams]):
     params_schema = ParallelParams
     cache_enabled = False
     
-    def __init__(
-        self,
-        tools: list[BaseTool[BaseModel]],
-        *,
-        stream_merge: StreamMerge | None = None,
-        name: str | None = None,
-        description: str | None = None,
-    ) -> None:
+    def __init__(self, tools: list[BaseTool[BaseModel]], *, stream_merge: StreamMerge | None = None, name: str | None = None, description: str | None = None) -> None:
         if not tools:
             raise ValueError("StreamingParallel requires at least one tool")
-        
         tool_names = [t.metadata.name for t in tools]
-        derived_name = name or "_stream_and_".join(tool_names)
-        derived_desc = description or f"StreamingParallel: {', '.join(tool_names)}"
-        
-        self._tools = tools
-        self._stream_merge = stream_merge or interleave_streams
+        self._tools, self._stream_merge = tools, stream_merge or interleave_streams
         self._meta = ToolMetadata(
-            name=derived_name,
-            description=derived_desc,
-            category="pipeline",
-            streaming=True,
+            name=name or "_stream_and_".join(tool_names),
+            description=description or f"StreamingParallel: {', '.join(tool_names)}",
+            category="pipeline", streaming=True,
         )
     
     @property
-    def metadata(self) -> ToolMetadata:
-        return self._meta
+    def metadata(self) -> ToolMetadata: return self._meta
     
     @property
-    def tools(self) -> list[BaseTool[BaseModel]]:
-        return self._tools
+    def tools(self) -> list[BaseTool[BaseModel]]: return self._tools
     
     @property
-    def supports_result_streaming(self) -> bool:
-        return True
+    def supports_result_streaming(self) -> bool: return True
     
     def _run(self, params: ParallelParams) -> str:
         return self._run_async_sync(self._async_run(params))
     
     async def _async_run(self, params: ParallelParams) -> str:
         """Collect all streaming output."""
-        chunks: list[str] = []
-        async for chunk in self.stream_result(params):
-            chunks.append(chunk)
-        return "".join(chunks)
+        return "".join([chunk async for chunk in self.stream_result(params)])
     
     async def _async_run_result(self, params: ParallelParams) -> ToolResult:
-        try:
-            return Ok(await self._async_run(params))
-        except Exception as e:
-            return self._err_from_exc(e, "streaming parallel")
+        try: return Ok(await self._async_run(params))
+        except Exception as e: return self._err_from_exc(e, "streaming parallel")
     
     async def stream_result(self, params: ParallelParams) -> AsyncIterator[str]:
-        """Stream merged output from all tools concurrently.
-        
-        Each tool's streaming output is merged according to stream_merge.
-        Default: interleave chunks as they arrive from any source.
-        """
+        """Stream merged output from all tools concurrently. Default: interleave chunks as they arrive."""
         async def tool_stream(tool: BaseTool[BaseModel]) -> AsyncIterator[str]:
-            try:
-                tool_params = tool.params_schema(**params.input)
+            try: tool_params = tool.params_schema(**params.input)
             except ValidationError as e:
-                yield f"[Error] {format_validation_error(e, tool_name=tool.metadata.name)}"
-                return
-            async for chunk in tool.stream_result(tool_params):
-                yield chunk
-        
-        streams = [tool_stream(t) for t in self._tools]
-        async for chunk in self._stream_merge(streams):
-            yield chunk
+                yield f"[Error] {format_validation_error(e, tool_name=tool.metadata.name)}"; return
+            async for chunk in tool.stream_result(tool_params): yield chunk
+        async for chunk in self._stream_merge([tool_stream(t) for t in self._tools]): yield chunk
     
     async def stream_result_events(self, params: ParallelParams) -> AsyncIterator[StreamEvent]:
         """Stream as typed events with lifecycle management."""
-        tool_name = self._meta.name
-        yield StreamEvent(kind=StreamEventKind.START, tool_name=tool_name)
-        
-        accumulated: list[str] = []
-        index = 0
-        
+        name, acc, idx = self._meta.name, [], 0
+        yield StreamEvent(kind=StreamEventKind.START, tool_name=name)
         try:
             async for content in self.stream_result(params):
-                accumulated.append(content)
-                yield StreamEvent(
-                    kind=StreamEventKind.CHUNK,
-                    tool_name=tool_name,
-                    data=StreamChunk(content=content, index=index),
-                )
-                index += 1
-            
-            yield StreamEvent(
-                kind=StreamEventKind.COMPLETE,
-                tool_name=tool_name,
-                accumulated="".join(accumulated),
-            )
-        except Exception as e:
-            yield stream_error(tool_name, str(e))
-            raise
+                acc.append(content)
+                yield StreamEvent(kind=StreamEventKind.CHUNK, tool_name=name, data=StreamChunk(content=content, index=idx)); idx += 1
+            yield StreamEvent(kind=StreamEventKind.COMPLETE, tool_name=name, accumulated="".join(acc))
+        except Exception as e: yield stream_error(name, str(e)); raise
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -720,12 +478,7 @@ class StreamingParallelTool(BaseTool[ParallelParams]):
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-def pipeline(
-    *tools: BaseTool[BaseModel],
-    transforms: list[Transform] | None = None,
-    name: str | None = None,
-    description: str | None = None,
-) -> PipelineTool:
+def pipeline(*tools: BaseTool[BaseModel], transforms: list[Transform] | None = None, name: str | None = None, description: str | None = None) -> PipelineTool:
     """Create sequential pipeline from tools.
     
     Args:
@@ -748,24 +501,12 @@ def pipeline(
     """
     if not tools:
         raise ValueError("pipeline() requires at least one tool")
-    
-    transforms = transforms or []
-    steps: list[Step] = []
-    
-    for i, tool in enumerate(tools):
-        transform = transforms[i] if i < len(transforms) else identity_dict
-        steps.append(Step(tool, transform))
-    
+    xforms = transforms or []
+    steps = [Step(tool, xforms[i] if i < len(xforms) else identity_dict) for i, tool in enumerate(tools)]
     return PipelineTool(steps, name=name, description=description)
 
 
-def parallel(
-    *tools: BaseTool[BaseModel],
-    merge: Merge | None = None,
-    fail_fast: bool = True,
-    name: str | None = None,
-    description: str | None = None,
-) -> ParallelTool:
+def parallel(*tools: BaseTool[BaseModel], merge: Merge | None = None, fail_fast: bool = True, name: str | None = None, description: str | None = None) -> ParallelTool:
     """Create parallel execution from tools.
     
     Args:
@@ -787,23 +528,10 @@ def parallel(
     """
     if not tools:
         raise ValueError("parallel() requires at least one tool")
-    
-    return ParallelTool(
-        list(tools),
-        merge=merge,
-        fail_fast=fail_fast,
-        name=name,
-        description=description,
-    )
+    return ParallelTool(list(tools), merge=merge, fail_fast=fail_fast, name=name, description=description)
 
 
-def streaming_pipeline(
-    *tools: BaseTool[BaseModel],
-    chunk_transforms: list[ChunkTransform] | None = None,
-    accumulate_transforms: list[Transform] | None = None,
-    name: str | None = None,
-    description: str | None = None,
-) -> StreamingPipelineTool:
+def streaming_pipeline(*tools: BaseTool[BaseModel], chunk_transforms: list[ChunkTransform] | None = None, accumulate_transforms: list[Transform] | None = None, name: str | None = None, description: str | None = None) -> StreamingPipelineTool:
     """Create streaming pipeline that propagates async generators.
     
     Chains tools where streaming output flows through transforms
@@ -836,25 +564,15 @@ def streaming_pipeline(
     """
     if not tools:
         raise ValueError("streaming_pipeline() requires at least one tool")
-    
-    chunk_transforms = chunk_transforms or []
-    accumulate_transforms = accumulate_transforms or []
-    
-    steps: list[StreamStep] = []
-    for i, tool in enumerate(tools):
-        chunk_fn = chunk_transforms[i] if i < len(chunk_transforms) and chunk_transforms[i] else identity_chunk
-        accum_fn = accumulate_transforms[i] if i < len(accumulate_transforms) and accumulate_transforms[i] else identity_dict
-        steps.append(StreamStep(tool, chunk_fn, accum_fn))
-    
+    c_xforms, a_xforms = chunk_transforms or [], accumulate_transforms or []
+    steps = [
+        StreamStep(tool, c_xforms[i] if i < len(c_xforms) and c_xforms[i] else identity_chunk, a_xforms[i] if i < len(a_xforms) and a_xforms[i] else identity_dict)
+        for i, tool in enumerate(tools)
+    ]
     return StreamingPipelineTool(steps, name=name, description=description)
 
 
-def streaming_parallel(
-    *tools: BaseTool[BaseModel],
-    stream_merge: StreamMerge | None = None,
-    name: str | None = None,
-    description: str | None = None,
-) -> StreamingParallelTool:
+def streaming_parallel(*tools: BaseTool[BaseModel], stream_merge: StreamMerge | None = None, name: str | None = None, description: str | None = None) -> StreamingParallelTool:
     """Create streaming parallel execution that interleaves outputs.
     
     Runs tools concurrently, merging streaming output as chunks arrive.
@@ -880,10 +598,4 @@ def streaming_parallel(
     """
     if not tools:
         raise ValueError("streaming_parallel() requires at least one tool")
-    
-    return StreamingParallelTool(
-        list(tools),
-        stream_merge=stream_merge,
-        name=name,
-        description=description,
-    )
+    return StreamingParallelTool(list(tools), stream_merge=stream_merge, name=name, description=description)
