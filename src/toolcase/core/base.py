@@ -8,6 +8,7 @@ a typed parameter schema.
 from __future__ import annotations
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from typing import (
@@ -27,6 +28,15 @@ from ..monads import Result, ToolResult
 from ..monads.tool import result_to_string, string_to_result
 from ..progress import ProgressCallback, ProgressKind, ToolProgress, complete
 from ..retry import RetryPolicy, execute_with_retry, execute_with_retry_sync
+from ..streaming import (
+    StreamChunk,
+    StreamEvent,
+    StreamEventKind,
+    StreamResult,
+    stream_complete,
+    stream_error,
+    stream_start,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -482,6 +492,96 @@ class BaseTool(ABC, Generic[TParams]):
             return result
         
         return await asyncio.wait_for(execute(), timeout=timeout)
+    
+    # ─────────────────────────────────────────────────────────────────
+    # Result Streaming (Incremental Output)
+    # ─────────────────────────────────────────────────────────────────
+    
+    @property
+    def supports_result_streaming(self) -> bool:
+        """Whether this tool supports incremental result streaming.
+        
+        Override in subclasses that implement stream_result().
+        """
+        return False
+    
+    async def stream_result(self, params: TParams) -> AsyncIterator[str]:
+        """Stream result chunks during execution.
+        
+        Override in tools that produce incremental output (e.g., LLM tools).
+        Default implementation runs normally and yields complete result.
+        
+        Yields:
+            String chunks of the result as they become available
+        
+        Example:
+            >>> async for chunk in tool.stream_result(params):
+            ...     print(chunk, end="", flush=True)
+        """
+        result = await self._async_run(params)
+        yield result
+    
+    async def stream_result_events(self, params: TParams) -> AsyncIterator[StreamEvent]:
+        """Stream result as typed events with metadata.
+        
+        Wraps stream_result() with start/chunk/complete/error event lifecycle.
+        Useful for WebSocket/SSE delivery with full state tracking.
+        
+        Yields:
+            StreamEvent objects for transport serialization
+        """
+        tool_name = self.metadata.name
+        yield stream_start(tool_name)
+        
+        accumulated: list[str] = []
+        index = 0
+        start_time = time.time()
+        
+        try:
+            async for content in self.stream_result(params):
+                accumulated.append(content)
+                chunk = StreamChunk(content=content, index=index)
+                yield StreamEvent(
+                    kind=StreamEventKind.CHUNK,
+                    tool_name=tool_name,
+                    data=chunk,
+                )
+                index += 1
+            
+            yield stream_complete(tool_name, "".join(accumulated))
+        except Exception as e:
+            yield stream_error(tool_name, str(e))
+            raise
+    
+    async def stream_result_collected(
+        self,
+        params: TParams,
+        timeout: float = 60.0,
+    ) -> StreamResult[str]:
+        """Stream and collect full result with metadata.
+        
+        Useful when you want streaming behavior but also need final stats.
+        
+        Returns:
+            StreamResult with accumulated content and timing metadata
+        """
+        start = time.time()
+        parts: list[str] = []
+        chunk_count = 0
+        
+        async def collect() -> StreamResult[str]:
+            nonlocal parts, chunk_count
+            async for content in self.stream_result(params):
+                parts.append(content)
+                chunk_count += 1
+            return StreamResult(
+                value="".join(parts),
+                chunks=chunk_count,
+                duration_ms=(time.time() - start) * 1000,
+                tool_name=self.metadata.name,
+            )
+        
+        return await asyncio.wait_for(collect(), timeout=timeout)
     
     # ─────────────────────────────────────────────────────────────────
     # Invocation (kwargs interface)

@@ -5,11 +5,21 @@ This module provides the foundation for building type-safe, extensible tools:
 - ToolMetadata: Tool metadata and capabilities
 - EmptyParams: Default parameter schema for parameterless tools
 - @tool decorator: Convert functions to tools
-- FunctionTool/StreamingFunctionTool: Decorator implementations
+- FunctionTool: Standard function wrapper
+- StreamingFunctionTool: Progress streaming (ToolProgress events)
+- ResultStreamingFunctionTool: Result streaming (string chunks for LLM output)
+- Dependency injection helpers
 """
 
 from .base import BaseTool, EmptyParams, ToolMetadata
-from .decorator import FunctionTool, StreamingFunctionTool, tool
+from .decorator import (
+    FunctionTool,
+    ResultStreamingFunctionTool,
+    StreamingFunctionTool,
+    clear_injected_deps,
+    set_injected_deps,
+    tool,
+)
 
 __all__ = [
     "BaseTool",
@@ -18,4 +28,7 @@ __all__ = [
     "tool",
     "FunctionTool",
     "StreamingFunctionTool",
+    "ResultStreamingFunctionTool",
+    "set_injected_deps",
+    "clear_injected_deps",
 ]

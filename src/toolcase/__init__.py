@@ -70,7 +70,15 @@ from __future__ import annotations
 __version__ = "0.2.0"
 
 # Core
-from .core import BaseTool, EmptyParams, FunctionTool, StreamingFunctionTool, ToolMetadata, tool
+from .core import (
+    BaseTool,
+    EmptyParams,
+    FunctionTool,
+    ResultStreamingFunctionTool,
+    StreamingFunctionTool,
+    ToolMetadata,
+    tool,
+)
 
 # Errors
 from .errors import ErrorCode, ToolError, ToolException, classify_exception
@@ -141,6 +149,16 @@ from .pipeline import (
     parallel,
 )
 
+# Dependency Injection
+from .di import (
+    Container,
+    Disposable,
+    Factory,
+    Provider,
+    Scope,
+    ScopedContext,
+)
+
 # Built-in tools
 from .tools import DiscoveryParams, DiscoveryTool
 
@@ -175,6 +193,23 @@ from .observability import (
     Tracer,
 )
 
+# Streaming (Result Streaming for LLM outputs)
+from .streaming import (
+    StreamAdapter,
+    StreamChunk,
+    StreamEvent,
+    StreamEventKind,
+    StreamResult,
+    StreamState,
+    chunk,
+    json_lines_adapter,
+    sse_adapter,
+    stream_complete,
+    stream_error,
+    stream_start,
+    ws_adapter,
+)
+
 __all__ = [
     # Version
     "__version__",
@@ -185,6 +220,7 @@ __all__ = [
     "tool",
     "FunctionTool",
     "StreamingFunctionTool",
+    "ResultStreamingFunctionTool",
     # Errors
     "ErrorCode",
     "ToolError",
@@ -238,6 +274,13 @@ __all__ = [
     "Step",
     "pipeline",
     "parallel",
+    # Dependency Injection
+    "Container",
+    "Disposable",
+    "Factory",
+    "Provider",
+    "Scope",
+    "ScopedContext",
     # Built-in tools
     "DiscoveryTool",
     "DiscoveryParams",
@@ -266,6 +309,20 @@ __all__ = [
     "SpanKind",
     "SpanStatus",
     "Tracer",
+    # Streaming (Result Streaming)
+    "StreamAdapter",
+    "StreamChunk",
+    "StreamEvent",
+    "StreamEventKind",
+    "StreamResult",
+    "StreamState",
+    "chunk",
+    "stream_start",
+    "stream_complete",
+    "stream_error",
+    "sse_adapter",
+    "ws_adapter",
+    "json_lines_adapter",
     # Convenience
     "init_tools",
 ]

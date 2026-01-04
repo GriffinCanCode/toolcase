@@ -21,6 +21,16 @@ Example:
     >>> registry.register(web_search)  # Works - it's a BaseTool
     >>> web_search(query="python")     # Also works via __call__
     'Results for: python'
+
+Dependency Injection Example:
+    >>> @tool(description="Fetch user data", inject=["db", "http_client"])
+    ... async def fetch_user(user_id: str, db: Database, http: HttpClient) -> str:
+    ...     user = await db.fetch_one("SELECT * FROM users WHERE id = $1", user_id)
+    ...     return f"User: {user['name']}"
+    ...
+    >>> registry.provide("db", lambda: AsyncpgPool())
+    >>> registry.provide("http_client", httpx.AsyncClient)
+    >>> await registry.execute("fetch_user", {"user_id": "123"})
 """
 
 from __future__ import annotations
@@ -28,12 +38,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
+from contextvars import ContextVar
 from functools import wraps
 from typing import (
     TYPE_CHECKING,
     Callable,
     ParamSpec,
     TypeVar,
+    get_origin,
     get_type_hints,
     overload,
 )
@@ -47,10 +59,26 @@ from .base import BaseTool, ToolMetadata
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable
 
-    from .progress import ToolProgress
+    from ..progress import ToolProgress
 
 P = ParamSpec("P")
 T = TypeVar("T")
+
+# Context variable for passing injected dependencies
+_injected_deps: ContextVar[dict[str, object]] = ContextVar("injected_deps", default={})
+
+
+def set_injected_deps(deps: dict[str, object]) -> None:
+    """Set dependencies for the current execution context.
+    
+    Called by registry before tool execution to provide resolved dependencies.
+    """
+    _injected_deps.set(deps)
+
+
+def clear_injected_deps() -> None:
+    """Clear injected dependencies after execution."""
+    _injected_deps.set({})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -92,20 +120,27 @@ def _parse_docstring_params(docstring: str | None) -> dict[str, str]:
 def _generate_schema(
     func: Callable[..., str],
     model_name: str,
+    exclude: list[str] | None = None,
 ) -> type[BaseModel]:
     """Generate Pydantic model from function signature.
     
     Introspects type hints and defaults to build Field definitions.
     Extracts descriptions from docstring if available.
+    
+    Args:
+        func: Function to introspect
+        model_name: Name for the generated model
+        exclude: Parameter names to exclude (e.g., injected dependencies)
     """
     sig = inspect.signature(func)
     hints = get_type_hints(func)
     param_docs = _parse_docstring_params(func.__doc__)
+    excluded = set(exclude or [])
     
     fields: dict[str, tuple[type, object]] = {}
     
     for name, param in sig.parameters.items():
-        if name in ("self", "cls"):
+        if name in ("self", "cls") or name in excluded:
             continue
         
         # Get type hint (default to str if missing)
@@ -133,9 +168,12 @@ class FunctionTool(BaseTool[BaseModel]):
     
     This class bridges the function-based API with the class-based BaseTool
     system, enabling full compatibility with registry, cache, and integrations.
+    
+    Supports dependency injection via the `inject` parameter, where declared
+    dependencies are resolved from the registry's DI container at execution time.
     """
     
-    __slots__ = ("_func", "_is_async", "_original_func")
+    __slots__ = ("_func", "_is_async", "_original_func", "_inject")
     
     def __init__(
         self,
@@ -145,16 +183,21 @@ class FunctionTool(BaseTool[BaseModel]):
         *,
         cache_enabled: bool = True,
         cache_ttl: float = DEFAULT_TTL,
+        inject: list[str] | None = None,
     ) -> None:
         self._func = func
-        self._is_async = asyncio.iscoroutinefunction(func)
+        self._is_async = asyncio.iscoroutinefunction(func) or inspect.isasyncgenfunction(func)
         self._original_func = func
+        self._inject = inject or []
+        
+        # Use the actual class being instantiated as base (supports subclasses)
+        base_cls = type(self)
         
         # Set class-level attributes on the instance
         # This is necessary because BaseTool expects ClassVars
         self.__class__ = type(
-            f"FunctionTool_{metadata.name}",
-            (FunctionTool,),
+            f"{base_cls.__name__}_{metadata.name}",
+            (base_cls,),
             {
                 "metadata": metadata,
                 "params_schema": params_schema,
@@ -166,9 +209,13 @@ class FunctionTool(BaseTool[BaseModel]):
     def _run(self, params: BaseModel) -> str:
         """Execute the wrapped function synchronously.
         
+        Merges validated params with any injected dependencies.
         Exceptions propagate to _run_result() which handles conversion to Result.
         """
         kwargs = params.model_dump()
+        # Merge injected dependencies
+        if self._inject:
+            kwargs.update(_injected_deps.get())
         if self._is_async:
             return self._run_async_sync(self._func(**kwargs))  # type: ignore[arg-type]
         return self._func(**kwargs)  # type: ignore[return-value]
@@ -176,9 +223,13 @@ class FunctionTool(BaseTool[BaseModel]):
     async def _async_run(self, params: BaseModel) -> str:
         """Execute the wrapped function asynchronously.
         
+        Merges validated params with any injected dependencies.
         Exceptions propagate to _async_run_result() which handles conversion.
         """
         kwargs = params.model_dump()
+        # Merge injected dependencies
+        if self._inject:
+            kwargs.update(_injected_deps.get())
         if self._is_async:
             result: str = await self._func(**kwargs)  # type: ignore[misc]
             return result
@@ -191,13 +242,13 @@ class FunctionTool(BaseTool[BaseModel]):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Streaming Function Tool
+# Streaming Function Tools
 # ─────────────────────────────────────────────────────────────────────────────
 
 class StreamingFunctionTool(FunctionTool):
-    """FunctionTool variant for async generator functions.
+    """FunctionTool variant for async generator functions yielding ToolProgress.
     
-    The wrapped function should be an async generator yielding ToolProgress events.
+    For progress streaming (status updates, step progress).
     """
     
     __slots__ = ()
@@ -205,9 +256,51 @@ class StreamingFunctionTool(FunctionTool):
     async def stream_run(self, params: BaseModel) -> AsyncIterator[ToolProgress]:
         """Stream progress events from the wrapped generator function."""
         kwargs = params.model_dump()
+        if self._inject:
+            kwargs.update(_injected_deps.get())
         gen = self._func(**kwargs)
         async for progress in gen:  # type: ignore[union-attr]
             yield progress
+
+
+class ResultStreamingFunctionTool(FunctionTool):
+    """FunctionTool variant for async generators yielding string chunks.
+    
+    For true result streaming (LLM outputs, incremental content).
+    The wrapped function should be an async generator yielding strings.
+    
+    Example:
+        >>> @tool(description="Generate report", streaming=True)
+        ... async def generate(topic: str) -> AsyncIterator[str]:
+        ...     async for chunk in llm.stream(prompt):
+        ...         yield chunk
+    """
+    
+    __slots__ = ()
+    
+    @property
+    def supports_result_streaming(self) -> bool:
+        return True
+    
+    async def stream_result(self, params: BaseModel) -> AsyncIterator[str]:
+        """Stream string chunks from the wrapped async generator."""
+        kwargs = params.model_dump()
+        if self._inject:
+            kwargs.update(_injected_deps.get())
+        gen = self._func(**kwargs)
+        async for chunk in gen:  # type: ignore[union-attr]
+            yield chunk
+    
+    async def _async_run(self, params: BaseModel) -> str:
+        """Execute by collecting all stream chunks."""
+        parts: list[str] = []
+        async for chunk in self.stream_result(params):
+            parts.append(chunk)
+        return "".join(parts)
+    
+    def _run(self, params: BaseModel) -> str:
+        """Sync execution via async collection."""
+        return self._run_async_sync(self._async_run(params))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -227,6 +320,7 @@ def tool(
     streaming: bool = False,
     cache_enabled: bool = True,
     cache_ttl: float = DEFAULT_TTL,
+    inject: list[str] | None = None,
 ) -> Callable[[Callable[P, str]], FunctionTool]: ...
 
 
@@ -240,6 +334,7 @@ def tool(
     streaming: bool = False,
     cache_enabled: bool = True,
     cache_ttl: float = DEFAULT_TTL,
+    inject: list[str] | None = None,
 ) -> FunctionTool | Callable[[Callable[P, str]], FunctionTool]:
     """Decorator to create a tool from a function.
     
@@ -256,6 +351,7 @@ def tool(
         streaming: Whether tool supports progress streaming
         cache_enabled: Enable result caching
         cache_ttl: Cache TTL in seconds
+        inject: List of dependency names to inject from registry container
     
     Returns:
         FunctionTool instance that wraps the function
@@ -269,11 +365,27 @@ def tool(
         'Results for: python'
         >>> registry.register(search)  # Register as BaseTool
     
+    Dependency Injection:
+        >>> @tool(description="Fetch data from database", inject=["db"])
+        ... async def fetch_data(query: str, db: Database) -> str:
+        ...     result = await db.fetch(query)
+        ...     return str(result)
+    
+    Streaming Example:
+        >>> @tool(description="Generate report", streaming=True)
+        ... async def generate(topic: str) -> AsyncIterator[str]:
+        ...     async for chunk in llm.stream(f"Report on {topic}"):
+        ...         yield chunk
+        ...
+        >>> async for chunk in registry.stream_execute("generate", {"topic": "AI"}):
+        ...     print(chunk, end="", flush=True)
+    
     Notes:
-        - Function must return str
+        - Function must return str (or AsyncIterator[str] for streaming)
         - All parameters must have type hints
         - Async functions are fully supported
-        - For streaming tools, use async generators yielding ToolProgress
+        - streaming=True with async generator enables result streaming
+        - Injected parameters are excluded from the generated schema
     """
     def decorator(fn: Callable[P, str]) -> FunctionTool:
         # Derive metadata from function if not provided
@@ -293,12 +405,22 @@ def tool(
             streaming=streaming,
         )
         
-        # Generate parameter schema
+        # Generate parameter schema (excluding injected params)
         schema_name = f"{_to_pascal_case(tool_name)}Params"
-        schema = _generate_schema(fn, schema_name)
+        schema = _generate_schema(fn, schema_name, exclude=inject or [])
         
-        # Create appropriate tool class
-        tool_cls = StreamingFunctionTool if streaming and asyncio.iscoroutinefunction(fn) else FunctionTool
+        # Determine tool class based on function type and streaming flag
+        is_async_gen = inspect.isasyncgenfunction(fn)
+        
+        if streaming and is_async_gen:
+            # Async generator yielding strings -> result streaming
+            tool_cls = ResultStreamingFunctionTool
+        elif streaming and asyncio.iscoroutinefunction(fn):
+            # Async coroutine with streaming -> progress streaming
+            tool_cls = StreamingFunctionTool
+        else:
+            # Regular sync/async function
+            tool_cls = FunctionTool
         
         tool_instance = tool_cls(
             fn,
@@ -306,6 +428,7 @@ def tool(
             schema,
             cache_enabled=cache_enabled,
             cache_ttl=cache_ttl,
+            inject=inject,
         )
         
         # Preserve function metadata
