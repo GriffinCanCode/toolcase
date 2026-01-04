@@ -221,10 +221,21 @@ class BaseTool(ABC, Generic[TParams]):
     
     async def arun(self, params: TParams, timeout: float = 30.0) -> str:
         """Execute asynchronously with caching and timeout."""
-        return await asyncio.wait_for(
-            asyncio.to_thread(self.run, params),
-            timeout=timeout,
-        )
+        if not self.cache_enabled:
+            return await asyncio.wait_for(self._async_run(params), timeout=timeout)
+        
+        cache = get_cache()
+        tool_name = self.metadata.name
+        
+        if (cached := cache.get(tool_name, params)) is not None:
+            return cached
+        
+        result = await asyncio.wait_for(self._async_run(params), timeout=timeout)
+        
+        if not result.startswith("**Tool Error"):
+            cache.set(tool_name, params, result, self.cache_ttl)
+        
+        return result
     
     # ─────────────────────────────────────────────────────────────────
     # Streaming Progress

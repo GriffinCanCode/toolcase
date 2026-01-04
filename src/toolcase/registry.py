@@ -42,8 +42,13 @@ class ToolRegistry:
         self._tools: dict[str, BaseTool[BaseModel]] = {}
     
     def register(self, tool: BaseTool[BaseModel]) -> None:
-        """Register a tool instance."""
-        self._tools[tool.metadata.name] = tool
+        """Register a tool instance with validation."""
+        name = tool.metadata.name
+        if name in self._tools:
+            raise ValueError(f"Tool '{name}' already registered. Use unregister() first.")
+        if len(tool.metadata.description) < 10:
+            raise ValueError(f"Tool '{name}' description too short for LLM selection.")
+        self._tools[name] = tool
     
     def unregister(self, name: str) -> bool:
         """Remove a tool by name. Returns True if found."""
