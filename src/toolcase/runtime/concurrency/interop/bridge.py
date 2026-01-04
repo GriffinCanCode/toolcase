@@ -64,6 +64,11 @@ _thread_local = threading.local()
 _default_executor: ThreadPoolExecutor | None = None
 _executor_lock = threading.Lock()
 
+# Bounded concurrency for to_thread (prevents thread pool exhaustion)
+_DEFAULT_THREAD_LIMIT = 100
+_thread_semaphore: asyncio.Semaphore | None = None
+_semaphore_lock = threading.Lock()
+
 
 def _get_default_executor() -> ThreadPoolExecutor:
     """Get or create default thread pool executor."""
@@ -73,6 +78,36 @@ def _get_default_executor() -> ThreadPoolExecutor:
             if _default_executor is None:
                 _default_executor = ThreadPoolExecutor(thread_name_prefix="toolcase-interop-")
     return _default_executor
+
+
+def _get_thread_semaphore(limit: int = _DEFAULT_THREAD_LIMIT) -> asyncio.Semaphore:
+    """Get or create bounded concurrency semaphore for to_thread.
+    
+    The semaphore prevents thread pool exhaustion by limiting concurrent
+    thread operations. Created lazily on first use.
+    """
+    global _thread_semaphore
+    if _thread_semaphore is None:
+        with _semaphore_lock:
+            if _thread_semaphore is None:
+                _thread_semaphore = asyncio.Semaphore(limit)
+    return _thread_semaphore
+
+
+def configure_thread_limit(limit: int) -> None:
+    """Configure the maximum concurrent thread operations.
+    
+    Must be called before any to_thread calls. Raises RuntimeError
+    if semaphore already created.
+    
+    Args:
+        limit: Maximum concurrent thread operations (default: 100)
+    """
+    global _thread_semaphore
+    with _semaphore_lock:
+        if _thread_semaphore is not None:
+            raise RuntimeError("Thread limit cannot be changed after first to_thread call")
+        _thread_semaphore = asyncio.Semaphore(limit)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -193,20 +228,28 @@ async def to_thread(
     func: Callable[..., T],
     *args: object,
     cancellable: bool = False,
+    limiter: bool = True,
     **kwargs: object,
 ) -> T:
-    """Run sync function in thread pool.
+    """Run sync function in thread pool with bounded concurrency.
     
-    Similar to asyncio.to_thread but with additional options.
+    Similar to asyncio.to_thread but with additional options and
+    bounded concurrency to prevent thread pool exhaustion.
     
     Args:
         func: Sync function to call
         *args: Positional arguments
         cancellable: Whether function should be interruptible (via threading)
+        limiter: Whether to use bounded concurrency (default: True).
+                 Set to False for critical operations that must not wait.
         **kwargs: Keyword arguments
     
     Returns:
         Function result
+    
+    Note:
+        Default limit is 100 concurrent thread operations. Configure via
+        configure_thread_limit() before first call if needed.
     """
     loop = asyncio.get_running_loop()
     
@@ -216,10 +259,16 @@ async def to_thread(
     if kwargs:
         func = functools.partial(func, **kwargs)
     
-    return await loop.run_in_executor(
-        _get_default_executor(),
-        functools.partial(ctx.run, func, *args),
-    )
+    async def _run() -> T:
+        return await loop.run_in_executor(
+            _get_default_executor(),
+            functools.partial(ctx.run, func, *args),
+        )
+    
+    if limiter:
+        async with _get_thread_semaphore():
+            return await _run()
+    return await _run()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

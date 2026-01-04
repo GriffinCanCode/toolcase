@@ -72,19 +72,32 @@ class Provider:
 
 @dataclass(slots=True)
 class ScopedContext:
-    """Request-scoped container context for scoped instances."""
+    """Request-scoped container context for scoped instances.
+    
+    Tracks creation order for proper LIFO disposal (dependencies created
+    first should be disposed last).
+    """
     
     instances: dict[str, object] = field(default_factory=dict)
+    _creation_order: list[str] = field(default_factory=list)
     _disposed: bool = False
     
+    def set(self, name: str, instance: object) -> None:
+        """Store instance with order tracking."""
+        self.instances[name] = instance
+        self._creation_order.append(name)
+    
     async def dispose(self) -> None:
-        """Clean up all scoped resources."""
+        """Clean up all scoped resources in reverse creation order (LIFO)."""
         if self._disposed:
             return
         self._disposed = True
         
-        # Dispose in reverse order (LIFO)
-        for resource in reversed(list(self.instances.values())):
+        # Dispose in reverse creation order (LIFO - last created, first disposed)
+        for name in reversed(self._creation_order):
+            resource = self.instances.get(name)
+            if resource is None:
+                continue
             if isinstance(resource, Disposable):
                 try:
                     await resource.close()
@@ -101,7 +114,7 @@ class Container:
     """Dependency injection container.
     
     Manages provider registration and instance lifecycle.
-    Thread-safe for singleton resolution.
+    Thread-safe for singleton resolution. Detects circular dependencies.
     
     Example:
         >>> container = Container()
@@ -114,11 +127,12 @@ class Container:
         ...     session = await container.resolve("session", ctx)
     """
     
-    __slots__ = ("_providers", "_lock")
+    __slots__ = ("_providers", "_lock", "_resolving")
     
     def __init__(self) -> None:
         self._providers: dict[str, Provider] = {}
         self._lock = Lock()
+        self._resolving: set[str] = set()  # Track deps being resolved for circular detection
     
     def provide(
         self,
@@ -152,19 +166,29 @@ class Container:
         Raises:
             KeyError: Unknown dependency
             ValueError: Scoped dependency without context
+            RuntimeError: Circular dependency detected
         """
         if name not in self._providers:
             raise KeyError(f"Unknown dependency: {name}")
         
-        provider = self._providers[name]
+        # Circular dependency detection
+        if name in self._resolving:
+            chain = " -> ".join(self._resolving) + f" -> {name}"
+            raise RuntimeError(f"Circular dependency detected: {chain}")
         
-        match provider.scope:
-            case Scope.SINGLETON:
-                return await self._resolve_singleton(provider)
-            case Scope.SCOPED:
-                return await self._resolve_scoped(name, provider, ctx)
-            case Scope.TRANSIENT:
-                return await self._create_instance(provider.factory)
+        self._resolving.add(name)
+        try:
+            provider = self._providers[name]
+            
+            match provider.scope:
+                case Scope.SINGLETON:
+                    return await self._resolve_singleton(provider)
+                case Scope.SCOPED:
+                    return await self._resolve_scoped(name, provider, ctx)
+                case Scope.TRANSIENT:
+                    return await self._create_instance(provider.factory)
+        finally:
+            self._resolving.discard(name)
     
     async def resolve_result(self, name: str, ctx: ScopedContext | None = None) -> DIResult:
         """Resolve dependency with Result-based error handling.
@@ -268,7 +292,8 @@ class Container:
             raise ValueError(f"Scoped dependency '{name}' requires context")
         
         if name not in ctx.instances:
-            ctx.instances[name] = await self._create_instance(provider.factory)
+            instance = await self._create_instance(provider.factory)
+            ctx.set(name, instance)
         return ctx.instances[name]
     
     @staticmethod

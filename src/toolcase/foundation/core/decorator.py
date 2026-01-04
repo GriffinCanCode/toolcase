@@ -69,7 +69,22 @@ P = ParamSpec("P")
 T = TypeVar("T")
 
 # Context variable for passing injected dependencies
-_injected_deps: ContextVar[JsonDict] = ContextVar("injected_deps", default={})
+# Note: No default set to avoid mutable default dict shared across contexts
+_injected_deps: ContextVar[JsonDict] = ContextVar("injected_deps")
+
+# Empty dict singleton for clear operations (avoids allocations)
+_EMPTY_DEPS: JsonDict = {}
+
+
+def get_injected_deps() -> JsonDict:
+    """Get dependencies for the current execution context.
+    
+    Returns empty dict if not set (safe access pattern).
+    """
+    try:
+        return _injected_deps.get()
+    except LookupError:
+        return _EMPTY_DEPS
 
 
 def set_injected_deps(deps: JsonDict) -> None:
@@ -82,7 +97,7 @@ def set_injected_deps(deps: JsonDict) -> None:
 
 def clear_injected_deps() -> None:
     """Clear injected dependencies after execution."""
-    _injected_deps.set({})
+    _injected_deps.set(_EMPTY_DEPS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -220,7 +235,7 @@ class FunctionTool(BaseTool[BaseModel]):
         """
         kwargs = params.model_dump()
         if self._inject:
-            kwargs.update(_injected_deps.get())
+            kwargs.update(get_injected_deps())
         if self._is_async:
             return self._run_async_sync(self._func(**kwargs))  # type: ignore[arg-type]
         return self._func(**kwargs)  # type: ignore[return-value]
@@ -230,7 +245,7 @@ class FunctionTool(BaseTool[BaseModel]):
         try:
             kwargs = params.model_dump()
             if self._inject:
-                kwargs.update(_injected_deps.get())
+                kwargs.update(get_injected_deps())
             if self._is_async:
                 return Result(self._run_async_sync(self._func(**kwargs)), _OK)  # type: ignore[arg-type]
             return Result(self._func(**kwargs), _OK)  # type: ignore[arg-type]
@@ -245,7 +260,7 @@ class FunctionTool(BaseTool[BaseModel]):
         """
         kwargs = params.model_dump()
         if self._inject:
-            kwargs.update(_injected_deps.get())
+            kwargs.update(get_injected_deps())
         if self._is_async:
             result: str = await self._func(**kwargs)  # type: ignore[misc]
             return result
@@ -256,7 +271,7 @@ class FunctionTool(BaseTool[BaseModel]):
         try:
             kwargs = params.model_dump()
             if self._inject:
-                kwargs.update(_injected_deps.get())
+                kwargs.update(get_injected_deps())
             if self._is_async:
                 result: str = await self._func(**kwargs)  # type: ignore[misc]
             else:
@@ -296,7 +311,7 @@ class StreamingFunctionTool(FunctionTool):
         """Stream progress events from the wrapped generator function."""
         kwargs = params.model_dump()
         if self._inject:
-            kwargs.update(_injected_deps.get())
+            kwargs.update(get_injected_deps())
         gen = self._func(**kwargs)
         async for progress in gen:  # type: ignore[union-attr]
             yield progress
@@ -325,7 +340,7 @@ class ResultStreamingFunctionTool(FunctionTool):
         """Stream string chunks from the wrapped async generator."""
         kwargs = params.model_dump()
         if self._inject:
-            kwargs.update(_injected_deps.get())
+            kwargs.update(get_injected_deps())
         gen = self._func(**kwargs)
         async for chunk in gen:  # type: ignore[union-attr]
             yield chunk

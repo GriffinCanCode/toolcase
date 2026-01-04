@@ -7,25 +7,20 @@ Implements a discriminated union for success/failure with full monadic operation
 - Bifunctor: bimap
 - Railway-oriented composition
 
-Performance notes:
-- Uses __slots__ for minimal memory footprint
-- Direct attribute access (no method calls) in hot paths
-- Optimized sequence/traverse with early bailout
+Performance: __slots__ for minimal memory, direct attribute access in hot paths, early bailout in sequence/traverse.
+Type variance: Invariant TypeVars (T/E appear in covariant+contravariant positions). Use cast() for read-only access.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
-from typing import Callable, Generic, TypeVar, final, overload
+from typing import Callable, Generic, TypeVar, final
 
-T = TypeVar("T")
-E = TypeVar("E")
-U = TypeVar("U")
-F = TypeVar("F")
+# Invariant TypeVars (T/E in covariant+contravariant positions)
+T, E, U, F = TypeVar("T"), TypeVar("E"), TypeVar("U"), TypeVar("F")
 
-# Sentinel for faster Ok/Err construction (avoid bool coercion overhead)
-_OK = True
-_ERR = False
+# Sentinels for faster Ok/Err construction
+_OK, _ERR = True, False
 
 
 @final
@@ -95,15 +90,15 @@ class Result(Generic[T, E]):
 
     def expect(self, msg: str) -> T:
         """Extract Ok value with custom error message."""
-        if self._is_ok:
-            return self._value  # type: ignore[return-value]
-        raise RuntimeError(f"{msg}: {self._value}")
+        if not self._is_ok:
+            raise RuntimeError(f"{msg}: {self._value}")
+        return self._value  # type: ignore[return-value]
 
     def expect_err(self, msg: str) -> E:
         """Extract Err value with custom error message."""
-        if not self._is_ok:
-            return self._value  # type: ignore[return-value]
-        raise RuntimeError(f"{msg}: {self._value}")
+        if self._is_ok:
+            raise RuntimeError(f"{msg}: {self._value}")
+        return self._value  # type: ignore[return-value]
 
     # ─── Functor Operations ────────────────────────────────────────────
 
@@ -209,9 +204,7 @@ class Result(Generic[T, E]):
     __str__ = __repr__
 
     def __eq__(self, other: object) -> bool:
-        if isinstance(other, Result):
-            return self._is_ok == other._is_ok and self._value == other._value
-        return NotImplemented
+        return self._is_ok == other._is_ok and self._value == other._value if isinstance(other, Result) else NotImplemented
 
     def __iter__(self) -> Iterator[T]:
         """Iterate: yields value if Ok, nothing if Err."""

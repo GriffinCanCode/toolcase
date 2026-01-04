@@ -17,6 +17,7 @@ from .decorator import (
     ResultStreamingFunctionTool,
     StreamingFunctionTool,
     clear_injected_deps,
+    get_injected_deps,
     set_injected_deps,
     tool,
 )
@@ -30,5 +31,6 @@ __all__ = [
     "StreamingFunctionTool",
     "ResultStreamingFunctionTool",
     "set_injected_deps",
+    "get_injected_deps",
     "clear_injected_deps",
 ]

@@ -7,7 +7,16 @@
 - TypeAdapter utilities: validate_context, validate_trace for fast validation
 """
 
-from .errors import ErrorCode, ToolError, ToolException, classify_exception
+from .errors import (
+    ErrorCode,
+    ToolError,
+    ToolException,
+    RetryableToolException,
+    AuthToolException,
+    ValidationToolException,
+    classify_exception,
+    format_validation_error,
+)
 from .result import Err, Ok, Result, collect_results, sequence, traverse, try_fn
 from .tool import (
     ToolResult,
@@ -37,7 +46,9 @@ from .types import (
 
 __all__ = [
     # Core errors
-    "ErrorCode", "ToolError", "ToolException", "classify_exception",
+    "ErrorCode", "ToolError", "ToolException", "classify_exception", "format_validation_error",
+    # Exception subclasses for specific error handling
+    "RetryableToolException", "AuthToolException", "ValidationToolException",
     # Result monad
     "Result", "Ok", "Err", "ResultT", "try_fn",
     # Tool integration

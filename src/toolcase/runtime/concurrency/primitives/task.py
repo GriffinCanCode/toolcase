@@ -9,6 +9,7 @@ Key Features:
     - Cancel scopes: Fine-grained cancellation control
     - Task handles: Access to task state and results
     - Checkpoints: Cooperative cancellation points
+    - Uses native asyncio.TaskGroup on Python 3.11+
 
 Example:
     >>> async with TaskGroup() as tg:
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import sys
 from collections.abc import Awaitable, Coroutine
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -34,6 +36,30 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 P = ParamSpec("P")
 
+# Use native TaskGroup on Python 3.11+
+_USE_NATIVE_TASKGROUP = sys.version_info >= (3, 11)
+
+
+class _FallbackExceptionGroup(BaseException):
+    """Fallback ExceptionGroup for Python < 3.11."""
+    
+    __slots__ = ("message", "exceptions")
+    
+    def __init__(self, message: str, exceptions: list[Exception]) -> None:
+        self.message = message
+        self.exceptions = exceptions
+        super().__init__(message)
+    
+    def __str__(self) -> str:
+        return f"{self.message} ({len(self.exceptions)} sub-exceptions)"
+
+
+# ExceptionGroup is only available in Python 3.11+
+try:
+    _ExceptionGroup: type[BaseException] = ExceptionGroup  # type: ignore[name-defined]
+except NameError:
+    _ExceptionGroup = _FallbackExceptionGroup
+
 __all__ = [
     "TaskState",
     "TaskHandle",
@@ -41,6 +67,7 @@ __all__ = [
     "TaskGroup",
     "shield",
     "checkpoint",
+    "shielded_checkpoint",
     "current_task",
     "spawn",
     "cancellable",
@@ -188,33 +215,11 @@ class CancelScope:
         self.cancel()
 
 
-class TaskGroup:
-    """Structured task group with automatic cancellation.
+class _LegacyTaskGroup:
+    """Legacy TaskGroup implementation for Python < 3.11.
     
     Manages multiple concurrent tasks as a unit. When exiting the
     context, waits for all tasks. If any task fails, cancels siblings.
-    
-    Features:
-        - spawn(): Start tasks that are managed by the group
-        - spawn_soon(): Schedule task for next iteration
-        - Automatic cleanup on exception
-        - First-exception cancels all
-    
-    Example:
-        >>> async with TaskGroup() as tg:
-        ...     tg.spawn(fetch_user, user_id)
-        ...     tg.spawn(fetch_orders, user_id)
-        ...     tg.spawn(fetch_preferences, user_id)
-        >>> # All complete, results in handles
-        
-        >>> # With error handling
-        >>> try:
-        ...     async with TaskGroup() as tg:
-        ...         tg.spawn(may_fail)
-        ...         tg.spawn(another_task)
-        ... except ExceptionGroup as eg:
-        ...     for exc in eg.exceptions:
-        ...         print(f"Task failed: {exc}")
     """
     
     __slots__ = ("_tasks", "_handles", "_host_task", "_started", "_exiting")
@@ -232,18 +237,7 @@ class TaskGroup:
         *,
         name: str | None = None,
     ) -> TaskHandle[T]:
-        """Spawn a task in this group.
-        
-        Args:
-            coro: Coroutine to execute
-            name: Optional task name
-        
-        Returns:
-            TaskHandle for accessing result/state
-        
-        Raises:
-            RuntimeError: If called outside context manager
-        """
+        """Spawn a task in this group."""
         if not self._started:
             raise RuntimeError("TaskGroup must be used as context manager")
         if self._exiting:
@@ -265,13 +259,9 @@ class TaskGroup:
         *,
         name: str | None = None,
     ) -> TaskHandle[T]:
-        """Schedule a task to start on next event loop iteration.
-        
-        Unlike spawn(), doesn't start immediately. Useful when you
-        need to ensure ordering or want deferred execution.
-        """
+        """Schedule a task to start on next event loop iteration."""
         async def deferred() -> T:
-            await asyncio.sleep(0)  # Yield to event loop
+            await asyncio.sleep(0)
             return await coro
         
         return self.spawn(deferred(), name=name)
@@ -281,7 +271,7 @@ class TaskGroup:
         """All task handles in this group."""
         return list(self._handles)
     
-    async def __aenter__(self) -> TaskGroup:
+    async def __aenter__(self) -> _LegacyTaskGroup:
         self._host_task = asyncio.current_task()
         self._started = True
         return self
@@ -294,12 +284,10 @@ class TaskGroup:
     ) -> bool:
         self._exiting = True
         
-        # Cancel all tasks if we're exiting due to exception
         if exc_val is not None:
             for task in self._tasks:
                 task.cancel()
         
-        # Wait for all tasks to complete
         exceptions: list[BaseException] = []
         
         while self._tasks:
@@ -312,22 +300,125 @@ class TaskGroup:
                 try:
                     task.result()
                 except asyncio.CancelledError:
-                    pass  # Expected if we cancelled
+                    pass
                 except BaseException as e:
                     exceptions.append(e)
-                    # Cancel remaining on first failure
                     for t in self._tasks:
                         t.cancel()
         
-        # Re-raise collected exceptions
         if exceptions:
             if exc_val is not None:
                 exceptions.insert(0, exc_val)
             if len(exceptions) == 1:
                 raise exceptions[0]
-            raise ExceptionGroup("TaskGroup errors", [e for e in exceptions if isinstance(e, Exception)])
+            raise _ExceptionGroup("TaskGroup errors", [e for e in exceptions if isinstance(e, Exception)])
         
         return False
+
+
+class _NativeTaskGroup:
+    """TaskGroup using Python 3.11+ native asyncio.TaskGroup.
+    
+    Wraps the native implementation while providing TaskHandle interface.
+    """
+    
+    __slots__ = ("_tg", "_handles", "_started")
+    
+    def __init__(self) -> None:
+        self._tg: asyncio.TaskGroup | None = None
+        self._handles: list[TaskHandle[object]] = []
+        self._started = False
+    
+    def spawn(
+        self,
+        coro: Coroutine[object, object, T],
+        *,
+        name: str | None = None,
+    ) -> TaskHandle[T]:
+        """Spawn a task using native TaskGroup."""
+        if not self._started or self._tg is None:
+            raise RuntimeError("TaskGroup must be used as context manager")
+        
+        task = self._tg.create_task(coro, name=name)
+        handle: TaskHandle[T] = TaskHandle(name=name)
+        handle._task = task
+        self._handles.append(handle)  # type: ignore[arg-type]
+        
+        return handle
+    
+    def spawn_soon(
+        self,
+        coro: Coroutine[object, object, T],
+        *,
+        name: str | None = None,
+    ) -> TaskHandle[T]:
+        """Schedule a task to start on next event loop iteration."""
+        async def deferred() -> T:
+            await asyncio.sleep(0)
+            return await coro
+        
+        return self.spawn(deferred(), name=name)
+    
+    @property
+    def tasks(self) -> list[TaskHandle[object]]:
+        """All task handles in this group."""
+        return list(self._handles)
+    
+    async def __aenter__(self) -> _NativeTaskGroup:
+        self._tg = asyncio.TaskGroup()
+        await self._tg.__aenter__()
+        self._started = True
+        return self
+    
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool:
+        if self._tg is None:
+            return False
+        return await self._tg.__aexit__(exc_type, exc_val, exc_tb)  # type: ignore[return-value]
+
+
+# Choose implementation based on Python version
+# Type alias for proper type checking
+if _USE_NATIVE_TASKGROUP:
+    TaskGroup = _NativeTaskGroup
+else:
+    TaskGroup = _LegacyTaskGroup
+
+# Add docstring for the chosen implementation
+TaskGroup.__doc__ = """Structured task group with automatic cancellation.
+
+Manages multiple concurrent tasks as a unit. When exiting the
+context, waits for all tasks. If any task fails, cancels siblings.
+
+Uses native asyncio.TaskGroup on Python 3.11+ for better performance.
+Falls back to custom implementation on earlier versions.
+
+Features:
+    - spawn(): Start tasks that are managed by the group
+    - spawn_soon(): Schedule task for next iteration
+    - Automatic cleanup on exception
+    - First-exception cancels all
+
+Example:
+    >>> async with TaskGroup() as tg:
+    ...     tg.spawn(fetch_user, user_id)
+    ...     tg.spawn(fetch_orders, user_id)
+    ...     tg.spawn(fetch_preferences, user_id)
+    >>> # All complete, results in handles
+    
+    >>> # With error handling
+    >>> try:
+    ...     async with TaskGroup() as tg:
+    ...         tg.spawn(may_fail)
+    ...         tg.spawn(another_task)
+    ... except ExceptionGroup as eg:
+    ...     for exc in eg.exceptions:
+    ...         print(f"Task failed: {exc}")
+"""
 
 
 async def shield(coro: Awaitable[T]) -> T:
@@ -357,6 +448,28 @@ async def checkpoint() -> None:
         ...         await checkpoint()  # Allow cancellation here
     """
     await asyncio.sleep(0)
+
+
+async def shielded_checkpoint() -> None:
+    """Checkpoint that handles cancellation gracefully.
+    
+    Like checkpoint(), but catches CancelledError and re-raises it,
+    allowing cleanup code to run. Use in critical sections where you
+    want to yield but ensure cleanup happens.
+    
+    Example:
+        >>> async def critical_operation():
+        ...     try:
+        ...         await shielded_checkpoint()
+        ...         # Critical work here
+        ...     finally:
+        ...         await cleanup()  # Will run even if cancelled
+    """
+    try:
+        await asyncio.sleep(0)
+    except asyncio.CancelledError:
+        # Re-raise to allow proper cancellation propagation
+        raise
 
 
 def current_task() -> asyncio.Task[object] | None:

@@ -1,11 +1,11 @@
 """Type aliases and error context tracking for monadic error handling.
 
-Uses Pydantic models for validation and serialization where performance allows.
-Optimized for high-frequency error path creation with minimal allocations.
+Uses Pydantic models for validation/serialization. Optimized for high-frequency error paths with minimal allocations.
 """
 
 from __future__ import annotations
 
+from io import StringIO
 from typing import TYPE_CHECKING, Annotated, TypeAlias, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, computed_field, field_serializer
@@ -25,6 +25,9 @@ JsonPrimitive = Union[str, int, float, bool, None]
 JsonValue = Union[JsonPrimitive, list[Any], dict[str, Any]]  # Any for recursive slots
 JsonDict = dict[str, Any]
 
+# Threshold for using StringIO in format() (improves performance for large traces)
+_FORMAT_STRINGIO_THRESHOLD = 10
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Error Context & Provenance
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -34,31 +37,17 @@ _EMPTY_META: JsonDict = {}
 
 
 class ErrorContext(BaseModel):
-    """Context for error at a call site. Tracks operation, location, metadata.
-    
-    Attributes:
-        operation: Name of the operation (e.g., "tool:web_search", "http:request")
-        location: Optional location info (e.g., file:line)
-        metadata: Additional context data
-    """
+    """Context for error at a call site. Tracks operation, location, metadata. Pydantic frozen=True for immutability."""
     
     model_config = ConfigDict(
-        frozen=True,
-        str_strip_whitespace=True,
-        extra="forbid",
-        revalidate_instances="never",  # Performance: contexts are often passed around
-        populate_by_name=True,  # Accept both alias and field name
-        json_schema_extra={
-            "title": "Error Context",
-            "examples": [{"operation": "tool:web_search", "location": "", "metadata": {"attempt": 1}}],
-        },
+        frozen=True, str_strip_whitespace=True, extra="forbid",
+        revalidate_instances="never", populate_by_name=True,
+        json_schema_extra={"title": "Error Context", "examples": [{"operation": "tool:web_search", "location": "", "metadata": {"attempt": 1}}]},
     )
 
     operation: Annotated[str, Field(min_length=1)]
-    location: str = Field(default="", repr=False)  # Often empty, hide from repr
+    location: str = Field(default="", repr=False)
     metadata: JsonDict = Field(default_factory=dict, repr=False)
-
-    __slots__ = ()  # Signal to Pydantic to use slots-compatible mode
     
     def __str__(self) -> str:
         loc = f" at {self.location}" if self.location else ""
@@ -75,32 +64,13 @@ _EMPTY_CONTEXTS: tuple[ErrorContext, ...] = ()
 
 
 class ErrorTrace(BaseModel):
-    """Stack of error contexts forming call chain trace for provenance tracking.
-    
-    Provides immutable error propagation with rich context for debugging.
-    Optimized for high-frequency error path creation.
-    
-    Attributes:
-        message: Human-readable error message
-        contexts: Stack of ErrorContext forming the call chain
-        error_code: Machine-readable error code
-        recoverable: Whether retry might succeed
-        details: Optional detailed info (e.g., stack trace)
-    """
+    """Stack of error contexts forming call chain trace. Immutable error propagation with rich context for debugging."""
     
     model_config = ConfigDict(
-        frozen=True,
-        str_strip_whitespace=True,
-        validate_default=True,
-        extra="forbid",
-        revalidate_instances="never",  # Performance: traces are passed around frequently
-        json_schema_extra={
-            "title": "Error Trace",
-            "description": "Full error context with provenance tracking",
-        },
+        frozen=True, str_strip_whitespace=True, validate_default=True, extra="forbid",
+        revalidate_instances="never",
+        json_schema_extra={"title": "Error Trace", "description": "Full error context with provenance tracking"},
     )
-
-    __slots__ = ()
     
     message: Annotated[str, Field(min_length=1)]
     contexts: tuple[ErrorContext, ...] = _EMPTY_CONTEXTS
@@ -178,10 +148,18 @@ class ErrorTrace(BaseModel):
         )
 
     def format(self, *, include_details: bool = False) -> str:
-        """Format trace as human-readable string."""
+        """Format trace as human-readable string.
+        
+        Uses StringIO for traces with many contexts (>10) for better performance
+        when building large strings.
+        """
         # Fast path: minimal error
         if not self.error_code and not self.contexts and not self.recoverable:
             return self.message if not (include_details and self.details) else f"{self.message}\nDetails:\n{self.details}"
+        
+        # Use StringIO for large traces (many contexts)
+        if len(self.contexts) > _FORMAT_STRINGIO_THRESHOLD:
+            return self._format_large(include_details=include_details)
         
         parts = [self.message]
         if self.error_code:
@@ -193,6 +171,22 @@ class ErrorTrace(BaseModel):
         if include_details and self.details:
             parts.append(f"\nDetails:\n{self.details}")
         return "".join(parts)
+    
+    def _format_large(self, *, include_details: bool = False) -> str:
+        """Format large traces using StringIO for efficiency."""
+        buf = StringIO()
+        buf.write(self.message)
+        if self.error_code:
+            buf.write(f" [{self.error_code}]")
+        if self.contexts:
+            buf.write("\nContext trace:\n")
+            for ctx in self.contexts:
+                buf.write(f"  - {ctx}\n")
+        if self.recoverable:
+            buf.write("(This error may be recoverable)")
+        if include_details and self.details:
+            buf.write(f"\nDetails:\n{self.details}")
+        return buf.getvalue()
 
     __str__ = format
 
