@@ -51,16 +51,8 @@ class TimeoutMiddleware:
         
         if scope.cancel_called:
             trace = ErrorTrace(
-                message=f"Execution timed out after {timeout}s",
-                error_code=ErrorCode.TIMEOUT.value,
-                recoverable=True,
+                message=f"Execution timed out after {timeout}s", error_code=ErrorCode.TIMEOUT.value, recoverable=True,
             ).with_operation("middleware:timeout", tool=tool.metadata.name, timeout=timeout)
             ctx["error_trace"] = trace
-            raise ToolException(ToolError.create(
-                tool.metadata.name,
-                trace.message,
-                ErrorCode.TIMEOUT,
-                recoverable=True,
-            ))
-        
+            raise ToolException(ToolError.create(tool.metadata.name, trace.message, ErrorCode.TIMEOUT, recoverable=True))
         return result

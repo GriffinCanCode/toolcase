@@ -29,9 +29,7 @@ if TYPE_CHECKING:
 
 class State(IntEnum):
     """Circuit breaker states."""
-    CLOSED = 0      # Normal operation, requests pass through
-    OPEN = 1        # Failing fast, requests rejected
-    HALF_OPEN = 2   # Testing recovery, limited requests
+    CLOSED, OPEN, HALF_OPEN = 0, 1, 2  # Normal → Failing fast → Testing recovery
 
 
 @dataclass(slots=True)
@@ -87,56 +85,33 @@ class CircuitBreakerMiddleware:
     _circuits: dict[str, CircuitState] = field(default_factory=dict, repr=False)
     
     def _get_circuit(self, key: str) -> CircuitState:
-        if key not in self._circuits:
-            self._circuits[key] = CircuitState()
-        return self._circuits[key]
-    
-    def _should_trip(self, code: ErrorCode) -> bool:
-        """Check if error code should trip the breaker."""
-        return code in self.trip_on
+        return self._circuits.setdefault(key, CircuitState())
     
     def _check_state(self, circuit: CircuitState) -> State:
         """Evaluate and potentially transition circuit state."""
-        now = time.time()
-        
-        if circuit.state == State.OPEN:
-            # Check if recovery time elapsed
-            if now - circuit.last_state_change >= self.recovery_time:
-                circuit.state = State.HALF_OPEN
-                circuit.successes = 0
-                circuit.last_state_change = now
-        
+        # Check if recovery time elapsed
+        if circuit.state == State.OPEN and time.time() - circuit.last_state_change >= self.recovery_time:
+            circuit.state, circuit.successes, circuit.last_state_change = State.HALF_OPEN, 0, time.time()
         return circuit.state
     
     def _record_success(self, circuit: CircuitState) -> None:
         """Record successful execution."""
         if circuit.state == State.HALF_OPEN:
             circuit.successes += 1
-            if circuit.successes >= self.success_threshold:
-                # Recovery confirmed
-                circuit.state = State.CLOSED
-                circuit.failures = 0
-                circuit.last_state_change = time.time()
+            if circuit.successes >= self.success_threshold:  # Recovery confirmed
+                circuit.state, circuit.failures, circuit.last_state_change = State.CLOSED, 0, time.time()
         elif circuit.state == State.CLOSED:
-            # Reset failure count on success
-            circuit.failures = max(0, circuit.failures - 1)
+            circuit.failures = max(0, circuit.failures - 1)  # Reset failure count on success
     
     def _record_failure(self, circuit: CircuitState, code: ErrorCode) -> None:
         """Record failed execution."""
-        if not self._should_trip(code):
+        if code not in self.trip_on:
             return
-        
         circuit.failures += 1
         circuit.last_failure = time.time()
-        
-        if circuit.state == State.HALF_OPEN:
-            # Probe failed, back to open
-            circuit.state = State.OPEN
-            circuit.last_state_change = time.time()
-        elif circuit.state == State.CLOSED and circuit.failures >= self.failure_threshold:
-            # Threshold exceeded, open circuit
-            circuit.state = State.OPEN
-            circuit.last_state_change = time.time()
+        # Probe failed OR threshold exceeded → open circuit
+        if circuit.state == State.HALF_OPEN or (circuit.state == State.CLOSED and circuit.failures >= self.failure_threshold):
+            circuit.state, circuit.last_state_change = State.OPEN, time.time()
     
     async def __call__(
         self,
@@ -150,57 +125,38 @@ class CircuitBreakerMiddleware:
         state = self._check_state(circuit)
         
         # Store circuit info in context for observability
-        ctx["circuit_state"] = state.name
-        ctx["circuit_failures"] = circuit.failures
-        ctx["circuit_key"] = key
+        ctx.update(circuit_state=state.name, circuit_failures=circuit.failures, circuit_key=key)
         
         # Fail fast if open
         if state == State.OPEN:
             retry_in = self.recovery_time - (time.time() - circuit.last_state_change)
             trace = ErrorTrace(
-                message=f"Circuit open - failing fast after {circuit.failures} failures. "
-                        f"Retry in {retry_in:.0f}s",
+                message=f"Circuit open - failing fast after {circuit.failures} failures. Retry in {retry_in:.0f}s",
                 error_code=ErrorCode.EXTERNAL_SERVICE_ERROR.value,
                 recoverable=True,
             ).with_operation(
-                "middleware:circuit_breaker",
-                tool=tool.metadata.name,
-                state=state.name,
-                failures=circuit.failures,
-                retry_in_seconds=retry_in,
+                "middleware:circuit_breaker", tool=tool.metadata.name,
+                state=state.name, failures=circuit.failures, retry_in_seconds=retry_in,
             )
             ctx["error_trace"] = trace
             raise ToolException(ToolError.create(
-                tool.metadata.name,
-                trace.message,
-                ErrorCode.EXTERNAL_SERVICE_ERROR,
-                recoverable=True,
+                tool.metadata.name, trace.message, ErrorCode.EXTERNAL_SERVICE_ERROR, recoverable=True,
             ))
         
         try:
             result = await next(tool, params, ctx)
-            
             # Check for error responses (string-based error detection)
-            is_error = result.startswith("**Tool Error")
-            if is_error:
-                code = ErrorCode.EXTERNAL_SERVICE_ERROR
-                self._record_failure(circuit, code)
-            else:
-                self._record_success(circuit)
-            
-            # Update context with final state
-            ctx["circuit_state"] = circuit.state.name
-            return result
-            
+            self._record_failure(circuit, ErrorCode.EXTERNAL_SERVICE_ERROR) if result.startswith("**Tool Error") else self._record_success(circuit)
         except ToolException as e:
             self._record_failure(circuit, e.error.code)
             ctx["circuit_state"] = circuit.state.name
             raise
         except Exception as e:
-            code = classify_exception(e)
-            self._record_failure(circuit, code)
+            self._record_failure(circuit, classify_exception(e))
             ctx["circuit_state"] = circuit.state.name
             raise
+        ctx["circuit_state"] = circuit.state.name
+        return result
     
     def get_state(self, tool_name: str) -> State:
         """Get current circuit state for a tool (for monitoring)."""

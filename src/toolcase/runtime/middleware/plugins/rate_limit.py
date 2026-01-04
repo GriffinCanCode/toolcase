@@ -38,25 +38,16 @@ class RateLimitMiddleware:
     per_tool: bool = True
     _timestamps: dict[str, deque[float]] = field(default_factory=dict, repr=False)
     
-    def _get_bucket(self, key: str) -> deque[float]:
-        if key not in self._timestamps:
-            self._timestamps[key] = deque()
-        return self._timestamps[key]
-    
     def _check_limit(self, key: str) -> tuple[bool, int]:
         """Check and update rate limit. Returns (allowed, current_count)."""
         now = time.time()
-        bucket = self._get_bucket(key)
-        
+        bucket = self._timestamps.setdefault(key, deque())
         # Evict expired timestamps
         cutoff = now - self.window_seconds
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
-        
-        current = len(bucket)
-        if current >= self.max_calls:
+        if (current := len(bucket)) >= self.max_calls:
             return False, current
-        
         bucket.append(now)
         return True, current + 1
     
@@ -69,27 +60,13 @@ class RateLimitMiddleware:
     ) -> str:
         key = tool.metadata.name if self.per_tool else "_global_"
         allowed, count = self._check_limit(key)
-        ctx["rate_limit_count"] = count
-        ctx["rate_limit_max"] = self.max_calls
+        ctx.update(rate_limit_count=count, rate_limit_max=self.max_calls)
         
         if not allowed:
             trace = ErrorTrace(
                 message=f"Rate limit exceeded: {self.max_calls} calls per {self.window_seconds}s",
-                error_code=ErrorCode.RATE_LIMITED.value,
-                recoverable=True,
-            ).with_operation(
-                "middleware:rate_limit",
-                tool=tool.metadata.name,
-                limit=self.max_calls,
-                window=self.window_seconds,
-                current=count,
-            )
+                error_code=ErrorCode.RATE_LIMITED.value, recoverable=True,
+            ).with_operation("middleware:rate_limit", tool=tool.metadata.name, limit=self.max_calls, window=self.window_seconds, current=count)
             ctx["error_trace"] = trace
-            raise ToolException(ToolError.create(
-                tool.metadata.name,
-                trace.message,
-                ErrorCode.RATE_LIMITED,
-                recoverable=True,
-            ))
-        
+            raise ToolException(ToolError.create(tool.metadata.name, trace.message, ErrorCode.RATE_LIMITED, recoverable=True))
         return await next(tool, params, ctx)

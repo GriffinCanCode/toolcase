@@ -44,36 +44,22 @@ class LoggingMiddleware:
         ctx: Context,
         next: Next,
     ) -> str:
-        name = tool.metadata.name
-        start = time.perf_counter()
-        
-        param_str = f" params={params.model_dump()}" if self.log_params else ""
-        self.log.info(f"[{name}] Starting{param_str}")
+        name, start = tool.metadata.name, time.perf_counter()
+        self.log.info(f"[{name}] Starting{f' params={params.model_dump()}' if self.log_params else ''}")
         
         try:
             result = await next(tool, params, ctx)
             duration_ms = (time.perf_counter() - start) * 1000
             ctx["duration_ms"] = duration_ms
-            
             is_error = result.startswith("**Tool Error")
-            level = logging.WARNING if is_error else logging.INFO
-            status = "ERROR" if is_error else "OK"
-            
-            self.log.log(level, f"[{name}] {status} ({duration_ms:.1f}ms)")
+            self.log.log(logging.WARNING if is_error else logging.INFO, f"[{name}] {'ERROR' if is_error else 'OK'} ({duration_ms:.1f}ms)")
             return result
-            
         except ToolException as e:
-            duration_ms = (time.perf_counter() - start) * 1000
-            ctx["duration_ms"] = duration_ms
-            ctx["error_code"] = e.error.code.value
-            self.log.error(
-                f"[{name}] EXCEPTION ({duration_ms:.1f}ms) [{e.error.code}]: {e.error.message}"
-            )
+            ctx.update(duration_ms=(time.perf_counter() - start) * 1000, error_code=e.error.code.value)
+            self.log.error(f"[{name}] EXCEPTION ({ctx['duration_ms']:.1f}ms) [{e.error.code}]: {e.error.message}")
             raise
         except Exception as e:
-            duration_ms = (time.perf_counter() - start) * 1000
-            ctx["duration_ms"] = duration_ms
             code = classify_exception(e)
-            ctx["error_code"] = code.value
-            self.log.exception(f"[{name}] EXCEPTION ({duration_ms:.1f}ms) [{code}]: {e}")
+            ctx.update(duration_ms=(time.perf_counter() - start) * 1000, error_code=code.value)
+            self.log.exception(f"[{name}] EXCEPTION ({ctx['duration_ms']:.1f}ms) [{code}]: {e}")
             raise
