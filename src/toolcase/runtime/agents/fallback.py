@@ -93,9 +93,6 @@ class FallbackTool(BaseTool[FallbackParams]):
         except ValueError:
             return True
     
-    def _run(self, params: FallbackParams) -> str:
-        return self._run_async_sync(self._async_run(params))
-    
     async def _async_run(self, params: FallbackParams) -> str:
         r = await self._async_run_result(params)
         return r.unwrap() if r.is_ok() else r.unwrap_err().message

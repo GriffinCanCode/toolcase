@@ -49,7 +49,7 @@ class EchoTool(BaseTool[QueryParams]):
     def __init__(self, prefix: str = "echo"):
         self._prefix = prefix
     
-    def _run(self, params: QueryParams) -> str:
+    async def _async_run(self, params: QueryParams) -> str:
         return f"{self._prefix}: {params.query}"
 
 
@@ -65,7 +65,7 @@ class FailingTool(BaseTool[QueryParams]):
         self._fail_count = fail_count
         self._attempts = 0
     
-    def _run(self, params: QueryParams) -> str:
+    async def _async_run(self, params: QueryParams) -> str:
         self._attempts += 1
         if self._fail_count == -1 or self._attempts <= self._fail_count:
             raise RuntimeError(f"Intentional failure: {params.query}")
@@ -85,9 +85,6 @@ class SlowTool(BaseTool[QueryParams]):
     async def _async_run(self, params: QueryParams) -> str:
         await asyncio.sleep(self._delay)
         return f"slow: {params.query}"
-    
-    def _run(self, params: QueryParams) -> str:
-        return self._run_async_sync(self._async_run(params))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -439,7 +436,7 @@ class TestGate:
         
         # Make echo return something with "forbidden"
         class ForbiddenEcho(EchoTool):
-            def _run(self, params):
+            async def _async_run(self, params):
                 return f"forbidden: {params.query}"
         
         g2 = gate(ForbiddenEcho(), post=lambda r: "forbidden" not in r.lower())

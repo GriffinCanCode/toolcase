@@ -103,9 +103,6 @@ class RouterTool(BaseTool[RouterParams]):
             return r.tool, r.name or r.tool.metadata.name
         return self._default, f"default:{self._default.metadata.name}"
     
-    def _run(self, params: RouterParams) -> str:
-        return self._run_async_sync(self._async_run(params))
-    
     async def _async_run(self, params: RouterParams) -> str:
         r = await self._async_run_result(params)
         return r.unwrap() if r.is_ok() else r.unwrap_err().message

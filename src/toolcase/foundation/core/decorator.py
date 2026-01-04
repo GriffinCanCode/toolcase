@@ -138,36 +138,21 @@ class FunctionTool(BaseTool[BaseModel]):
         self._func, self._original_func = func, func
         self._is_async = asyncio.iscoroutinefunction(func) or inspect.isasyncgenfunction(func)
         self._inject = inject or []
-        self._tool_ctx = (ErrorContext(operation=f"tool:{metadata.name}", location="", metadata={}),)  # Pre-compute (avoid allocation)
-        # Set class-level attrs (BaseTool expects ClassVars)
+        self._tool_ctx = (ErrorContext(operation=f"tool:{metadata.name}", location="", metadata={}),)
         self.__class__ = type(f"{type(self).__name__}_{metadata.name}", (type(self),),
                               {"metadata": metadata, "params_schema": params_schema, "cache_enabled": cache_enabled, "cache_ttl": cache_ttl})
     
-    def _run(self, params: BaseModel) -> str:
-        """Execute the wrapped function synchronously. Merges validated params with injected dependencies."""
-        kwargs = params.model_dump() | (get_injected_deps() if self._inject else {})
-        return self._run_async_sync(self._func(**kwargs)) if self._is_async else self._func(**kwargs)  # type: ignore[arg-type, return-value]
-    
-    def _run_result(self, params: BaseModel) -> ToolResult:
-        """Execute with Result-based error handling (optimized path)."""
-        try:
-            kwargs = params.model_dump() | (get_injected_deps() if self._inject else {})
-            return Result(self._run_async_sync(self._func(**kwargs)) if self._is_async else self._func(**kwargs), _OK)  # type: ignore[arg-type]
-        except Exception as e:
-            return self._make_err(e, "execution")
-    
     async def _async_run(self, params: BaseModel) -> str:
-        """Execute the wrapped function asynchronously. Merges validated params with injected dependencies."""
+        """Execute the wrapped function. Async-first: sync funcs run via to_thread."""
         kwargs = params.model_dump() | (get_injected_deps() if self._inject else {})
         return await self._func(**kwargs) if self._is_async else await to_thread(self._func, **kwargs)  # type: ignore[misc, arg-type]
     
     async def _async_run_result(self, params: BaseModel) -> ToolResult:
-        """Execute asynchronously with Result-based error handling."""
+        """Execute with Result-based error handling (optimized path)."""
         try:
-            kwargs = params.model_dump() | (get_injected_deps() if self._inject else {})
-            return Result(await self._func(**kwargs) if self._is_async else await asyncio.to_thread(self._func, **kwargs), _OK)  # type: ignore[misc, arg-type]
+            return Result(await self._async_run(params), _OK)
         except Exception as e:
-            return self._make_err(e, "async execution")
+            return self._make_err(e, "execution")
     
     def _make_err(self, exc: Exception, context: str) -> ToolResult:
         """Create Err result from exception (internal, optimized)."""
@@ -217,24 +202,6 @@ class ResultStreamingFunctionTool(FunctionTool):
     async def _async_run(self, params: BaseModel) -> str:
         """Execute by collecting all stream chunks."""
         return "".join([chunk async for chunk in self.stream_result(params)])
-    
-    async def _async_run_result(self, params: BaseModel) -> ToolResult:
-        """Execute by collecting all stream chunks, with Result handling."""
-        try:
-            return Result("".join([chunk async for chunk in self.stream_result(params)]), _OK)
-        except Exception as e:
-            return self._make_err(e, "async execution")
-    
-    def _run(self, params: BaseModel) -> str:
-        """Sync execution via async collection."""
-        return self._run_async_sync(self._async_run(params))
-    
-    def _run_result(self, params: BaseModel) -> ToolResult:
-        """Sync execution via async collection, with Result handling."""
-        try:
-            return Result(self._run_async_sync(self._async_run(params)), _OK)
-        except Exception as e:
-            return self._make_err(e, "execution")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

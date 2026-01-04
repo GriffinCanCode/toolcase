@@ -143,7 +143,7 @@ class ValidationTool(BaseTool[ValidatorParams]):
     )
     params_schema: ClassVar[type[ValidatorParams]] = ValidatorParams
     
-    def _run_result(self, params: ValidatorParams) -> ToolResult:
+    async def _async_run_result(self, params: ValidatorParams) -> ToolResult:
         """Implementation using Result monad. Railway-oriented: errors auto-propagate."""
         from .result import sequence
         
@@ -156,12 +156,10 @@ class ValidationTool(BaseTool[ValidatorParams]):
         valid_numbers = validated.unwrap()
         return ok_result(f"Validated {len(valid_numbers)} numbers: {valid_numbers}")
     
-    def _run(self, params: ValidatorParams) -> str:
-        """Fallback string-based implementation (required by ABC)."""
-        # This is now optional - _run_result takes precedence
-        result = self._run_result(params)
+    async def _async_run(self, params: ValidatorParams) -> str:
+        """Primary execution: use Result-based path."""
         from .tool import result_to_string
-        return result_to_string(result, self.metadata.name)
+        return result_to_string(await self._async_run_result(params), self.metadata.name)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -202,7 +200,7 @@ class DataProcessorTool(BaseTool[ProcessorParams]):
         """Format final output."""
         return f"Processed: {data['original']} ({data['words']} words)"
     
-    def _run_result(self, params: ProcessorParams) -> ToolResult:
+    async def _async_run_result(self, params: ProcessorParams) -> ToolResult:
         """Railway-oriented pipeline. Each step can fail, errors auto-propagate."""
         return (self._validate_input(params.input_data)
                 .flat_map(self._normalize)
@@ -210,11 +208,10 @@ class DataProcessorTool(BaseTool[ProcessorParams]):
                 .map(self._format_output)
                 .map_err(lambda trace: trace.with_operation(f"tool:{self.metadata.name}", location="toolcase.examples")))
     
-    def _run(self, params: ProcessorParams) -> str:
-        """String-based fallback."""
-        result = self._run_result(params)
+    async def _async_run(self, params: ProcessorParams) -> str:
+        """Primary execution: use Result-based path."""
         from .tool import result_to_string
-        return result_to_string(result, self.metadata.name)
+        return result_to_string(await self._async_run_result(params), self.metadata.name)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -237,7 +234,7 @@ class RiskyTool(BaseTool[RiskyParams]):
     )
     params_schema: ClassVar[type[RiskyParams]] = RiskyParams
     
-    def _run_result(self, params: RiskyParams) -> ToolResult:
+    async def _async_run_result(self, params: RiskyParams) -> ToolResult:
         """Use try_tool_operation to handle exceptions."""
         def risky_operation() -> str:
             if params.value < 0:
@@ -248,11 +245,10 @@ class RiskyTool(BaseTool[RiskyParams]):
         
         return try_tool_operation(self.metadata.name, risky_operation, context="processing value")
     
-    def _run(self, params: RiskyParams) -> str:
-        """String-based fallback."""
-        result = self._run_result(params)
+    async def _async_run(self, params: RiskyParams) -> str:
+        """Primary execution: use Result-based path."""
         from .tool import result_to_string
-        return result_to_string(result, self.metadata.name)
+        return result_to_string(await self._async_run_result(params), self.metadata.name)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

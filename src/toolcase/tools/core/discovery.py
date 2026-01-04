@@ -12,7 +12,6 @@ from typing import ClassVar, Literal
 from pydantic import BaseModel, Field
 
 from toolcase.foundation.core import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Ok, ToolResult
 from toolcase.foundation.registry import get_registry
 
 
@@ -53,21 +52,16 @@ class DiscoveryTool(BaseTool[DiscoveryParams]):
     # Don't cache discovery - always show current state
     cache_enabled: ClassVar[bool] = False
     
-    def _run_result(self, params: DiscoveryParams) -> ToolResult:
-        """Result-based implementation."""
+    async def _async_run(self, params: DiscoveryParams) -> str:
+        """Primary execution - pure sync logic, returns directly."""
         registry = get_registry()
         tools = registry.list_by_category(params.category) if params.category else registry.list_tools()
         
         if not tools:
-            return Ok(f"No tools found in category '{params.category}'. Try without a filter." if params.category else "No tools are currently available.")
+            return f"No tools found in category '{params.category}'. Try without a filter." if params.category else "No tools are currently available."
         
         formatter = self._format_brief if params.format == "brief" else self._format_detailed
-        return Ok(formatter(tools, params.category))
-    
-    def _run(self, params: DiscoveryParams) -> str:
-        """String-based fallback."""
-        from toolcase.foundation.errors import result_to_string
-        return result_to_string(self._run_result(params), self.metadata.name)
+        return formatter(tools, params.category)
     
     def _format_brief(self, tools: list[ToolMetadata], category: str | None) -> str:
         """Brief format: grouped by category with one-line descriptions."""

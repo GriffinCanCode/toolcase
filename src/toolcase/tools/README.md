@@ -77,7 +77,7 @@ class MyParams(BaseModel):
 class MyTool(ConfigurableTool[MyParams, MyConfig]):
     config_class = MyConfig
     
-    def _run(self, params: MyParams) -> str:
+    async def _async_run(self, params: MyParams) -> str:
         if len(params.query) > self.config.max_items:
             return self._error("Query too long")
         return f"Results for: {params.query}"

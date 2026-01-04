@@ -46,7 +46,7 @@ class StreamingEchoTool(BaseTool[EchoParams]):
     def supports_result_streaming(self) -> bool:
         return True
     
-    def _run(self, params: EchoParams) -> str:
+    async def _async_run(self, params: EchoParams) -> str:
         return params.message
     
     async def stream_result(self, params: EchoParams) -> AsyncIterator[str]:
@@ -64,7 +64,7 @@ class NonStreamingTool(BaseTool[EchoParams]):
     )
     params_schema = EchoParams
     
-    def _run(self, params: EchoParams) -> str:
+    async def _async_run(self, params: EchoParams) -> str:
         return params.message
 
 
@@ -393,7 +393,7 @@ class TestStreamingErrorHandling:
             def supports_result_streaming(self) -> bool:
                 return True
             
-            def _run(self, params: EchoParams) -> str:
+            async def _async_run(self, params: EchoParams) -> str:
                 return params.message
             
             async def stream_result(self, params: EchoParams) -> AsyncIterator[str]:

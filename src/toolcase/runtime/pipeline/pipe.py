@@ -165,10 +165,6 @@ class PipelineTool(BaseTool[PipelineParams]):
     @property
     def steps(self) -> list[Step]: return self._steps
     
-    def _run(self, params: PipelineParams) -> str:
-        """Sync execution via async bridge."""
-        return self._run_async_sync(self._async_run(params))
-    
     async def _async_run(self, params: PipelineParams) -> str:
         """Execute pipeline sequentially."""
         return (r := await self._async_run_result(params)).unwrap_or(r.unwrap_err().message)
@@ -249,10 +245,6 @@ class StreamingPipelineTool(BaseTool[PipelineParams]):
     
     @property
     def supports_result_streaming(self) -> bool: return True
-    
-    def _run(self, params: PipelineParams) -> str:
-        """Sync execution collects all streaming output."""
-        return self._run_async_sync(self._async_run(params))
     
     async def _async_run(self, params: PipelineParams) -> str:
         """Collect all chunks into final result."""
@@ -340,9 +332,6 @@ class ParallelTool(BaseTool[ParallelParams]):
     
     @property
     def tools(self) -> list[BaseTool[BaseModel]]: return self._tools
-    
-    def _run(self, params: ParallelParams) -> str:
-        return self._run_async_sync(self._async_run(params))
     
     async def _async_run(self, params: ParallelParams) -> str:
         return (r := await self._async_run_result(params)).unwrap_or(r.unwrap_err().message)
@@ -440,9 +429,6 @@ class StreamingParallelTool(BaseTool[ParallelParams]):
     
     @property
     def supports_result_streaming(self) -> bool: return True
-    
-    def _run(self, params: ParallelParams) -> str:
-        return self._run_async_sync(self._async_run(params))
     
     async def _async_run(self, params: ParallelParams) -> str:
         """Collect all streaming output."""

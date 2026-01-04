@@ -114,7 +114,7 @@ class SearchTool(BaseTool[SearchParams]):
     )
     params_schema = SearchParams
     
-    def _run(self, params: SearchParams) -> str:
+    async def _async_run(self, params: SearchParams) -> str:
         return f"Results for: {params.query}"
 ```
 

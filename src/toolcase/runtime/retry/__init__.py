@@ -18,7 +18,7 @@ Example:
     ...         retryable_codes=frozenset({ErrorCode.RATE_LIMITED, ErrorCode.TIMEOUT}),
     ...     )
     ...     
-    ...     def _run(self, params: SearchParams) -> str:
+    ...     async def _async_run(self, params: SearchParams) -> str:
     ...         return search_api(params.query)
 """
 
@@ -35,6 +35,7 @@ from .policy import (
     RetryPolicy,
     execute_with_retry,
     execute_with_retry_sync,
+    validate_policy,
 )
 
 __all__ = [
@@ -48,6 +49,7 @@ __all__ = [
     "RetryPolicy",
     "DEFAULT_RETRYABLE",
     "NO_RETRY",
+    "validate_policy",
     # Execution
     "execute_with_retry",
     "execute_with_retry_sync",

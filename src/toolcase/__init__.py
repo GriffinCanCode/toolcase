@@ -37,7 +37,7 @@ Class-Based (For Complex Tools):
     ...     )
     ...     params_schema = SearchParams
     ...
-    ...     def _run(self, params: SearchParams) -> str:
+    ...     async def _async_run(self, params: SearchParams) -> str:
     ...         return f"Results for: {params.query}"
 
 Multi-Framework Format Converters:
@@ -100,6 +100,8 @@ from .foundation.errors import (
     traverse,
     try_tool_operation,
     try_tool_operation_async,
+    validate_context,
+    validate_trace,
 )
 
 # Foundation: DI
@@ -145,6 +147,7 @@ from .io.progress import (
     source_found,
     status,
     step,
+    validate_progress,
 )
 
 # IO: Cache
@@ -199,6 +202,7 @@ from .runtime.retry import (
     LinearBackoff,
     NO_RETRY,
     RetryPolicy,
+    validate_policy,
 )
 
 # Runtime: Pipeline
@@ -343,6 +347,8 @@ __all__ = [
     "Result", "Ok", "Err", "ResultT", "ToolResult", "ErrorContext", "ErrorTrace",
     "tool_result", "try_tool_operation", "try_tool_operation_async",
     "batch_results", "sequence", "traverse", "collect_results",
+    # TypeAdapter validation utilities (fast dict→model validation)
+    "validate_context", "validate_trace", "validate_progress", "validate_policy",
     # Observability
     "configure_tracing", "get_tracer", "traced",
     "configure_logging", "get_logger", "log_context", "timed", "BoundLogger",

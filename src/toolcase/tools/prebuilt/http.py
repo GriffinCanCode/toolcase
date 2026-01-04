@@ -488,10 +488,6 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
     # Execution
     # ─────────────────────────────────────────────────────────────────
     
-    def _run(self, params: HttpParams) -> str:
-        """Sync execution via async wrapper."""
-        return self._run_async_sync(self._async_run(params))
-    
     async def _async_run_result(self, params: HttpParams) -> ToolResult:
         """Execute HTTP request with Result-based error handling."""
         if (r := self._validate_url(params.url)).is_err():

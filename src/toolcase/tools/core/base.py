@@ -82,7 +82,7 @@ class ConfigurableTool(BaseTool[TParams], Generic[TParams, TConfig]):
         >>> class MyTool(ConfigurableTool[MyParams, MyConfig]):
         ...     config_class = MyConfig
         ...     
-        ...     def _run(self, params: MyParams) -> str:
+        ...     async def _async_run(self, params: MyParams) -> str:
         ...         if self.config.max_items < params.limit:
         ...             return self._error("Limit exceeds max_items")
         ...         ...

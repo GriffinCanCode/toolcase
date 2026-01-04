@@ -77,9 +77,6 @@ class RaceTool(BaseTool[RaceParams]):
     def tools(self) -> list[BaseTool[BaseModel]]:
         return self._tools
     
-    def _run(self, params: RaceParams) -> str:
-        return self._run_async_sync(self._async_run(params))
-    
     async def _async_run(self, params: RaceParams) -> str:
         r = await self._async_run_result(params)
         return r.unwrap() if r.is_ok() else r.unwrap_err().message
