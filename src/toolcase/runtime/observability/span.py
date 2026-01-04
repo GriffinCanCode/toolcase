@@ -50,8 +50,7 @@ class SpanEvent:
 class Span:
     """Represents a unit of work in a trace.
     
-    Captures timing, attributes, events, and error information.
-    Designed for AI tool observability with rich context.
+    Captures timing, attributes, events, and error information. Designed for AI tool observability with rich context.
     
     Attributes:
         name: Human-readable span name (e.g., "web_search")
@@ -92,9 +91,7 @@ class Span:
     @property
     def duration_ms(self) -> float | None:
         """Duration in milliseconds, or None if not ended."""
-        if self.end_time is None:
-            return None
-        return (self.end_time - self.start_time) * 1000
+        return (self.end_time - self.start_time) * 1000 if self.end_time else None
     
     @property
     def is_active(self) -> bool:
@@ -118,123 +115,61 @@ class Span:
     
     def set_status(self, status: SpanStatus, error: str | None = None) -> Span:
         """Set completion status."""
-        self.status = status
-        if error:
-            self.error = error
+        self.status, self.error = status, error or self.error
         return self
     
     def record_error(self, trace: ErrorTrace) -> Span:
-        """Record structured error from ErrorTrace.
-        
-        Sets status to ERROR and captures full error context for debugging.
-        Adds error event with code and recoverable status.
-        
-        Args:
-            trace: ErrorTrace with full error context
-        
-        Returns:
-            Self for chaining
-        """
-        self.status = SpanStatus.ERROR
-        self.error = trace.message
-        self.error_trace = trace
-        self.add_event("error", {
-            "message": trace.message,
-            "code": trace.error_code,
-            "recoverable": trace.recoverable,
-            "contexts": [str(c) for c in trace.contexts],
+        """Record structured error from ErrorTrace. Sets status to ERROR and captures full error context."""
+        self.status, self.error, self.error_trace = SpanStatus.ERROR, trace.message, trace
+        return self.add_event("error", {
+            "message": trace.message, "code": trace.error_code,
+            "recoverable": trace.recoverable, "contexts": [str(c) for c in trace.contexts],
         })
-        return self
     
     def record_exception(self, exc: Exception, *, code: ErrorCode | None = None) -> Span:
-        """Record error from exception.
-        
-        Creates ErrorTrace from exception and records it.
-        
-        Args:
-            exc: Exception to record
-            code: Optional error code override
-        
-        Returns:
-            Self for chaining
-        """
+        """Record error from exception. Creates ErrorTrace from exception and records it."""
         from toolcase.foundation.errors import classify_exception, trace_from_exc
         actual_code = code or classify_exception(exc)
-        trace = trace_from_exc(exc, operation=self.name, code=actual_code.value)
-        return self.record_error(trace)
+        return self.record_error(trace_from_exc(exc, operation=self.name, code=actual_code.value))
     
-    def set_tool_context(
-        self,
-        tool_name: str,
-        category: str,
-        params: JsonDict | None = None,
-    ) -> Span:
+    def set_tool_context(self, tool_name: str, category: str, params: JsonDict | None = None) -> Span:
         """Set tool-specific context for AI observability."""
-        self.tool_name = tool_name
-        self.tool_category = category
-        self.params = params
-        self.kind = SpanKind.TOOL
+        self.tool_name, self.tool_category, self.params, self.kind = tool_name, category, params, SpanKind.TOOL
         return self
     
     def set_result_preview(self, result: str, max_len: int = 200) -> Span:
         """Store truncated result for debugging."""
-        self.result_preview = result[:max_len] + "..." if len(result) > max_len else result
+        self.result_preview = f"{result[:max_len]}..." if len(result) > max_len else result
         return self
     
-    def end(
-        self,
-        status: SpanStatus | None = None,
-        error: str | ErrorTrace | None = None,
-    ) -> Span:
-        """End the span with optional status.
-        
-        Args:
-            status: Completion status
-            error: Error string or ErrorTrace for structured error capture
-        """
+    def end(self, status: SpanStatus | None = None, error: str | ErrorTrace | None = None) -> Span:
+        """End the span with optional status."""
         self.end_time = time.time()
         if status:
             self.status = status
-        if error:
-            if isinstance(error, ErrorTrace):
-                self.record_error(error)
-            else:
-                self.error = error
-                self.status = SpanStatus.ERROR
+        if isinstance(error, ErrorTrace):
+            self.record_error(error)
+        elif error:
+            self.error, self.status = error, SpanStatus.ERROR
         return self
     
     def to_dict(self) -> JsonDict:
         """Serialize span for export."""
+        ctx = self.context
         result: JsonDict = {
-            "name": self.name,
-            "trace_id": self.context.trace_id,
-            "span_id": self.context.span_id,
-            "parent_id": self.context.parent_id,
-            "kind": self.kind.value,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-            "duration_ms": self.duration_ms,
-            "status": self.status.value,
-            "error": self.error,
+            "name": self.name, "trace_id": ctx.trace_id, "span_id": ctx.span_id,
+            "parent_id": ctx.parent_id, "kind": self.kind.value,
+            "start_time": self.start_time, "end_time": self.end_time,
+            "duration_ms": self.duration_ms, "status": self.status.value, "error": self.error,
             "attributes": self.attributes,
-            "events": [
-                {"name": e.name, "timestamp": e.timestamp, "attributes": e.attributes}
-                for e in self.events
-            ],
-            "tool": {
-                "name": self.tool_name,
-                "category": self.tool_category,
-                "params": self.params,
-                "result_preview": self.result_preview,
-            } if self.tool_name else None,
+            "events": [{"name": e.name, "timestamp": e.timestamp, "attributes": e.attributes} for e in self.events],
+            "tool": {"name": self.tool_name, "category": self.tool_category,
+                     "params": self.params, "result_preview": self.result_preview} if self.tool_name else None,
         }
-        # Include structured error info if present
-        if self.error_trace:
+        if self.error_trace:  # Include structured error info if present
+            et = self.error_trace
             result["error_trace"] = {
-                "message": self.error_trace.message,
-                "code": self.error_trace.error_code,
-                "recoverable": self.error_trace.recoverable,
-                "contexts": [str(c) for c in self.error_trace.contexts],
-                "details": self.error_trace.details,
+                "message": et.message, "code": et.error_code, "recoverable": et.recoverable,
+                "contexts": [str(c) for c in et.contexts], "details": et.details,
             }
         return result

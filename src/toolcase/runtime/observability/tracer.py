@@ -13,12 +13,11 @@ from typing import TYPE_CHECKING, Callable, ParamSpec, TypeVar
 
 from toolcase.foundation.errors import JsonDict
 
-from .context import SpanContext, TraceContext, trace_context
+from .context import SpanContext, TraceContext
 from .exporter import ConsoleExporter, Exporter, NoOpExporter
 from .span import Span, SpanKind, SpanStatus
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
     from types import TracebackType
 
 P = ParamSpec("P")
@@ -32,8 +31,7 @@ _tracer: ContextVar[Tracer | None] = ContextVar("tracer", default=None)
 class Tracer:
     """Creates and manages spans for distributed tracing.
     
-    The Tracer is the main entry point for instrumentation. It creates spans,
-    manages context propagation, and exports completed spans.
+    The Tracer is the main entry point for instrumentation. It creates spans, manages context propagation, and exports completed spans.
     
     Usage:
         >>> tracer = Tracer(service_name="my-agent", exporter=ConsoleExporter())
@@ -68,12 +66,7 @@ class Tracer:
         """Get global tracer or create disabled one."""
         return _tracer.get() or cls(enabled=False, exporter=NoOpExporter())
     
-    def span(
-        self,
-        name: str,
-        kind: SpanKind = SpanKind.INTERNAL,
-        attributes: JsonDict | None = None,
-    ) -> SpanContextManager:
+    def span(self, name: str, kind: SpanKind = SpanKind.INTERNAL, attributes: JsonDict | None = None) -> SpanContextManager:
         """Create a span context manager.
         
         Example:
@@ -84,46 +77,25 @@ class Tracer:
         """
         return SpanContextManager(self, name, kind, attributes or {})
     
-    def start_span(
-        self,
-        name: str,
-        kind: SpanKind = SpanKind.INTERNAL,
-        attributes: JsonDict | None = None,
-    ) -> Span:
-        """Start a span manually (caller must end it).
-        
-        Prefer `span()` context manager for automatic lifecycle.
-        """
+    def start_span(self, name: str, kind: SpanKind = SpanKind.INTERNAL, attributes: JsonDict | None = None) -> Span:
+        """Start a span manually (caller must end it). Prefer `span()` context manager for automatic lifecycle."""
         if not self.enabled:
             return Span(name=name, context=SpanContext.new(), kind=kind)
         
         ctx = TraceContext.current()
         span_ctx = ctx.span_context.child()
         ctx.push_span(span_ctx)
-        
-        span = Span(
-            name=name,
-            context=span_ctx,
-            kind=kind,
-            attributes={"service.name": self.service_name, **(attributes or {})},
-        )
-        return span
+        return Span(name=name, context=span_ctx, kind=kind,
+                    attributes={"service.name": self.service_name, **(attributes or {})})
     
     def end_span(self, span: Span, status: SpanStatus = SpanStatus.OK, error: str | None = None) -> None:
         """End a manually started span and export it."""
         if not self.enabled:
             return
-        
         span.end(status=status, error=error)
-        self._export(span)
-        
-        ctx = TraceContext.get()
-        if ctx:
-            ctx.pop_span()
-    
-    def _export(self, span: Span) -> None:
-        """Export a completed span."""
         self.exporter.export([span])
+        if ctx := TraceContext.get():
+            ctx.pop_span()
     
     def shutdown(self) -> None:
         """Shutdown tracer and flush exports."""
@@ -132,11 +104,7 @@ class Tracer:
 
 @dataclass(slots=True)
 class SpanContextManager:
-    """Context manager for span lifecycle.
-    
-    Automatically ends span and sets status on exit.
-    Handles exceptions by setting error status.
-    """
+    """Context manager for span lifecycle. Automatically ends span and sets status on exit."""
     
     tracer: Tracer
     name: str
@@ -148,30 +116,16 @@ class SpanContextManager:
         self._span = self.tracer.start_span(self.name, self.kind, self.attributes)
         return self._span
     
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        if self._span is None:
+    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None) -> None:
+        if not self._span:
             return
-        
-        if exc_val is not None:
-            self.tracer.end_span(self._span, SpanStatus.ERROR, str(exc_val))
-        else:
-            status = self._span.status if self._span.status != SpanStatus.UNSET else SpanStatus.OK
-            self.tracer.end_span(self._span, status)
+        status = SpanStatus.ERROR if exc_val else (self._span.status if self._span.status != SpanStatus.UNSET else SpanStatus.OK)
+        self.tracer.end_span(self._span, status, str(exc_val) if exc_val else None)
     
     async def __aenter__(self) -> Span:
         return self.__enter__()
     
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
+    async def __aexit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None) -> None:
         self.__exit__(exc_type, exc_val, exc_tb)
 
 
@@ -198,18 +152,17 @@ def traced(
         ... def fetch_data(url: str) -> dict:
         ...     return requests.get(url).json()
     """
+    import asyncio
+    
     def decorator(func: Callable[P, T]) -> Callable[P, T]:
         span_name = name or func.__name__
+        build_attrs: Callable[[dict[str, object]], JsonDict] = lambda kw: {
+            "function": func.__name__, **({"args": {k: _safe_repr(v) for k, v in kw.items()}} if capture_args and kw else {})
+        }
         
         @wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
-            tracer = Tracer.current()
-            
-            attrs: JsonDict = {"function": func.__name__}
-            if capture_args and kwargs:
-                attrs["args"] = {k: _safe_repr(v) for k, v in kwargs.items()}
-            
-            with tracer.span(span_name, kind, attrs) as span:
+            with Tracer.current().span(span_name, kind, build_attrs(kwargs)) as span:
                 result = func(*args, **kwargs)
                 if capture_result and isinstance(result, str):
                     span.set_result_preview(result)
@@ -217,19 +170,12 @@ def traced(
         
         @wraps(func)
         async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
-            tracer = Tracer.current()
-            
-            attrs: JsonDict = {"function": func.__name__}
-            if capture_args and kwargs:
-                attrs["args"] = {k: _safe_repr(v) for k, v in kwargs.items()}
-            
-            async with tracer.span(span_name, kind, attrs) as span:
+            async with Tracer.current().span(span_name, kind, build_attrs(kwargs)) as span:
                 result = await func(*args, **kwargs)
                 if capture_result and isinstance(result, str):
                     span.set_result_preview(result)
                 return result
         
-        import asyncio
         return async_wrapper if asyncio.iscoroutinefunction(func) else wrapper  # type: ignore[return-value]
     
     return decorator
@@ -238,7 +184,7 @@ def traced(
 def _safe_repr(value: object, max_len: int = 100) -> str:
     """Safe string representation with length limit."""
     s = repr(value)
-    return s[:max_len] + "..." if len(s) > max_len else s
+    return f"{s[:max_len]}..." if len(s) > max_len else s
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -283,17 +229,15 @@ def configure_tracing(
     from .exporter import ConsoleExporter, JsonExporter, NoOpExporter, create_otlp_exporter
     
     if isinstance(exporter, str):
-        exp: Exporter
-        if exporter == "console":
-            exp = ConsoleExporter(verbose=verbose)
-        elif exporter == "json":
-            exp = JsonExporter()
-        elif exporter == "otlp":
-            exp = create_otlp_exporter(endpoint=endpoint or "http://localhost:4317", service_name=service_name)
-        elif exporter == "none":
-            exp = NoOpExporter()
-        else:
+        exporters = {
+            "console": lambda: ConsoleExporter(verbose=verbose),
+            "json": JsonExporter,
+            "otlp": lambda: create_otlp_exporter(endpoint=endpoint or "http://localhost:4317", service_name=service_name),
+            "none": NoOpExporter,
+        }
+        if exporter not in exporters:
             raise ValueError(f"Unknown exporter: {exporter}. Use 'console', 'json', 'otlp', or 'none'")
+        exp = exporters[exporter]()
     else:
         exp = exporter
     

@@ -9,12 +9,12 @@ Auto-instruments all tool calls with spans capturing:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from toolcase.foundation.errors import ErrorCode, JsonDict, ToolException, classify_exception
+from toolcase.foundation.errors import JsonDict, ToolException, classify_exception
 from toolcase.runtime.middleware.middleware import Context, Next
 from .span import SpanKind, SpanStatus
 from .tracer import Tracer
@@ -57,9 +57,6 @@ class TracingMiddleware:
     capture_result: bool = True
     result_preview_len: int = 200
     
-    def _get_tracer(self) -> Tracer:
-        return self.tracer or Tracer.current()
-    
     async def __call__(
         self,
         tool: BaseTool[BaseModel],
@@ -67,42 +64,23 @@ class TracingMiddleware:
         ctx: Context,
         next: Next,
     ) -> str:
-        tracer = self._get_tracer()
+        tracer = self.tracer or Tracer.current()
+        meta, param_dump = tool.metadata, params.model_dump()
         
         # Build span attributes
-        attrs: JsonDict = {
-            "tool.name": tool.metadata.name,
-            "tool.category": tool.metadata.category,
-        }
-        
+        attrs: JsonDict = {"tool.name": meta.name, "tool.category": meta.category}
         if self.capture_params:
-            attrs["tool.params"] = params.model_dump()
-        
-        # Add correlation from context if present
-        if "request_id" in ctx:
+            attrs["tool.params"] = param_dump
+        if "request_id" in ctx:  # Add correlation from context if present
             attrs["request.id"] = ctx["request_id"]
         
-        with tracer.span(
-            name=f"tool.{tool.metadata.name}",
-            kind=SpanKind.TOOL,
-            attributes=attrs,
-        ) as span:
-            # Enrich span with tool context
-            span.set_tool_context(
-                tool.metadata.name,
-                tool.metadata.category,
-                params.model_dump() if self.capture_params else None,
-            )
-            
-            # Store span in context for downstream access
-            ctx["trace_span"] = span
-            ctx["trace_id"] = span.context.trace_id
-            ctx["span_id"] = span.context.span_id
+        with tracer.span(f"tool.{meta.name}", SpanKind.TOOL, attrs) as span:
+            span.set_tool_context(meta.name, meta.category, param_dump if self.capture_params else None)
+            ctx.update(trace_span=span, trace_id=span.context.trace_id, span_id=span.context.span_id)
             
             try:
                 result = await next(tool, params, ctx)
                 
-                # Capture result preview
                 if self.capture_result:
                     span.set_result_preview(result, self.result_preview_len)
                 
@@ -111,35 +89,25 @@ class TracingMiddleware:
                     span.set_status(SpanStatus.ERROR, "tool returned error response")
                     span.add_event("tool_error", {"response_prefix": result[:100]})
                 else:
-                    span.set_status(SpanStatus.OK)
-                    span.add_event("tool_success")
+                    span.set_status(SpanStatus.OK).add_event("tool_success")
                 
-                # Store duration in context for other middleware
                 if span.duration_ms:
                     ctx["duration_ms"] = span.duration_ms
                 
                 return result
                 
             except ToolException as e:
-                span.set_status(SpanStatus.ERROR, e.error.message)
-                span.set_attribute("error.code", e.error.code.value)
-                span.set_attribute("error.recoverable", e.error.recoverable)
-                span.add_event("tool_exception", {
-                    "code": e.error.code.value,
-                    "message": e.error.message,
-                })
+                err = e.error
+                span.set_status(SpanStatus.ERROR, err.message).set_attributes(
+                    {"error.code": err.code.value, "error.recoverable": err.recoverable}
+                ).add_event("tool_exception", {"code": err.code.value, "message": err.message})
                 raise
                 
             except Exception as e:
-                code = classify_exception(e)
-                span.set_status(SpanStatus.ERROR, str(e))
-                span.set_attribute("error.code", code.value)
-                span.set_attribute("error.type", type(e).__name__)
-                span.add_event("exception", {
-                    "type": type(e).__name__,
-                    "message": str(e),
-                    "code": code.value,
-                })
+                code, etype = classify_exception(e), type(e).__name__
+                span.set_status(SpanStatus.ERROR, str(e)).set_attributes(
+                    {"error.code": code.value, "error.type": etype}
+                ).add_event("exception", {"type": etype, "message": str(e), "code": code.value})
                 raise
 
 
@@ -147,8 +115,7 @@ class TracingMiddleware:
 class CorrelationMiddleware:
     """Add correlation IDs to context for request tracing.
     
-    Generates or propagates request IDs for correlating logs,
-    traces, and metrics across a request lifecycle.
+    Generates or propagates request IDs for correlating logs, traces, and metrics across a request lifecycle.
     
     Args:
         header_name: Header to extract correlation ID from (for HTTP)
@@ -169,10 +136,7 @@ class CorrelationMiddleware:
         ctx: Context,
         next: Next,
     ) -> str:
-        # Check if correlation ID already exists
-        if "request_id" not in ctx:
-            if self.generate_if_missing:
-                import secrets
-                ctx["request_id"] = secrets.token_hex(8)
-        
+        if "request_id" not in ctx and self.generate_if_missing:
+            import secrets
+            ctx["request_id"] = secrets.token_hex(8)
         return await next(tool, params, ctx)
