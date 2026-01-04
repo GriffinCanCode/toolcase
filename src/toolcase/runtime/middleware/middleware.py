@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Coroutine, Sequence
 from dataclasses import dataclass, field
+from functools import reduce
 from typing import TYPE_CHECKING, Callable, Protocol, TypeVar, cast, overload, runtime_checkable
 
 from pydantic import BaseModel
@@ -44,22 +45,15 @@ class Context:
     
     data: dict[str, ContextValue] = field(default_factory=dict)
     
-    def __getitem__(self, key: str) -> ContextValue:
-        return self.data[key]
-    
-    def __setitem__(self, key: str, value: ContextValue) -> None:
-        self.data[key] = value
-    
-    def __contains__(self, key: str) -> bool:
-        return key in self.data
+    def __getitem__(self, key: str) -> ContextValue: return self.data[key]
+    def __setitem__(self, key: str, value: ContextValue) -> None: self.data[key] = value
+    def __contains__(self, key: str) -> bool: return key in self.data
     
     @overload
     def get(self, key: str) -> ContextValue: ...
     @overload
     def get(self, key: str, default: _T) -> ContextValue | _T: ...
-    
-    def get(self, key: str, default: _T | None = None) -> ContextValue | _T | None:
-        return self.data.get(key, default)
+    def get(self, key: str, default: _T | None = None) -> ContextValue | _T | None: return self.data.get(key, default)
 
 
 # Type alias for the continuation function
@@ -120,10 +114,8 @@ def compose(middleware: Sequence[Middleware]) -> Next:
     """
     async def base(tool: BaseTool[BaseModel], params: BaseModel, ctx: Context) -> str:
         try:
-            # Set injected dependencies from context if present
-            # Cast required: injected deps can be any object, not just ContextValue
-            injected = ctx.get("injected")
-            if injected and isinstance(injected, dict):
+            # Set injected deps from context if present (cast: injected can be any object)
+            if (injected := ctx.get("injected")) and isinstance(injected, dict):
                 set_injected_deps(cast("JsonDict", injected))
             try:
                 return await tool.arun(params)
@@ -132,22 +124,12 @@ def compose(middleware: Sequence[Middleware]) -> Next:
         except ToolException as e:
             return e.error.render()
         except Exception as e:
-            return ToolError.from_exception(
-                tool.metadata.name, e, "Execution failed"
-            ).render()
+            return ToolError.from_exception(tool.metadata.name, e, "Execution failed").render()
     
-    # Build chain by wrapping from innermost to outermost
-    chain: Next = base
-    for mw in reversed(middleware):
-        # Capture mw and current chain in closure
-        def make_wrapper(m: Middleware, nxt: Next) -> Next:
-            async def wrapped(
-                tool: BaseTool[BaseModel],
-                params: BaseModel,
-                ctx: Context,
-            ) -> str:
-                return await m(tool, params, ctx, nxt)
-            return wrapped
-        chain = make_wrapper(mw, chain)
+    # Build chain: wrap each middleware around the current chain (innermost to outermost)
+    def wrap(nxt: Next, mw: Middleware) -> Next:
+        async def wrapped(tool: BaseTool[BaseModel], params: BaseModel, ctx: Context) -> str:
+            return await mw(tool, params, ctx, nxt)
+        return wrapped
     
-    return chain
+    return reduce(wrap, reversed(middleware), base)
