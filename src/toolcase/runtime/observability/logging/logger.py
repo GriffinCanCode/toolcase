@@ -205,9 +205,9 @@ class JsonRenderer:
     output: TextIO = field(default_factory=lambda: sys.stdout)
     
     def render(self, entry: LogEntry) -> None:
-        import json
-        print(json.dumps({"timestamp": entry.ts_iso, "level": entry.level, "event": entry.event,
-                          **entry.context}, default=str), file=self.output)
+        import orjson
+        print(orjson.dumps({"timestamp": entry.ts_iso, "level": entry.level, "event": entry.event,
+                            **entry.context}, option=orjson.OPT_NON_STR_KEYS).decode(), file=self.output)
 
 
 @dataclass(slots=True)

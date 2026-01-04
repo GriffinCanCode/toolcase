@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import os
 import urllib.request
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+import orjson
 
 from toolcase.foundation.errors import JsonDict
 
@@ -93,7 +94,7 @@ class DatadogExporter:
             url = f"https://trace.agent.{self.site}/api/v0.2/traces"
             headers = {"Content-Type": "application/json", "DD-API-KEY": self.api_key or ""}
         
-        req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers, method="PUT")
+        req = urllib.request.Request(url, data=orjson.dumps(payload), headers=headers, method="PUT")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout):
                 pass

@@ -35,11 +35,12 @@ from __future__ import annotations
 
 import base64
 import fnmatch
-import json
 import os
 import time
 from typing import TYPE_CHECKING, Annotated, AsyncIterator, ClassVar, Literal
 from urllib.parse import urlparse
+
+import orjson
 
 from pydantic import (
     BaseModel, ByteSize, ConfigDict, Discriminator, Field, PositiveFloat, PositiveInt,
@@ -569,7 +570,7 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
         headers = self.config.auth.apply(self.config.default_headers | params.headers)
         if params.json_body is not None:
             headers.setdefault("Content-Type", "application/json")
-            return headers, json.dumps(params.json_body)
+            return headers, orjson.dumps(params.json_body).decode()
         return headers, params.body
     
     # ─────────────────────────────────────────────────────────────────

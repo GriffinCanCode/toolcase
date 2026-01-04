@@ -241,8 +241,8 @@ class TestTransportAdapters:
         formatted = ws_adapter.format_event(event)
         
         # Should be valid JSON
-        import json
-        data = json.loads(formatted)
+        import orjson
+        data = orjson.loads(formatted)
         
         assert data["kind"] == "complete"
         assert data["tool"] == "ws_test"
@@ -350,9 +350,9 @@ class TestLLMStyleStreaming:
         assert len(messages) == 7
         
         # All should be valid JSON
-        import json
+        import orjson
         for msg in messages:
-            data = json.loads(msg)
+            data = orjson.loads(msg)
             assert "kind" in data
             assert "tool" in data
 

@@ -3,18 +3,19 @@
 Provides typed events for streaming tool outputs with metadata for
 state tracking, error handling, and transport serialization.
 
-Uses Pydantic models for validation and serialization where appropriate.
+Uses high-performance codecs (orjson/msgpack) for serialization.
 """
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from toolcase.foundation.errors import JsonDict, JsonValue
+
+from .codec import Codec, fast_decode, fast_encode, get_codec
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -75,8 +76,12 @@ class StreamEvent:
         }
     
     def to_json(self) -> str:
-        """JSON string for transport."""
-        return json.dumps(self.to_dict())
+        """JSON string for transport (uses orjson if available)."""
+        return fast_encode(self.to_dict()).decode()
+    
+    def to_bytes(self, codec: Codec | None = None) -> bytes:
+        """Serialize to bytes using specified codec (default: orjson/json)."""
+        return (codec or get_codec()).encode(self.to_dict())
 
 
 @dataclass(slots=True)

@@ -8,10 +8,11 @@ Provides:
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import Callable, ParamSpec, TypeVar, overload
+
+import orjson
 
 from toolcase.foundation.errors import JsonDict, JsonValue
 
@@ -101,7 +102,7 @@ class MockResponse:
     @property
     def text(self) -> str:
         """Return data as string."""
-        return self.data if isinstance(self.data, str) else json.dumps(self.data) if self.data else ""
+        return self.data if isinstance(self.data, str) else orjson.dumps(self.data).decode() if self.data else ""
 
 
 @dataclass

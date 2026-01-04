@@ -25,6 +25,8 @@ dependencies = [
     "pydantic-settings>=2.2",
     "pydantic-extra-types>=2.6",
     "beartype>=0.18",
+    "orjson>=3.9",
+    "msgpack>=1.0",
 ]
 
 [project.optional-dependencies]

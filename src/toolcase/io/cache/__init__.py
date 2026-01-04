@@ -5,12 +5,13 @@ Cache keys are generated from tool name + hashed parameters.
 
 Backends:
     - MemoryCache: Thread-safe in-memory (default)
-    - RedisCache: Sync redis-py backend (requires toolcase[redis])
-    - AsyncRedisCache: Async redis.asyncio backend (requires toolcase[redis])
-    - MemcachedCache: Sync pymemcache backend (requires toolcase[memcached])
-    - AsyncMemcachedCache: Async aiomcache backend (requires aiomcache)
+    - RedisCache: Sync redis-py backend, msgpack storage (requires toolcase[redis])
+    - AsyncRedisCache: Async redis.asyncio backend, msgpack storage (requires toolcase[redis])
+    - MemcachedCache: Sync pymemcache backend, msgpack storage (requires toolcase[memcached])
+    - AsyncMemcachedCache: Async aiomcache backend, msgpack storage (requires aiomcache)
 
 All backends implement ping() for health checks and stats() for monitoring.
+Distributed backends use msgpack binary serialization (~40% smaller than JSON).
 """
 
 from .cache import (
@@ -22,8 +23,10 @@ from .cache import (
     cache_through,
     cache_through_async,
     get_cache,
+    pack_value,
     reset_cache,
     set_cache,
+    unpack_value,
 )
 
 __all__ = [
@@ -37,6 +40,9 @@ __all__ = [
     "cache_through",
     "cache_through_async",
     "DEFAULT_TTL",
+    # Binary serialization for distributed caches
+    "pack_value",
+    "unpack_value",
     # Redis (lazy import)
     "RedisCache",
     "AsyncRedisCache",

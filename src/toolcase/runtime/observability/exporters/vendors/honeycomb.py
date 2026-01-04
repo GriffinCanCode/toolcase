@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import os
 import urllib.request
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+import orjson
 
 from toolcase.foundation.errors import JsonDict
 
@@ -47,7 +48,7 @@ class HoneycombExporter:
         if self.dataset:
             headers["x-honeycomb-dataset"] = self.dataset
         
-        req = urllib.request.Request(self._endpoint, data=json.dumps(payload).encode(), headers=headers, method="POST")
+        req = urllib.request.Request(self._endpoint, data=orjson.dumps(payload), headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout):
                 pass

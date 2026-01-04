@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TextIO
+
+import orjson
 
 if TYPE_CHECKING:
     from ...span import Span
@@ -88,7 +89,7 @@ class JsonExporter:
     
     def export(self, spans: list[Span]) -> None:
         for s in spans:
-            print(json.dumps(s.to_dict(), default=str), file=self.output)
+            print(orjson.dumps(s.to_dict(), option=orjson.OPT_NON_STR_KEYS).decode(), file=self.output)
     
     def shutdown(self) -> None:
         self.output.flush()

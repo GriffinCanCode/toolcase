@@ -2,6 +2,8 @@
 
 Spans represent units of work with timing, attributes, and events.
 Optimized for AI tool debugging with rich context capture.
+
+Supports orjson (JSON) and msgpack (binary) serialization.
 """
 
 from __future__ import annotations
@@ -10,6 +12,9 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
+
+import msgpack
+import orjson
 
 from toolcase.foundation.errors import ErrorCode, ErrorTrace, JsonDict, JsonValue
 
@@ -166,10 +171,18 @@ class Span:
             "tool": {"name": self.tool_name, "category": self.tool_category,
                      "params": self.params, "result_preview": self.result_preview} if self.tool_name else None,
         }
-        if self.error_trace:  # Include structured error info if present
+        if self.error_trace:
             et = self.error_trace
             result["error_trace"] = {
                 "message": et.message, "code": et.error_code, "recoverable": et.recoverable,
                 "contexts": [str(c) for c in et.contexts], "details": et.details,
             }
         return result
+    
+    def to_json(self) -> bytes:
+        """Serialize span to JSON bytes (orjson)."""
+        return orjson.dumps(self.to_dict(), option=orjson.OPT_NON_STR_KEYS)
+    
+    def to_msgpack(self) -> bytes:
+        """Serialize span to msgpack bytes (~40% smaller than JSON)."""
+        return msgpack.packb(self.to_dict(), use_bin_type=True)

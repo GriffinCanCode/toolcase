@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import urllib.request
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+import orjson
 
 from toolcase.foundation.errors import JsonDict
 
@@ -34,7 +35,7 @@ class ZipkinExporter:
         if not spans:
             return
         payload = [self._to_zipkin_span(s) for s in spans]
-        req = urllib.request.Request(self.endpoint, data=json.dumps(payload).encode(),
+        req = urllib.request.Request(self.endpoint, data=orjson.dumps(payload),
                                       headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout):

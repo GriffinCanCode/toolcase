@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+import orjson
 
 from toolcase.foundation.errors import JsonDict
 
@@ -149,7 +150,7 @@ class OTLPHttpBridge:
         import urllib.request
         payload = {"resourceSpans": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": self.service_name}}]},
                                       "scopeSpans": [{"scope": {"name": "toolcase"}, "spans": [self._span_to_json(s) for s in spans]}]}]}
-        req = urllib.request.Request(self.endpoint, data=json.dumps(payload).encode(),
+        req = urllib.request.Request(self.endpoint, data=orjson.dumps(payload),
                                       headers={"Content-Type": "application/json", **(self.headers or {})}, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout):
@@ -220,7 +221,7 @@ def _flatten_attrs(attrs: JsonDict) -> dict[str, str | int | float | bool]:
     def _convert(v: object) -> str | int | float | bool:
         if isinstance(v, (str, int, float, bool)):
             return v
-        return json.dumps(v) if isinstance(v, dict) else ("" if v is None else str(v))
+        return orjson.dumps(v).decode() if isinstance(v, dict) else ("" if v is None else str(v))
     return {k: _convert(v) for k, v in attrs.items()}
 
 
@@ -253,5 +254,6 @@ class _ReadableSpanAdapter:
     dropped_links: int = 0
     
     def to_json(self, indent: int | None = None) -> str:
-        return json.dumps({"name": self.name, "start_time": self.start_time,
-                           "end_time": self.end_time, "attributes": self.attributes}, indent=indent)
+        opts = orjson.OPT_INDENT_2 if indent else 0
+        return orjson.dumps({"name": self.name, "start_time": self.start_time,
+                             "end_time": self.end_time, "attributes": self.attributes}, option=opts).decode()
