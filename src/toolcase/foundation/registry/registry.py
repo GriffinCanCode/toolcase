@@ -8,6 +8,7 @@ The registry provides:
 - Dependency injection for shared resources
 - Integration adapters (e.g., LangChain)
 - Centralized validation via ValidationMiddleware
+- Capability-aware execution (respects max_concurrent, caching, etc.)
 """
 
 from __future__ import annotations
@@ -17,11 +18,11 @@ from collections.abc import AsyncIterator, Iterator
 
 from pydantic import BaseModel, ValidationError
 
-from toolcase.foundation.core import BaseTool, ToolMetadata
+from toolcase.foundation.core import BaseTool, ToolCapabilities, ToolMetadata
 from toolcase.foundation.di import Container, Factory, Scope
 from toolcase.foundation.errors import ErrorCode, ToolError, ToolException, format_validation_error
 from toolcase.runtime.middleware import Context, Middleware, Next, ValidationMiddleware, compose, compose_streaming, StreamMiddleware
-from toolcase.runtime.concurrency import run_sync
+from toolcase.runtime.concurrency import run_sync, CapacityLimiter
 from toolcase.io.streaming import (
     StreamChunk, StreamEvent, StreamEventKind, StreamResult,
     stream_complete, stream_error, stream_start,
@@ -32,7 +33,7 @@ class ToolRegistry:
     """Central registry for all available tools.
     
     Provides tool discovery, filtering, middleware pipeline, dependency
-    injection, and format conversion for agent use.
+    injection, capability-aware execution, and format conversion for agent use.
     
     Example:
         >>> registry = ToolRegistry()
@@ -49,9 +50,15 @@ class ToolRegistry:
     Centralized Validation:
         >>> validation = registry.use_validation()  # Returns ValidationMiddleware
         >>> validation.add_rule("search", "query", min_length(3), "must be >= 3 chars")
+    
+    Capability-Aware Execution:
+        >>> # Tools with max_concurrent are automatically rate-limited
+        >>> @tool(description="API call", max_concurrent=5)
+        >>> async def call_api(endpoint: str) -> str: ...
+        >>> # Registry respects the limit automatically
     """
     
-    __slots__ = ("_tools", "_middleware", "_chain", "_stream_chain", "_container", "_validation")
+    __slots__ = ("_tools", "_middleware", "_chain", "_stream_chain", "_container", "_validation", "_limiters")
     
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool[BaseModel]] = {}
@@ -60,18 +67,27 @@ class ToolRegistry:
         self._stream_chain: object | None = None  # StreamingChain, lazy import
         self._container = Container()
         self._validation: ValidationMiddleware | None = None
+        self._limiters: dict[str, CapacityLimiter] = {}  # Concurrency control per tool
     
     def register(self, tool: BaseTool[BaseModel]) -> None:
-        """Register a tool instance with validation."""
+        """Register a tool instance with validation.
+        
+        Automatically creates a CapacityLimiter for tools with max_concurrent set.
+        """
         name = tool.metadata.name
         if name in self._tools:
             raise ValueError(f"Tool '{name}' already registered. Use unregister() first.")
         if len(tool.metadata.description) < 10:
             raise ValueError(f"Tool '{name}' description too short for LLM selection.")
         self._tools[name] = tool
+        
+        # Create CapacityLimiter for rate-limited tools
+        if (max_conc := tool.metadata.max_concurrent) is not None:
+            self._limiters[name] = CapacityLimiter(max_conc)
     
     def unregister(self, name: str) -> bool:
         """Remove a tool by name. Returns True if found."""
+        self._limiters.pop(name, None)
         return self._tools.pop(name, None) is not None
     
     def get(self, name: str) -> BaseTool[BaseModel] | None:
@@ -205,6 +221,10 @@ class ToolRegistry:
         Validates params, builds context, resolves dependencies, and runs
         through the chain.
         
+        Capability-Aware Execution:
+        - Respects max_concurrent via semaphore (rate limiting)
+        - Adds capability info to context for middleware inspection
+        
         When ValidationMiddleware is configured (via use_validation()), validation
         is delegated to the middleware chain. Otherwise, validates internally.
         
@@ -235,11 +255,12 @@ class ToolRegistry:
             except ValidationError as e:
                 return ToolError.create(name, format_validation_error(e, tool_name=name), ErrorCode.INVALID_PARAMS, recoverable=False).render()
         
-        # Build context
+        # Build context with capability info
         context = ctx or Context()
         context["tool_name"] = name
+        context["capabilities"] = tool.metadata.capabilities
         
-        # Execute with scoped DI context
+        # Execute with scoped DI context and optional semaphore for rate limiting
         async with self._container.scope() as di_ctx:
             context["_di_context"] = di_ctx
             context["_container"] = self._container
@@ -251,8 +272,11 @@ class ToolRegistry:
                 except KeyError as e:
                     return ToolError.create(name, f"Missing dependency: {e}", ErrorCode.INVALID_PARAMS, recoverable=False).render()
             
-            # Execute through chain with exception handling
+            # Execute through chain with exception handling (rate-limited if needed)
             try:
+                if (limiter := self._limiters.get(name)) is not None:
+                    async with limiter:
+                        return await self._get_chain()(tool, validated, context)  # type: ignore[arg-type]
                 return await self._get_chain()(tool, validated, context)  # type: ignore[arg-type]
             except ToolException as e:
                 return e.error.render()
@@ -294,6 +318,9 @@ class ToolRegistry:
         generator), this yields string chunks incrementally through each
         middleware's chunk hooks. For regular tools, yields complete result.
         
+        Capability-Aware: Respects max_concurrent via semaphore, adds capability
+        info to context for middleware inspection.
+        
         When ValidationMiddleware is configured (via use_validation()), validation
         is delegated to the middleware chain. Otherwise, validates internally.
         
@@ -329,9 +356,10 @@ class ToolRegistry:
                 yield ToolError.create(name, format_validation_error(e, tool_name=name), ErrorCode.INVALID_PARAMS, recoverable=False).render()
                 return
         
-        # Build context
+        # Build context with capability info
         context = ctx or Context()
         context["tool_name"] = name
+        context["capabilities"] = tool.metadata.capabilities
         
         # Execute with scoped DI context
         async with self._container.scope() as di_ctx:
@@ -346,19 +374,28 @@ class ToolRegistry:
                     yield ToolError.create(name, f"Missing dependency: {e}", ErrorCode.INVALID_PARAMS, recoverable=False).render()
                     return
             
-            try:
-                # Get streaming chain and execute through middleware
+            # Rate-limited streaming if limiter exists
+            limiter = self._limiters.get(name)
+            
+            async def _stream() -> AsyncIterator[str]:
                 chain = self._get_stream_chain()
                 if isinstance(chain, StreamingChain):
                     async for chunk in chain(tool, validated, context):  # type: ignore[arg-type]
                         yield chunk.content
+                elif hasattr(tool, "supports_result_streaming") and tool.supports_result_streaming:
+                    async for content in tool.stream_result(validated):  # type: ignore[arg-type]
+                        yield content
                 else:
-                    # Fallback if chain type unexpected
-                    if hasattr(tool, "supports_result_streaming") and tool.supports_result_streaming:
-                        async for content in tool.stream_result(validated):  # type: ignore[arg-type]
-                            yield content
-                    else:
-                        yield await tool.arun(validated)  # type: ignore[arg-type]
+                    yield await tool.arun(validated)  # type: ignore[arg-type]
+            
+            try:
+                if limiter is not None:
+                    async with limiter:
+                        async for chunk in _stream():
+                            yield chunk
+                else:
+                    async for chunk in _stream():
+                        yield chunk
             except Exception as e:
                 yield ToolError.from_exception(name, e, "Stream execution failed").render()
     
@@ -460,7 +497,58 @@ class ToolRegistry:
         self._middleware.clear()
         self._chain = self._stream_chain = None
         self._validation = None
+        self._limiters.clear()
         self._container.clear()
+    
+    # ─────────────────────────────────────────────────────────────────
+    # Capability Introspection
+    # ─────────────────────────────────────────────────────────────────
+    
+    def get_limiter(self, name: str) -> CapacityLimiter | None:
+        """Get the CapacityLimiter for a rate-limited tool (if any)."""
+        return self._limiters.get(name)
+    
+    def limiter_stats(self) -> dict[str, dict[str, int]]:
+        """Get statistics for all capacity limiters."""
+        return {name: limiter.statistics for name, limiter in self._limiters.items()}
+    
+    def tools_by_capability(
+        self,
+        *,
+        supports_caching: bool | None = None,
+        supports_streaming: bool | None = None,
+        idempotent: bool | None = None,
+        max_concurrent_lte: int | None = None,
+    ) -> list[ToolMetadata]:
+        """Filter tools by advertised capabilities.
+        
+        Args:
+            supports_caching: Filter by caching support
+            supports_streaming: Filter by streaming support
+            idempotent: Filter by idempotency
+            max_concurrent_lte: Filter by max_concurrent <= value
+        
+        Returns:
+            List of ToolMetadata matching the capability filters
+        
+        Example:
+            >>> streamable = registry.tools_by_capability(supports_streaming=True)
+            >>> rate_limited = registry.tools_by_capability(max_concurrent_lte=10)
+        """
+        results: list[ToolMetadata] = []
+        for tool in self._tools.values():
+            caps = tool.metadata.capabilities
+            if supports_caching is not None and caps.supports_caching != supports_caching:
+                continue
+            if supports_streaming is not None and caps.supports_streaming != supports_streaming:
+                continue
+            if idempotent is not None and caps.idempotent != idempotent:
+                continue
+            if max_concurrent_lte is not None:
+                if caps.max_concurrent is None or caps.max_concurrent > max_concurrent_lte:
+                    continue
+            results.append(tool.metadata)
+        return results
     
     async def dispose(self) -> None:
         """Dispose all singleton resources in the container."""

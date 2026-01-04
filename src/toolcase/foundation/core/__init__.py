@@ -3,6 +3,7 @@
 This module provides the foundation for building type-safe, extensible tools:
 - BaseTool: Abstract base class for all tools
 - ToolMetadata: Tool metadata and capabilities
+- ToolCapabilities: Advertised capabilities for intelligent scheduling
 - EmptyParams: Default parameter schema for parameterless tools
 - @tool decorator: Convert functions to tools
 - FunctionTool: Standard function wrapper
@@ -11,7 +12,7 @@ This module provides the foundation for building type-safe, extensible tools:
 - Dependency injection helpers
 """
 
-from .base import BaseTool, EmptyParams, ToolMetadata
+from .base import BaseTool, EmptyParams, ToolCapabilities, ToolMetadata
 from .decorator import (
     FunctionTool,
     ResultStreamingFunctionTool,
@@ -25,6 +26,7 @@ from .decorator import (
 __all__ = [
     "BaseTool",
     "ToolMetadata",
+    "ToolCapabilities",
     "EmptyParams",
     "tool",
     "FunctionTool",

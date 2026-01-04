@@ -62,6 +62,74 @@ if TYPE_CHECKING:
 from toolcase.foundation.errors.result import _ERR, _OK
 
 
+class ToolCapabilities(BaseModel):
+    """Advertised tool capabilities for intelligent scheduling and execution.
+    
+    Tools declare capabilities that the registry/scheduler can use for:
+    - Caching decisions (skip cache lookup for non-cacheable tools)
+    - Concurrency limits (respect max_concurrent for rate-limited APIs)
+    - Streaming support (route to streaming pipeline when supported)
+    - Idempotency hints (safe to retry without side effects)
+    
+    Example:
+        >>> caps = ToolCapabilities(
+        ...     supports_caching=True,
+        ...     supports_streaming=True,
+        ...     max_concurrent=5,
+        ...     idempotent=True,
+        ... )
+    """
+    
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    
+    supports_caching: bool = Field(
+        default=True,
+        description="Whether results can be cached. False for time-sensitive or stateful tools.",
+    )
+    supports_streaming: bool = Field(
+        default=False,
+        description="Whether tool can stream incremental results (LLM output, progress).",
+    )
+    max_concurrent: int | None = Field(
+        default=None,
+        ge=1,
+        description="Max concurrent executions (None=unlimited). For rate-limited APIs.",
+    )
+    idempotent: bool = Field(
+        default=True,
+        description="Whether repeated calls with same params produce same result safely.",
+    )
+    estimated_latency_ms: int | None = Field(
+        default=None,
+        ge=0,
+        description="Typical execution time hint for scheduling (None=unknown).",
+    )
+    requires_confirmation: bool = Field(
+        default=False,
+        description="Whether tool should require user confirmation before execution.",
+    )
+    
+    @classmethod
+    def default(cls) -> "ToolCapabilities":
+        """Default capabilities for standard tools."""
+        return cls()
+    
+    @classmethod
+    def streaming(cls, max_concurrent: int | None = None) -> "ToolCapabilities":
+        """Preset for streaming-capable tools."""
+        return cls(supports_streaming=True, max_concurrent=max_concurrent)
+    
+    @classmethod
+    def non_cacheable(cls, idempotent: bool = False) -> "ToolCapabilities":
+        """Preset for tools with non-cacheable results."""
+        return cls(supports_caching=False, idempotent=idempotent)
+    
+    @classmethod
+    def rate_limited(cls, max_concurrent: int, estimated_latency_ms: int | None = None) -> "ToolCapabilities":
+        """Preset for rate-limited external APIs."""
+        return cls(max_concurrent=max_concurrent, estimated_latency_ms=estimated_latency_ms)
+
+
 class ToolMetadata(BaseModel):
     """Metadata for tool discovery, LLM selection, UI display, and API key validation."""
     
@@ -99,6 +167,15 @@ class ToolMetadata(BaseModel):
     streaming: bool = False
     tags: frozenset[str] = Field(default_factory=frozenset, repr=False)  # Exclude from repr (can be verbose)
     version: str = Field(default="1.0.0", pattern=r"^\d+\.\d+\.\d+$")
+    capabilities: ToolCapabilities = Field(default_factory=ToolCapabilities)
+    
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _coerce_capabilities(cls, v: ToolCapabilities | dict | None) -> ToolCapabilities:
+        """Accept dict or ToolCapabilities, return ToolCapabilities."""
+        if v is None:
+            return ToolCapabilities()
+        return v if isinstance(v, ToolCapabilities) else ToolCapabilities(**v)
     
     @field_validator("name", mode="before")
     @classmethod
@@ -128,6 +205,35 @@ class ToolMetadata(BaseModel):
     def short_description(self) -> str:
         """First sentence of description for compact display."""
         return self.description.split(". ", 1)[0].rstrip(".")
+    
+    # ─────────────────────────────────────────────────────────────────
+    # Capability Accessors (convenience)
+    # ─────────────────────────────────────────────────────────────────
+    
+    @property
+    def supports_caching(self) -> bool:
+        """Whether tool results can be cached."""
+        return self.capabilities.supports_caching
+    
+    @property
+    def supports_result_streaming(self) -> bool:
+        """Whether tool can stream incremental results."""
+        return self.capabilities.supports_streaming or self.streaming
+    
+    @property
+    def max_concurrent(self) -> int | None:
+        """Max concurrent executions (None=unlimited)."""
+        return self.capabilities.max_concurrent
+    
+    @property
+    def is_idempotent(self) -> bool:
+        """Whether repeated calls are safe."""
+        return self.capabilities.idempotent
+    
+    @property
+    def requires_confirmation(self) -> bool:
+        """Whether tool should require user confirmation."""
+        return self.capabilities.requires_confirmation
     
     def __hash__(self) -> int:
         """Explicit hash for frozen model (enables set/dict membership)."""

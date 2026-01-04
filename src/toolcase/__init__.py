@@ -76,6 +76,7 @@ from .foundation.core import (
     FunctionTool,
     ResultStreamingFunctionTool,
     StreamingFunctionTool,
+    ToolCapabilities,
     ToolMetadata,
     tool,
 )
@@ -120,7 +121,14 @@ from .foundation.config import (
     ToolcaseSettings,
     TracingSettings,
     clear_settings_cache,
+    dotenv_values,
+    env,
+    get_env,
+    get_env_files_loaded,
+    get_env_prefix,
     get_settings,
+    load_env,
+    require_env,
 )
 
 # Foundation: Testing
@@ -291,16 +299,40 @@ from .tools import (
     ApiKeyAuth,
     BasicAuth,
     BearerAuth,
+    CapabilityFilter,
     ConfigurableTool,
     CustomAuth,
     DiscoveryParams,
     DiscoveryTool,
+    EnvApiKeyAuth,
+    EnvBasicAuth,
+    EnvBearerAuth,
     HttpConfig,
     HttpParams,
     HttpResponse,
     HttpTool,
+    MatchMode,
     NoAuth,
+    QueryResult,
+    SchemaPattern,
+    StatsMiddleware,
     ToolConfig,
+    ToolQuery,
+    ToolStats,
+    UsageStats,
+    api_key_from_env,
+    basic_from_env,
+    bearer_from_env,
+    find_by_input_type,
+    find_by_max_concurrent,
+    find_by_param,
+    find_by_tags,
+    find_cacheable,
+    find_streamable,
+    format_stats,
+    get_stats,
+    reset_stats,
+    set_stats,
     standard_tools,
 )
 
@@ -308,7 +340,7 @@ __all__ = [
     # Version
     "__version__",
     # Core
-    "BaseTool", "ToolMetadata", "EmptyParams", "tool",
+    "BaseTool", "ToolMetadata", "ToolCapabilities", "EmptyParams", "tool",
     "FunctionTool", "StreamingFunctionTool", "ResultStreamingFunctionTool",
     # Errors
     "ErrorCode", "ToolError", "ToolException", "classify_exception",
@@ -337,12 +369,24 @@ __all__ = [
     "ToolcaseSettings", "get_settings", "clear_settings_cache",
     "CacheSettings", "LoggingSettings", "RetrySettings",
     "HttpSettings", "TracingSettings", "RateLimitSettings",
+    # Environment utilities
+    "load_env", "get_env", "require_env", "env",
+    "get_env_prefix", "get_env_files_loaded", "dotenv_values",
     # Built-in tools
     "DiscoveryTool", "DiscoveryParams",
     "ConfigurableTool", "ToolConfig",
     "HttpTool", "HttpConfig", "HttpParams", "HttpResponse",
     "NoAuth", "BearerAuth", "BasicAuth", "ApiKeyAuth", "CustomAuth",
+    "EnvBearerAuth", "EnvApiKeyAuth", "EnvBasicAuth",
+    "bearer_from_env", "api_key_from_env", "basic_from_env",
     "standard_tools",
+    # Tool discovery & query
+    "ToolQuery", "SchemaPattern", "CapabilityFilter", "QueryResult", "MatchMode",
+    "find_by_param", "find_by_tags", "find_by_input_type",
+    "find_streamable", "find_cacheable", "find_by_max_concurrent",
+    # Usage statistics
+    "UsageStats", "ToolStats", "StatsMiddleware",
+    "get_stats", "set_stats", "reset_stats", "format_stats",
     # Monadic error handling
     "Result", "Ok", "Err", "ResultT", "ToolResult", "ErrorContext", "ErrorTrace",
     "tool_result", "try_tool_operation", "try_tool_operation_async",

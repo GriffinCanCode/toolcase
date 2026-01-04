@@ -50,7 +50,7 @@ from toolcase.io.cache import DEFAULT_TTL
 from toolcase.foundation.errors import ToolResult, classify_exception, ErrorTrace, Result
 from toolcase.foundation.errors.result import _ERR, _OK
 from toolcase.foundation.errors.types import ErrorContext, JsonDict
-from .base import BaseTool, ToolMetadata
+from .base import BaseTool, ToolCapabilities, ToolMetadata
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable
@@ -217,11 +217,18 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     category: str = "general",
+    tags: list[str] | set[str] | None = None,
     requires_api_key: bool = False,
     streaming: bool = False,
     cache_enabled: bool = True,
     cache_ttl: float = DEFAULT_TTL,
     inject: list[str] | None = None,
+    # Capability negotiation
+    capabilities: ToolCapabilities | None = None,
+    max_concurrent: int | None = None,
+    idempotent: bool = True,
+    requires_confirmation: bool = False,
+    estimated_latency_ms: int | None = None,
 ) -> Callable[[Callable[P, str]], FunctionTool]: ...
 
 
@@ -231,11 +238,18 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     category: str = "general",
+    tags: list[str] | set[str] | None = None,
     requires_api_key: bool = False,
     streaming: bool = False,
     cache_enabled: bool = True,
     cache_ttl: float = DEFAULT_TTL,
     inject: list[str] | None = None,
+    # Capability negotiation
+    capabilities: ToolCapabilities | None = None,
+    max_concurrent: int | None = None,
+    idempotent: bool = True,
+    requires_confirmation: bool = False,
+    estimated_latency_ms: int | None = None,
 ) -> FunctionTool | Callable[[Callable[P, str]], FunctionTool]:
     """Decorator to create a tool from a function.
     
@@ -248,11 +262,17 @@ def tool(
         name: Tool name (defaults to function name, converted to snake_case)
         description: Tool description (defaults to first line of docstring)
         category: Tool category for grouping
+        tags: Capability tags for discovery (e.g., ["search", "web"])
         requires_api_key: Whether tool needs external API credentials
         streaming: Whether tool supports progress streaming
         cache_enabled: Enable result caching
         cache_ttl: Cache TTL in seconds
         inject: List of dependency names to inject from registry container
+        capabilities: Full ToolCapabilities object (overrides individual capability params)
+        max_concurrent: Max concurrent executions for rate-limited APIs
+        idempotent: Whether repeated calls with same params are safe
+        requires_confirmation: Whether user confirmation is required before execution
+        estimated_latency_ms: Typical execution time hint for scheduling
     
     Returns:
         FunctionTool instance that wraps the function
@@ -265,6 +285,16 @@ def tool(
         >>> search(query="python")  # Direct call
         'Results for: python'
         >>> registry.register(search)  # Register as BaseTool
+    
+    Capability Negotiation:
+        >>> @tool(
+        ...     description="Call external API",
+        ...     max_concurrent=5,  # Rate-limited
+        ...     idempotent=False,  # Has side effects
+        ...     estimated_latency_ms=200,
+        ... )
+        ... async def call_api(endpoint: str) -> str:
+        ...     ...
     
     Dependency Injection:
         >>> @tool(description="Fetch data from database", inject=["db"])
@@ -294,7 +324,21 @@ def tool(
         if len(tool_desc) < 10:
             tool_desc = f"{tool_desc} - automatically generated tool"
         
-        meta = ToolMetadata(name=tool_name, description=tool_desc, category=category, requires_api_key=requires_api_key, streaming=streaming)
+        # Build capabilities (explicit object or from individual params)
+        caps = capabilities or ToolCapabilities(
+            supports_caching=cache_enabled,
+            supports_streaming=streaming,
+            max_concurrent=max_concurrent,
+            idempotent=idempotent,
+            requires_confirmation=requires_confirmation,
+            estimated_latency_ms=estimated_latency_ms,
+        )
+        
+        meta = ToolMetadata(
+            name=tool_name, description=tool_desc, category=category,
+            tags=frozenset(tags or ()), requires_api_key=requires_api_key,
+            streaming=streaming, capabilities=caps,
+        )
         schema = _generate_schema(fn, f"{_to_pascal_case(tool_name)}Params", exclude=inject or [])
         
         # Determine tool class based on function type and streaming flag
