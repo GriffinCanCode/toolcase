@@ -37,9 +37,7 @@ Validator = Callable[[object], bool | str]
 @dataclass(slots=True, frozen=True)
 class FieldRule:
     """Immutable validation rule for a specific field."""
-    field: str
-    check: Validator
-    message: str
+    field: str; check: Validator; message: str
 
 
 @dataclass(slots=True)
@@ -134,52 +132,40 @@ class ValidationMiddleware:
             self._adapters[name] = adapter
         return adapter
     
-    def _format_violations(self, violations: tuple[Violation, ...], tool_name: str) -> str:
+    def _format_violations(self, violations: tuple[Violation, ...], name: str) -> str:
         """Format DSL violations into LLM-friendly error string."""
-        if len(violations) == 1:
-            return ToolError.create(tool_name, str(violations[0]), ErrorCode.INVALID_PARAMS, recoverable=False).render()
-        msgs = "\n".join(f"  • {v}" for v in violations)
-        return ToolError.create(tool_name, f"{len(violations)} validation errors:\n{msgs}", ErrorCode.INVALID_PARAMS, recoverable=False).render()
+        err = lambda m: ToolError.create(name, m, ErrorCode.INVALID_PARAMS, recoverable=False).render()
+        if len(violations) == 1: return err(str(violations[0]))
+        return err(f"{len(violations)} validation errors:\n" + "\n".join(f"  • {v}" for v in violations))
     
     def _validate(self, tool: "BaseTool[BaseModel]", params: BaseModel | dict[str, object]) -> tuple[BaseModel | None, str | None]:
         """Validate params. Returns (validated_params, None) or (None, error_string)."""
         name = tool.metadata.name
+        err = lambda m: ToolError.create(name, m, ErrorCode.INVALID_PARAMS, recoverable=False).render()
         
         # Dict→BaseModel conversion via cached TypeAdapter (faster than direct model(**dict))
         if isinstance(params, dict):
-            try:
-                params = self._get_adapter(tool).validate_python(params)
-            except ValidationError as e:
-                return None, ToolError.create(name, format_validation_error(e, tool_name=name), ErrorCode.INVALID_PARAMS, recoverable=False).render()
+            try: params = self._get_adapter(tool).validate_python(params)
+            except ValidationError as e: return None, err(format_validation_error(e, tool_name=name))
         
         # Optional re-validation (catch mutations, ensure schema compliance)
         if self.revalidate:
-            try:
-                params = self._get_adapter(tool).validate_python(params.model_dump())
-            except ValidationError as e:
-                return None, ToolError.create(name, format_validation_error(e, tool_name=name), ErrorCode.INVALID_PARAMS, recoverable=False).render()
+            try: params = self._get_adapter(tool).validate_python(params.model_dump())
+            except ValidationError as e: return None, err(format_validation_error(e, tool_name=name))
         
         # Schema DSL validation (preferred for complex rules)
-        if (schema := self._schemas.get(name)):
-            result = schema.validate(params)
-            if not result.is_valid:
-                return None, self._format_violations(result.violations, name)
+        if (schema := self._schemas.get(name)) and not (result := schema.validate(params)).is_valid:
+            return None, self._format_violations(result.violations, name)
         
         # Field rules (legacy API, still supported)
         for rule in self._rules.get(name, []):
-            val = getattr(params, rule.field, None)
-            result = rule.check(val)
-            if result is False or isinstance(result, str):
-                msg = result if isinstance(result, str) else rule.message
-                return None, ToolError.create(name, f"'{rule.field}' {msg}", ErrorCode.INVALID_PARAMS, recoverable=False).render()
+            if (result := rule.check(getattr(params, rule.field, None))) is False or isinstance(result, str):
+                return None, err(f"'{rule.field}' {result if isinstance(result, str) else rule.message}")
         
         # Cross-field constraints (legacy API, still supported)
         for constraint in self._constraints.get(name, []):
-            result = constraint(params)
-            if result is False:
-                return None, ToolError.create(name, "Cross-field constraint failed", ErrorCode.INVALID_PARAMS, recoverable=False).render()
-            if isinstance(result, str):
-                return None, ToolError.create(name, result, ErrorCode.INVALID_PARAMS, recoverable=False).render()
+            if (result := constraint(params)) is False: return None, err("Cross-field constraint failed")
+            if isinstance(result, str): return None, err(result)
         
         return params, None
     
@@ -187,18 +173,10 @@ class ValidationMiddleware:
     # Regular Middleware Protocol
     # ─────────────────────────────────────────────────────────────────
     
-    async def __call__(
-        self,
-        tool: "BaseTool[BaseModel]",
-        params: BaseModel,
-        ctx: Context,
-        next: Next,
-    ) -> str:
+    async def __call__(self, tool: "BaseTool[BaseModel]", params: BaseModel, ctx: Context, next: Next) -> str:
         """Validate and pass to next middleware."""
         validated, error = self._validate(tool, params)
-        if error:
-            return error
-        
+        if error: return error
         ctx["validated_params"] = validated
         return await next(tool, validated, ctx)  # type: ignore[arg-type]
     
@@ -208,20 +186,13 @@ class ValidationMiddleware:
     
     async def on_start(self, tool: "BaseTool[BaseModel]", params: BaseModel, ctx: Context) -> None:
         """Validate before streaming begins. Raises ValidationToolException on failure."""
-        validated, error = self._validate(tool, params)
-        if error:
-            raise ValidationToolException.create(tool.metadata.name, error, ErrorCode.INVALID_PARAMS, recoverable=False)
-        ctx["validated_params"] = validated
+        if (validated := self._validate(tool, params))[1]:
+            raise ValidationToolException.create(tool.metadata.name, validated[1], ErrorCode.INVALID_PARAMS, recoverable=False)
+        ctx["validated_params"] = validated[0]
     
-    async def on_chunk(self, chunk: StreamChunk, ctx: Context) -> StreamChunk:
-        """Pass chunks through unchanged."""
-        return chunk
-    
-    async def on_complete(self, accumulated: str, ctx: Context) -> None:
-        """No-op on completion."""
-    
-    async def on_error(self, error: Exception, ctx: Context) -> None:
-        """No-op on error."""
+    async def on_chunk(self, chunk: StreamChunk, ctx: Context) -> StreamChunk: return chunk  # Pass through unchanged
+    async def on_complete(self, accumulated: str, ctx: Context) -> None: pass  # No-op
+    async def on_error(self, error: Exception, ctx: Context) -> None: pass  # No-op
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -230,38 +201,34 @@ class ValidationMiddleware:
 
 def min_length(n: int) -> Validator:
     """Validate minimum string/collection length."""
-    return lambda v: len(v) >= n if v else False or f"must have at least {n} items/characters"
+    return lambda v: len(v) >= n if v else f"must have at least {n} items/characters"
 
 
 def max_length(n: int) -> Validator:
     """Validate maximum string/collection length."""
-    return lambda v: len(v) <= n if v else True or f"must have at most {n} items/characters"
+    return lambda v: (len(v) <= n) if v else True or f"must have at most {n} items/characters"
 
 
 def in_range(low: float, high: float) -> Validator:
     """Validate numeric value in range [low, high]."""
-    return lambda v: low <= v <= high if isinstance(v, (int, float)) else f"must be between {low} and {high}"
+    return lambda v: (low <= v <= high) if isinstance(v, (int, float)) else f"must be between {low} and {high}"
 
 
 def matches(pattern: str) -> Validator:
     """Validate string matches regex pattern."""
-    import re
-    compiled = re.compile(pattern)
-    return lambda v: bool(compiled.match(str(v))) if v else False or f"must match pattern {pattern}"
+    import re; compiled = re.compile(pattern)
+    return lambda v: bool(compiled.match(str(v))) if v else f"must match pattern {pattern}"
 
 
 def one_of(*allowed: object) -> Validator:
     """Validate value is one of allowed options."""
-    allowed_set = frozenset(allowed)
-    return lambda v: v in allowed_set or f"must be one of: {', '.join(map(str, allowed))}"
+    s = frozenset(allowed)
+    return lambda v: v in s or f"must be one of: {', '.join(map(str, allowed))}"
 
 
 def not_empty(v: object) -> bool | str:
     """Validate value is not empty/None."""
-    if v is None:
-        return "cannot be empty"
-    if isinstance(v, (str, list, dict)) and not v:
-        return "cannot be empty"
+    if v is None or (isinstance(v, (str, list, dict)) and not v): return "cannot be empty"
     return True
 
 
