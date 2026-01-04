@@ -2,6 +2,7 @@
 
 from .help_topic import HELP
 from .overview import OVERVIEW
+from .architecture import ARCHITECTURE
 from .tool import TOOL
 from .result import RESULT
 from .errors import ERRORS
@@ -21,10 +22,12 @@ from .testing import TESTING
 from .http import HTTP
 from .discovery import DISCOVERY
 from .imports import IMPORTS
+from .logging import LOGGING
 
 TOPICS: dict[str, str] = {
     "help": HELP,
     "overview": OVERVIEW,
+    "architecture": ARCHITECTURE,
     "tool": TOOL,
     "result": RESULT,
     "errors": ERRORS,
@@ -44,6 +47,7 @@ TOPICS: dict[str, str] = {
     "http": HTTP,
     "discovery": DISCOVERY,
     "imports": IMPORTS,
+    "logging": LOGGING,
 }
 
 __all__ = ["TOPICS"]

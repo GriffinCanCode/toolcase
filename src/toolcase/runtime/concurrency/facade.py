@@ -143,6 +143,11 @@ class Concurrency:
         await checkpoint()
     
     @staticmethod
+    async def sleep(seconds: float) -> None:
+        """Async sleep with cancellation support."""
+        await asyncio.sleep(seconds)
+    
+    @staticmethod
     def cancel_scope(*, timeout: float | None = None, shield: bool = False) -> "CancelScope":
         """Create a cancellation scope with optional timeout."""
         from .primitives import CancelScope
@@ -402,3 +407,4 @@ first_success = Concurrency.first_success
 map_async = Concurrency.map
 to_thread = Concurrency.to_thread
 run_sync = Concurrency.run_sync
+sleep = Concurrency.sleep
