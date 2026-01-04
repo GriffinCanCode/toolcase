@@ -22,13 +22,13 @@ from typing import Callable
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, Result, ToolResult, format_validation_error
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, JsonMapping, Ok, Result, ToolResult, format_validation_error
 
 
-# Type aliases for gate functions
-PreCheck = Callable[[JsonDict], bool | str | ToolResult]
+# Type aliases for gate functions (read-only input views)
+PreCheck = Callable[[JsonMapping], bool | str | ToolResult]
 PostCheck = Callable[[str], bool | str | ToolResult]
-ParamsTransform = Callable[[JsonDict], JsonDict]
+ParamsTransform = Callable[[JsonMapping], JsonDict]
 
 
 class GateParams(BaseModel):

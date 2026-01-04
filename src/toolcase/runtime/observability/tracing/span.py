@@ -150,6 +150,48 @@ class Span:
         self.result_preview = f"{result[:max_len]}..." if len(result) > max_len else result
         return self
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # Span-Correlated Logging
+    # ─────────────────────────────────────────────────────────────────────────
+    
+    def log(self, event: str, level: str = "info", **attrs: JsonValue) -> Span:
+        """Emit a log entry correlated with this span.
+        
+        Logs are emitted to the configured logger with trace context automatically included,
+        and also recorded as span events for bidirectional correlation.
+        
+        Args:
+            event: Log message
+            level: Log level (debug, info, warning, error)
+            **attrs: Additional attributes
+        
+        Example:
+            >>> with tracer.span("fetch") as span:
+            ...     span.log("starting request", url="https://api.example.com")
+            ...     # Both emits log AND records span event
+        """
+        from ..logging import get_logger
+        log = get_logger().bind(span_name=self.name)
+        getattr(log, level, log.info)(event, **attrs)
+        self.add_event(f"log.{level}", {"message": event, **attrs})
+        return self
+    
+    def log_debug(self, event: str, **attrs: JsonValue) -> Span:
+        """Emit debug log correlated with this span."""
+        return self.log(event, "debug", **attrs)
+    
+    def log_info(self, event: str, **attrs: JsonValue) -> Span:
+        """Emit info log correlated with this span."""
+        return self.log(event, "info", **attrs)
+    
+    def log_warning(self, event: str, **attrs: JsonValue) -> Span:
+        """Emit warning log correlated with this span."""
+        return self.log(event, "warning", **attrs)
+    
+    def log_error(self, event: str, **attrs: JsonValue) -> Span:
+        """Emit error log correlated with this span."""
+        return self.log(event, "error", **attrs)
+    
     def end(self, status: SpanStatus | None = None, error: str | ErrorTrace | None = None) -> Span:
         """End the span with optional status."""
         self.end_time = time.time()

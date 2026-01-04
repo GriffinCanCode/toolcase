@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from functools import wraps
 from typing import TYPE_CHECKING, Callable, ParamSpec, TypeVar
 
-from toolcase.foundation.errors import JsonDict
+from toolcase.foundation.errors import JsonDict, JsonMapping
 
 from .context import SpanContext, TraceContext
 from .span import Span, SpanKind, SpanStatus
@@ -66,7 +66,7 @@ class Tracer:
         """Get global tracer or create disabled one."""
         return _tracer.get() or cls(enabled=False, exporter=NoOpExporter())
     
-    def span(self, name: str, kind: SpanKind = SpanKind.INTERNAL, attributes: JsonDict | None = None) -> SpanContextManager:
+    def span(self, name: str, kind: SpanKind = SpanKind.INTERNAL, attributes: JsonMapping | None = None) -> SpanContextManager:
         """Create a span context manager.
         
         Example:
@@ -75,9 +75,9 @@ class Tracer:
             ...     result = fetch_data()
             ...     span.set_result_preview(result)
         """
-        return SpanContextManager(self, name, kind, attributes or {})
+        return SpanContextManager(self, name, kind, dict(attributes) if attributes else {})
     
-    def start_span(self, name: str, kind: SpanKind = SpanKind.INTERNAL, attributes: JsonDict | None = None) -> Span:
+    def start_span(self, name: str, kind: SpanKind = SpanKind.INTERNAL, attributes: JsonMapping | None = None) -> Span:
         """Start a span manually (caller must end it). Prefer `span()` context manager for automatic lifecycle."""
         if not self.enabled:
             return Span(name=name, context=SpanContext.new(), kind=kind)

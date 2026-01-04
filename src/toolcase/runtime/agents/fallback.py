@@ -20,7 +20,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, ToolResult, format_validation_error
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, JsonMapping, ToolResult, format_validation_error
 from toolcase.runtime.concurrency import CancelScope
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from toolcase.foundation.errors import JsonDict
+from toolcase.foundation.errors import JsonDict, JsonMapping
 
 from .cache import DEFAULT_TTL, AsyncToolCache, ToolCache, pack_value, unpack_value
 
@@ -79,16 +79,16 @@ class RedisCache(ToolCache):
         """Create cache from Redis URL."""
         return cls(_import_redis().from_url(url, **kw), prefix, default_ttl)  # type: ignore[union-attr]
     
-    def _key(self, tool_name: str, params: BaseModel | JsonDict) -> str:
+    def _key(self, tool_name: str, params: BaseModel | JsonMapping) -> str:
         return f"{self._prefix}{self.make_key(tool_name, params)}"
     
-    def get(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
+    def get(self, tool_name: str, params: BaseModel | JsonMapping) -> str | None:
         return unpack_value(val) if (val := self._client.get(self._key(tool_name, params))) else None
     
-    def set(self, tool_name: str, params: BaseModel | JsonDict, value: str, ttl: float | None = None) -> None:
+    def set(self, tool_name: str, params: BaseModel | JsonMapping, value: str, ttl: float | None = None) -> None:
         self._client.set(self._key(tool_name, params), pack_value(value), ex=int(ttl or self._default_ttl))
     
-    def invalidate(self, tool_name: str, params: BaseModel | JsonDict) -> bool:
+    def invalidate(self, tool_name: str, params: BaseModel | JsonMapping) -> bool:
         return self._client.delete(self._key(tool_name, params)) > 0
     
     def invalidate_tool(self, tool_name: str) -> int:
@@ -141,16 +141,16 @@ class AsyncRedisCache(AsyncToolCache):
             raise ImportError("Async Redis cache requires: pip install toolcase[redis]") from e
         return cls(aioredis.from_url(url, **kw), prefix, default_ttl)  # type: ignore[arg-type]
     
-    def _key(self, tool_name: str, params: BaseModel | JsonDict) -> str:
+    def _key(self, tool_name: str, params: BaseModel | JsonMapping) -> str:
         return f"{self._prefix}{self.make_key(tool_name, params)}"
     
-    async def aget(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
+    async def aget(self, tool_name: str, params: BaseModel | JsonMapping) -> str | None:
         return unpack_value(val) if (val := await self._client.get(self._key(tool_name, params))) else None
     
-    async def aset(self, tool_name: str, params: BaseModel | JsonDict, value: str, ttl: float | None = None) -> None:
+    async def aset(self, tool_name: str, params: BaseModel | JsonMapping, value: str, ttl: float | None = None) -> None:
         await self._client.set(self._key(tool_name, params), pack_value(value), ex=int(ttl or self._default_ttl))
     
-    async def ainvalidate(self, tool_name: str, params: BaseModel | JsonDict) -> bool:
+    async def ainvalidate(self, tool_name: str, params: BaseModel | JsonMapping) -> bool:
         return await self._client.delete(self._key(tool_name, params)) > 0
     
     async def ainvalidate_tool(self, tool_name: str) -> int:

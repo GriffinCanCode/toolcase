@@ -38,7 +38,7 @@ from datetime import UTC, datetime
 from functools import wraps
 from typing import TYPE_CHECKING, Callable, ParamSpec, Protocol, TextIO, TypeVar, runtime_checkable
 
-from toolcase.foundation.errors import JsonDict, JsonValue
+from toolcase.foundation.errors import JsonDict, JsonMapping, JsonValue
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -152,7 +152,7 @@ class LogScope:
     
     __slots__ = ("_ctx", "_token")
     
-    def __init__(self, ctx: JsonDict) -> None:
+    def __init__(self, ctx: JsonMapping) -> None:
         self._ctx, self._token = ctx, None
     
     def __enter__(self) -> None:
@@ -259,11 +259,21 @@ def _get_renderer() -> LogRenderer:
 
 
 def _get_trace_context() -> JsonDict:
-    """Extract trace context if tracing is configured."""
+    """Extract full trace context for log correlation.
+    
+    Returns trace_id, span_id, parent_span_id, and service.name from the active span.
+    This enables logs to be correlated with distributed traces in observability backends.
+    """
     try:
-        from ..tracing import TraceContext
+        from ..tracing import TraceContext, Tracer
         if ctx := TraceContext.get():
-            return {"trace_id": ctx.span_context.trace_id, "span_id": ctx.span_context.span_id}
+            sc = ctx.span_context
+            result: JsonDict = {"trace_id": sc.trace_id, "span_id": sc.span_id}
+            if sc.parent_id:
+                result["parent_span_id"] = sc.parent_id
+            if (tracer := Tracer.get_global()) and tracer.service_name:
+                result["service.name"] = tracer.service_name
+            return result
     except ImportError:
         pass
     return {}
@@ -338,6 +348,103 @@ class log_context:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Span-Correlated Logging
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TracedLogger(BoundLogger):
+    """Logger that automatically correlates with spans and optionally records logs as span events.
+    
+    Extends BoundLogger to provide tighter span integration:
+    - Always includes current trace context (trace_id, span_id, parent_span_id, service.name)
+    - Can optionally record log entries as span events for bidirectional correlation
+    
+    Example:
+        >>> from toolcase.runtime.observability import get_tracer, span_logger
+        >>> tracer = get_tracer()
+        >>> with tracer.span("process") as span:
+        ...     log = span_logger()  # Bound to current span
+        ...     log.info("processing item", item_id=123)
+        ...     # Log appears both in logs AND as span event
+    """
+    
+    __slots__ = ("_record_to_span",)
+    
+    def __init__(
+        self,
+        context: JsonDict | None = None,
+        *,
+        _renderer: LogRenderer | None = None,
+        _level: int = logging.DEBUG,
+        record_to_span: bool = False,
+    ) -> None:
+        super().__init__(context=context or {}, _renderer=_renderer, _level=_level)
+        self._record_to_span = record_to_span
+    
+    def _log(self, level: int, event: str, **kw: JsonValue) -> None:
+        if level < self._level:
+            return
+        merged = {**_log_context.get(), **self.context, **kw, **_get_trace_context()}
+        (self._renderer or _get_renderer()).render(LogEntry(time.time(), _level_name(level), event, merged))
+        # Record as span event if enabled
+        if self._record_to_span:
+            _record_log_to_span(_level_name(level), event, {**self.context, **kw})
+    
+    def bind(self, **kw: JsonValue) -> TracedLogger:
+        """Create new traced logger with additional bound context."""
+        return TracedLogger(
+            context={**self.context, **kw},
+            _renderer=self._renderer,
+            _level=self._level,
+            record_to_span=self._record_to_span,
+        )
+    
+    def with_span_events(self, enabled: bool = True) -> TracedLogger:
+        """Return logger that records logs as span events."""
+        return TracedLogger(
+            context=self.context.copy(),
+            _renderer=self._renderer,
+            _level=self._level,
+            record_to_span=enabled,
+        )
+
+
+def _record_log_to_span(level: str, event: str, attrs: JsonDict) -> None:
+    """Record a log entry as a span event if a span is active."""
+    try:
+        from ..tracing import TraceContext
+        from ..tracing.tracer import Tracer
+        if (ctx := TraceContext.get()) and (tracer := Tracer.get_global()) and tracer.enabled:
+            # Find active span in tracer (the one matching current context)
+            if tracer._spans:
+                span = tracer._spans[-1]
+                span.add_event(f"log.{level}", {"message": event, **attrs})
+    except (ImportError, IndexError):
+        pass
+
+
+def span_logger(name: str | None = None, record_to_span: bool = True, **initial_context: JsonValue) -> TracedLogger:
+    """Get a logger bound to the current span context.
+    
+    Like get_logger(), but returns a TracedLogger that:
+    - Is always correlated with the current trace (trace_id, span_id in every log)
+    - Optionally records log entries as span events (record_to_span=True)
+    
+    Args:
+        name: Logger name (added as 'logger' in context)
+        record_to_span: If True, also record logs as span events
+        **initial_context: Additional context to bind
+    
+    Example:
+        >>> with tracer.span("operation") as span:
+        ...     log = span_logger("my-service")
+        ...     log.info("step completed", step=1)  # Appears in logs + span events
+    """
+    ctx = {**initial_context, **({"logger": name} if name else {})}
+    return TracedLogger(context=ctx, _level=_default_level.get(), record_to_span=record_to_span)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -362,3 +469,85 @@ def _format_value(v: object, c: dict[str, str]) -> str:
         case dict(): return f'{c["dim"]}{{{len(v)} items}}{c["reset"]}'
         case list() | tuple(): return f'{c["dim"]}[{len(v)} items]{c["reset"]}'
         case _: return f'{c["white"]}{v!r}{c["reset"]}'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Unified Observability Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def configure_observability(
+    service_name: str = "toolcase",
+    *,
+    log_format: str = "console",
+    log_level: str = "INFO",
+    trace_exporter: str = "console",
+    trace_endpoint: str | None = None,
+    trace_api_key: str | None = None,
+    trace_env: str = "",
+    async_export: bool = False,
+    sample_rate: float | None = None,
+    colors: bool | None = None,
+    verbose: bool = False,
+) -> tuple[LogRenderer, object]:
+    """Configure both logging and tracing with automatic correlation.
+    
+    This is the recommended way to set up observability. It ensures:
+    - Logs automatically include trace_id, span_id, parent_span_id
+    - Service name is consistent across logs and traces
+    - Proper correlation for downstream observability backends
+    
+    Args:
+        service_name: Identifier for this service (used in both logs and traces)
+        log_format: "console" (human-readable), "json" (machine-parseable), or "none"
+        log_level: Minimum log level (DEBUG, INFO, WARNING, ERROR)
+        trace_exporter: "console", "json", "otlp", "otlp_http", "datadog", "honeycomb", "zipkin", "none"
+        trace_endpoint: Collector endpoint (for otlp, zipkin)
+        trace_api_key: API key (for datadog, honeycomb)
+        trace_env: Environment name (for datadog)
+        async_export: Use background batching for trace export
+        sample_rate: Trace sampling rate (0.0-1.0)
+        colors: Force color output (None = auto-detect)
+        verbose: Show detailed attributes in console trace output
+    
+    Returns:
+        Tuple of (LogRenderer, Tracer)
+    
+    Example:
+        >>> from toolcase.runtime.observability import configure_observability, span_logger
+        >>> 
+        >>> # Development setup
+        >>> configure_observability(service_name="my-agent")
+        >>> 
+        >>> # Production with OTLP
+        >>> configure_observability(
+        ...     service_name="my-agent",
+        ...     log_format="json",
+        ...     trace_exporter="otlp",
+        ...     trace_endpoint="http://otel-collector:4317",
+        ...     async_export=True,
+        ... )
+        >>> 
+        >>> # Now logs automatically have trace context
+        >>> log = span_logger("my-module")
+        >>> with get_tracer().span("operation"):
+        ...     log.info("processing")  # Includes trace_id, span_id, service.name
+    """
+    from ..tracing import configure_tracing
+    
+    # Configure logging first (will be used by tracing)
+    renderer = configure_logging(format=log_format, level=log_level, colors=colors)
+    
+    # Configure tracing with matching service name
+    tracer = configure_tracing(
+        service_name=service_name,
+        exporter=trace_exporter,
+        endpoint=trace_endpoint,
+        verbose=verbose,
+        async_export=async_export,
+        sample_rate=sample_rate,
+        api_key=trace_api_key,
+        env=trace_env,
+    )
+    
+    return renderer, tracer

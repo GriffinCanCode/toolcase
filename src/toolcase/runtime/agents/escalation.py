@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult, format_validation_error
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, JsonMapping, Ok, ToolResult, format_validation_error
 from toolcase.runtime.concurrency import to_thread, checkpoint
 
 if TYPE_CHECKING:
@@ -65,7 +65,7 @@ class EscalationResult:
 class EscalationRequest:
     """Request sent to escalation handler. Contains all context needed for human review."""
     tool_name: str
-    params: JsonDict
+    params: JsonMapping
     error: ErrorTrace
     attempt: int
     timestamp: datetime = field(default_factory=datetime.utcnow)

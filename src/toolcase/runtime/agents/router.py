@@ -22,10 +22,10 @@ from typing import Callable
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, ToolResult, format_validation_error
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, JsonMapping, ToolResult, format_validation_error
 
-# Type alias for condition predicate
-Predicate = Callable[[JsonDict], bool]
+# Type alias for condition predicate (read-only input)
+Predicate = Callable[[JsonMapping], bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +35,7 @@ class Route:
     tool: BaseTool[BaseModel]
     name: str = ""
     
-    def matches(self, input_dict: JsonDict) -> bool:
+    def matches(self, input_dict: JsonMapping) -> bool:
         """Check if this route's condition matches the input."""
         try:
             return self.condition(input_dict)
@@ -97,7 +97,7 @@ class RouterTool(BaseTool[RouterParams]):
     def default(self) -> BaseTool[BaseModel]:
         return self._default
     
-    def _select_tool(self, input_dict: JsonDict) -> tuple[BaseTool[BaseModel], str]:
+    def _select_tool(self, input_dict: JsonMapping) -> tuple[BaseTool[BaseModel], str]:
         """Select tool based on input, returns (tool, route_name)."""
         if r := next((r for r in self._routes if r.matches(input_dict)), None):
             return r.tool, r.name or r.tool.metadata.name
