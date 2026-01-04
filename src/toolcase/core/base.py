@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import (
     TYPE_CHECKING,
     AsyncIterator,
+    Callable,
     ClassVar,
     Generic,
     TypeVar,
@@ -22,6 +23,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..cache import DEFAULT_TTL, get_cache
 from ..errors import ErrorCode, ToolError
+from ..monads import Result, ToolResult
+from ..monads.tool import result_to_string, string_to_result
 from ..progress import ProgressCallback, ProgressKind, ToolProgress, complete
 
 if TYPE_CHECKING:
@@ -150,6 +153,59 @@ class BaseTool(ABC, Generic[TParams]):
         ).render()
     
     # ─────────────────────────────────────────────────────────────────
+    # Result Helpers
+    # ─────────────────────────────────────────────────────────────────
+    
+    def _ok(self, value: str) -> ToolResult:
+        """Create Ok result (convenience method)."""
+        from ..monads import Ok
+        return Ok(value)
+    
+    def _err(
+        self,
+        message: str,
+        code: ErrorCode = ErrorCode.UNKNOWN,
+        *,
+        recoverable: bool = True,
+    ) -> ToolResult:
+        """Create Err result from error parameters."""
+        from ..monads import tool_result
+        return tool_result(
+            self.metadata.name,
+            message,
+            code=code,
+            recoverable=recoverable,
+        )
+    
+    def _try(
+        self,
+        operation: Callable[[], str],
+        *,
+        context: str = "",
+    ) -> ToolResult:
+        """Execute operation with automatic exception handling."""
+        from ..monads.tool import try_tool_operation
+        return try_tool_operation(
+            self.metadata.name,
+            operation,
+            context=context,
+        )
+    
+    async def _try_async(
+        self,
+        operation: Callable[[], str],
+        *,
+        context: str = "",
+    ) -> ToolResult:
+        """Execute async operation with automatic exception handling."""
+        from ..monads.tool import try_tool_operation_async
+        return await try_tool_operation_async(
+            self.metadata.name,
+            operation,
+            context=context,
+        )
+    
+    # ─────────────────────────────────────────────────────────────────
     # Async/Sync Interop
     # ─────────────────────────────────────────────────────────────────
     
@@ -174,12 +230,37 @@ class BaseTool(ABC, Generic[TParams]):
     # Core Execution
     # ─────────────────────────────────────────────────────────────────
     
+    def _run_result(self, params: TParams) -> ToolResult:
+        """Execute tool with Result-based error handling (optional override).
+        
+        Override this method to use monadic error handling with Result types.
+        This provides type-safe error propagation with railway-oriented programming.
+        
+        If not overridden, falls back to _run() with string-based error handling.
+        
+        Example:
+            >>> def _run_result(self, params: MyParams) -> ToolResult:
+            ...     return (
+            ...         self._validate_params(params)
+            ...         .flat_map(lambda p: self._fetch_data(p))
+            ...         .map(lambda data: self._format_result(data))
+            ...     )
+        
+        Returns:
+            ToolResult (Result[str, ErrorTrace]) with success or error
+        """
+        # Default: delegate to string-based _run and convert
+        result_str = self._run(params)
+        return string_to_result(result_str, self.metadata.name)
+    
     @abstractmethod
     def _run(self, params: TParams) -> str:
         """Execute the tool synchronously.
         
         This is the primary method to implement. Return a string result
         formatted for LLM consumption.
+        
+        For Result-based error handling, override _run_result() instead.
         
         For async implementations, implement `_async_run` and call:
             return self._run_async_sync(self._async_run(params))
@@ -194,6 +275,14 @@ class BaseTool(ABC, Generic[TParams]):
         """
         return await asyncio.to_thread(self._run, params)
     
+    async def _async_run_result(self, params: TParams) -> ToolResult:
+        """Execute tool asynchronously with Result-based error handling.
+        
+        Override for native async implementations using Result types.
+        Default delegates to _run_result in a thread.
+        """
+        return await asyncio.to_thread(self._run_result, params)
+    
     def run(self, params: TParams) -> str:
         """Execute with caching support.
         
@@ -201,7 +290,8 @@ class BaseTool(ABC, Generic[TParams]):
         Error responses (starting with "**Tool Error") are not cached.
         """
         if not self.cache_enabled:
-            return self._run(params)
+            result = self._run_result(params)
+            return result_to_string(result, self.metadata.name)
         
         cache = get_cache()
         tool_name = self.metadata.name
@@ -210,19 +300,55 @@ class BaseTool(ABC, Generic[TParams]):
         if (cached := cache.get(tool_name, params)) is not None:
             return cached
         
+        # Execute with Result-based handling
+        result = self._run_result(params)
+        output = result_to_string(result, tool_name)
+        
+        # Cache successful results only (Ok variants)
+        if result.is_ok():
+            cache.set(tool_name, params, output, self.cache_ttl)
+        
+        return output
+    
+    def run_result(self, params: TParams) -> ToolResult:
+        """Execute with caching, returning Result type.
+        
+        Type-safe alternative to run() that returns Result[str, ErrorTrace]
+        instead of string. Enables monadic error handling in tool compositions.
+        
+        Example:
+            >>> result = tool.run_result(params)
+            >>> processed = result.map(lambda s: s.upper())
+            >>> output = processed.unwrap_or("default")
+        
+        Returns:
+            ToolResult with success string or ErrorTrace
+        """
+        if not self.cache_enabled:
+            return self._run_result(params)
+        
+        cache = get_cache()
+        tool_name = self.metadata.name
+        
+        # Cache hit?
+        if (cached := cache.get(tool_name, params)) is not None:
+            return string_to_result(cached, tool_name)
+        
         # Execute
-        result = self._run(params)
+        result = self._run_result(params)
         
         # Cache successful results only
-        if not result.startswith("**Tool Error"):
-            cache.set(tool_name, params, result, self.cache_ttl)
+        if result.is_ok():
+            output = result_to_string(result, tool_name)
+            cache.set(tool_name, params, output, self.cache_ttl)
         
         return result
     
     async def arun(self, params: TParams, timeout: float = 30.0) -> str:
         """Execute asynchronously with caching and timeout."""
         if not self.cache_enabled:
-            return await asyncio.wait_for(self._async_run(params), timeout=timeout)
+            result = await asyncio.wait_for(self._async_run_result(params), timeout=timeout)
+            return result_to_string(result, self.metadata.name)
         
         cache = get_cache()
         tool_name = self.metadata.name
@@ -230,10 +356,30 @@ class BaseTool(ABC, Generic[TParams]):
         if (cached := cache.get(tool_name, params)) is not None:
             return cached
         
-        result = await asyncio.wait_for(self._async_run(params), timeout=timeout)
+        result = await asyncio.wait_for(self._async_run_result(params), timeout=timeout)
+        output = result_to_string(result, tool_name)
         
-        if not result.startswith("**Tool Error"):
-            cache.set(tool_name, params, result, self.cache_ttl)
+        if result.is_ok():
+            cache.set(tool_name, params, output, self.cache_ttl)
+        
+        return output
+    
+    async def arun_result(self, params: TParams, timeout: float = 30.0) -> ToolResult:
+        """Execute asynchronously with Result type, caching and timeout."""
+        if not self.cache_enabled:
+            return await asyncio.wait_for(self._async_run_result(params), timeout=timeout)
+        
+        cache = get_cache()
+        tool_name = self.metadata.name
+        
+        if (cached := cache.get(tool_name, params)) is not None:
+            return string_to_result(cached, tool_name)
+        
+        result = await asyncio.wait_for(self._async_run_result(params), timeout=timeout)
+        
+        if result.is_ok():
+            output = result_to_string(result, tool_name)
+            cache.set(tool_name, params, output, self.cache_ttl)
         
         return result
     
@@ -256,14 +402,17 @@ class BaseTool(ABC, Generic[TParams]):
             ToolProgress events for status, steps, and completion
         """
         yield ToolProgress(kind=ProgressKind.STATUS, message="Starting...")
-        try:
-            result = await self._async_run(params)
-            yield complete(result)
-        except Exception as e:
+        
+        result = await self._async_run_result(params)
+        
+        if result.is_ok():
+            yield complete(result.unwrap())
+        else:
+            trace = result.unwrap_err()
             yield ToolProgress(
                 kind=ProgressKind.ERROR,
-                message=str(e),
-                data={"error": str(e), "type": type(e).__name__},
+                message=trace.message,
+                data={"error": trace.message, "code": trace.error_code},
             )
     
     async def arun_with_progress(

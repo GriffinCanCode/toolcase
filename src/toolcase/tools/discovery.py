@@ -11,6 +11,7 @@ from typing import ClassVar, Literal
 from pydantic import BaseModel, Field
 
 from ..core import BaseTool, ToolMetadata
+from ..monads import Ok, ToolResult
 from ..registry import get_registry
 
 
@@ -51,21 +52,24 @@ class DiscoveryTool(BaseTool[DiscoveryParams]):
     # Don't cache discovery - always show current state
     cache_enabled: ClassVar[bool] = False
     
-    def _run(self, params: DiscoveryParams) -> str:
+    def _run_result(self, params: DiscoveryParams) -> ToolResult:
+        """Result-based implementation."""
         registry = get_registry()
         
         # Get tools, optionally filtered by category
-        if params.category:
-            tools = registry.list_by_category(params.category)
-        else:
-            tools = registry.list_tools()
+        tools = registry.list_by_category(params.category) if params.category else registry.list_tools()
         
         if not tools:
-            if params.category:
-                return f"No tools found in category '{params.category}'. Try without a filter."
-            return "No tools are currently available."
+            msg = f"No tools found in category '{params.category}'. Try without a filter." if params.category else "No tools are currently available."
+            return Ok(msg)
         
-        return self._format_brief(tools, params.category) if params.format == "brief" else self._format_detailed(tools, params.category)
+        formatted = self._format_brief(tools, params.category) if params.format == "brief" else self._format_detailed(tools, params.category)
+        return Ok(formatted)
+    
+    def _run(self, params: DiscoveryParams) -> str:
+        """String-based fallback."""
+        from ..monads.tool import result_to_string
+        return result_to_string(self._run_result(params), self.metadata.name)
     
     def _format_brief(self, tools: list[ToolMetadata], category: str | None) -> str:
         """Brief format: grouped by category with one-line descriptions."""

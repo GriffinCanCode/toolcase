@@ -5,6 +5,8 @@ Type-safe, extensible tool framework for AI agents.
 ## Features
 
 - **Type-safe parameters** via Pydantic generics
+- **Monadic error handling** with Result/Either types (NEW!)
+- **Railway-oriented programming** for automatic error propagation
 - **Standardized error handling** with error codes
 - **Built-in caching** with TTL support
 - **Async/sync interoperability**
@@ -76,6 +78,8 @@ class MyTool(BaseTool[MyParams]):
 
 ### Error Handling
 
+#### String-Based (Traditional)
+
 Use built-in error methods for consistent responses:
 
 ```python
@@ -88,6 +92,51 @@ def _run(self, params: MyParams) -> str:
     except Exception as e:
         return self._error_from_exception(e, "API call failed")
 ```
+
+#### Result-Based (Recommended - NEW!)
+
+Use monadic Result types for type-safe error handling:
+
+```python
+from toolcase import Ok, ToolResult, try_tool_operation
+
+def _run_result(self, params: MyParams) -> ToolResult:
+    """Railway-oriented programming - errors propagate automatically."""
+    return (
+        self._validate_input(params)
+        .flat_map(lambda p: self._fetch_data(p))
+        .flat_map(lambda data: self._process_data(data))
+        .map(lambda result: self._format_output(result))
+    )
+
+def _validate_input(self, params: MyParams) -> ToolResult:
+    if not params.query:
+        return tool_result(
+            self.metadata.name,
+            "Query required",
+            code=ErrorCode.INVALID_PARAMS
+        )
+    return Ok(params)
+```
+
+Or use automatic exception handling:
+
+```python
+def _run_result(self, params: MyParams) -> ToolResult:
+    return try_tool_operation(
+        self.metadata.name,
+        lambda: format_result(external_api_call()),
+        context="calling external API"
+    )
+```
+
+**Benefits**:
+- ✅ Type-safe - compiler enforces error handling
+- ✅ Composable - chain operations elegantly
+- ✅ No manual error checking - errors propagate automatically
+- ✅ Error context stacking - track provenance through call chains
+
+See [MONADIC_ERRORS.md](MONADIC_ERRORS.md) for complete guide.
 
 ### Progress Streaming
 

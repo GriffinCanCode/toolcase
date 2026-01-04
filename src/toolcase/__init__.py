@@ -131,10 +131,13 @@ from .monads import (
     Result,
     ResultT,
     ToolResult,
+    batch_results,
     collect_results,
     sequence,
     tool_result,
     traverse,
+    try_tool_operation,
+    try_tool_operation_async,
 )
 
 __all__ = [
@@ -196,6 +199,9 @@ __all__ = [
     "ErrorContext",
     "ErrorTrace",
     "tool_result",
+    "try_tool_operation",
+    "try_tool_operation_async",
+    "batch_results",
     "sequence",
     "traverse",
     "collect_results",
