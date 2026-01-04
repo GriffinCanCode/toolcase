@@ -142,11 +142,19 @@ from .retry import (
 
 # Pipeline composition
 from .pipeline import (
-    PipelineTool,
+    ChunkTransform,
     ParallelTool,
+    PipelineTool,
     Step,
-    pipeline,
+    StreamingParallelTool,
+    StreamingPipelineTool,
+    StreamMerge,
+    StreamStep,
+    interleave_streams,
     parallel,
+    pipeline,
+    streaming_parallel,
+    streaming_pipeline,
 )
 
 # Dependency Injection
@@ -328,9 +336,17 @@ __all__ = [
     # Pipeline composition
     "PipelineTool",
     "ParallelTool",
+    "StreamingPipelineTool",
+    "StreamingParallelTool",
     "Step",
+    "StreamStep",
+    "ChunkTransform",
+    "StreamMerge",
     "pipeline",
     "parallel",
+    "streaming_pipeline",
+    "streaming_parallel",
+    "interleave_streams",
     # Dependency Injection
     "Container",
     "Disposable",
