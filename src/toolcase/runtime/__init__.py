@@ -16,6 +16,8 @@ __all__ = [
     # Batch
     "BatchConfig", "BatchItem", "BatchResult",
     "batch_execute", "batch_execute_sync",
+    # Resilience (core primitives)
+    "CircuitBreaker", "CircuitState", "State", "StateStore", "MemoryStateStore",
     # Middleware
     "Middleware", "Next", "Context", "compose",
     "StreamMiddleware", "StreamingAdapter", "StreamingChain", "compose_streaming",
@@ -78,6 +80,11 @@ def __getattr__(name: str):
     if name in batch_attrs:
         from . import batch
         return getattr(batch, name)
+    
+    resilience_attrs = {"CircuitBreaker", "CircuitState", "State", "StateStore", "MemoryStateStore"}
+    if name in resilience_attrs:
+        from . import resilience
+        return getattr(resilience, name)
     
     middleware_attrs = {
         "Middleware", "Next", "Context", "compose",

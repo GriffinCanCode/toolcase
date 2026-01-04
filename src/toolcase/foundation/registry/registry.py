@@ -680,6 +680,104 @@ class ToolRegistry:
             results.append(tool.metadata)
         return results
     
+    # ─────────────────────────────────────────────────────────────────
+    # Circuit Breaker Observability
+    # ─────────────────────────────────────────────────────────────────
+    
+    def _find_circuit_middleware(self) -> object | None:
+        """Find CircuitBreakerMiddleware in the chain (lazy import to avoid cycles)."""
+        from toolcase.runtime.middleware.plugins.breaker import CircuitBreakerMiddleware
+        return next((m for m in self._middleware if isinstance(m, CircuitBreakerMiddleware)), None)
+    
+    def circuit_state(self, tool_name: str) -> object | None:
+        """Get current circuit state for a tool.
+        
+        Returns State enum if CircuitBreakerMiddleware is configured, else None.
+        
+        Args:
+            tool_name: Tool name to check
+        
+        Returns:
+            State enum (CLOSED, OPEN, HALF_OPEN) or None if no circuit breaker
+        
+        Example:
+            >>> registry.use(CircuitBreakerMiddleware())
+            >>> state = registry.circuit_state("search")
+            >>> if state and state.name == "OPEN":
+            ...     print("Circuit is open - failing fast")
+        """
+        if (mw := self._find_circuit_middleware()) is not None:
+            return mw.get_state(tool_name)  # type: ignore[union-attr]
+        return None
+    
+    def circuit_is_open(self, tool_name: str) -> bool:
+        """Check if a tool's circuit is open (fail-fast mode).
+        
+        Convenience method for quick checks. Returns False if no circuit breaker.
+        
+        Args:
+            tool_name: Tool name to check
+        
+        Returns:
+            True if circuit is open, False otherwise (or no breaker configured)
+        """
+        from toolcase.runtime.resilience import State
+        return self.circuit_state(tool_name) == State.OPEN
+    
+    def circuit_stats(self) -> dict[str, object]:
+        """Get statistics for all circuit breakers.
+        
+        Returns:
+            Dict mapping tool names to circuit state dicts, empty if no breaker
+        
+        Example:
+            >>> stats = registry.circuit_stats()
+            >>> for tool, state in stats.items():
+            ...     print(f"{tool}: {state['state']} ({state['failures']} failures)")
+        """
+        if (mw := self._find_circuit_middleware()) is not None:
+            return mw.stats()  # type: ignore[union-attr]
+        return {}
+    
+    def reset_circuit(self, tool_name: str | None = None) -> bool:
+        """Manually reset circuit breaker(s).
+        
+        Args:
+            tool_name: Tool to reset, or None to reset all circuits
+        
+        Returns:
+            True if circuit breaker was found and reset, False if no breaker
+        
+        Example:
+            >>> registry.reset_circuit("search")  # Reset one tool
+            >>> registry.reset_circuit()  # Reset all circuits
+        """
+        if (mw := self._find_circuit_middleware()) is not None:
+            mw.reset(tool_name)  # type: ignore[union-attr]
+            return True
+        return False
+    
+    def get_circuit_breaker(self, tool_name: str) -> object | None:
+        """Get the CircuitBreaker instance for a tool.
+        
+        Provides direct access to the core primitive for advanced monitoring
+        or manual intervention.
+        
+        Args:
+            tool_name: Tool name
+        
+        Returns:
+            CircuitBreaker instance or None if no middleware configured
+        
+        Example:
+            >>> breaker = registry.get_circuit_breaker("search")
+            >>> if breaker:
+            ...     print(f"Retry after: {breaker.retry_after}s")
+        """
+        if (mw := self._find_circuit_middleware()) is not None:
+            return mw.get_breaker(tool_name)  # type: ignore[union-attr]
+        return None
+    
     async def dispose(self) -> None:
         """Dispose all singleton resources in the container."""
         await self._container.dispose()

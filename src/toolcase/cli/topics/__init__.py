@@ -29,6 +29,7 @@ from .capabilities import CAPABILITIES
 from .validation import VALIDATION
 from .mcp import MCP
 from .effects import EFFECTS
+from .resilience import RESILIENCE
 from .web import WEB
 
 TOPICS: dict[str, str] = {
@@ -61,6 +62,7 @@ TOPICS: dict[str, str] = {
     "validation": VALIDATION,
     "mcp": MCP,
     "effects": EFFECTS,
+    "resilience": RESILIENCE,
     "web": WEB,
 }
 

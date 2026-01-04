@@ -4,7 +4,8 @@ These middleware are ready to use and demonstrate the middleware pattern.
 They have no external dependencies beyond the standard library.
 """
 
-from .breaker import CircuitBreakerMiddleware, CircuitState, MemoryStateStore, State, StateStore
+from .breaker import CircuitBreakerMiddleware
+from toolcase.runtime.resilience import CircuitBreaker, CircuitState, MemoryStateStore, State, StateStore
 from .coalesce import CoalesceMiddleware
 
 # Re-export from foundation for convenience
@@ -109,7 +110,9 @@ from .validation import (
 )
 
 __all__ = [
-    # Resilience
+    # Resilience (core primitive)
+    "CircuitBreaker",
+    # Resilience (middleware)
     "CircuitBreakerMiddleware",
     "CircuitState",
     "State",
