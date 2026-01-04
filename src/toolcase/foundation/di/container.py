@@ -95,19 +95,15 @@ class ScopedContext:
         
         # Dispose in reverse creation order (LIFO - last created, first disposed)
         for name in reversed(self._creation_order):
-            resource = self.instances.get(name)
-            if resource is None:
+            if (resource := self.instances.get(name)) is None:
                 continue
-            if isinstance(resource, Disposable):
-                try:
+            try:
+                if isinstance(resource, Disposable):
                     await resource.close()
-                except Exception:
-                    pass  # Best-effort cleanup
-            elif hasattr(resource, "aclose"):
-                try:
+                elif hasattr(resource, "aclose"):
                     await resource.aclose()
-                except Exception:
-                    pass
+            except Exception:
+                pass  # Best-effort cleanup
 
 
 class Container:
@@ -220,13 +216,13 @@ class Container:
             match provider.scope:
                 case Scope.SINGLETON:
                     return Ok(await self._resolve_singleton(provider))
+                case Scope.SCOPED if ctx is None:
+                    return Err(ErrorTrace(
+                        message=f"Scoped dependency '{name}' requires context",
+                        error_code=ErrorCode.INVALID_PARAMS.value,
+                        recoverable=False,
+                    ).with_operation("di:resolve", dependency=name))
                 case Scope.SCOPED:
-                    if ctx is None:
-                        return Err(ErrorTrace(
-                            message=f"Scoped dependency '{name}' requires context",
-                            error_code=ErrorCode.INVALID_PARAMS.value,
-                            recoverable=False,
-                        ).with_operation("di:resolve", dependency=name))
                     return Ok(await self._resolve_scoped(name, provider, ctx))
                 case Scope.TRANSIENT:
                     return Ok(await self._create_instance(provider.factory))
@@ -236,9 +232,6 @@ class Container:
                 error_code=ErrorCode.EXTERNAL_SERVICE_ERROR.value,
                 recoverable=True,
             ).with_operation("di:resolve", dependency=name))
-        
-        # Unreachable but satisfies type checker
-        return Err(ErrorTrace(message=f"Unknown scope for {name}"))  # pragma: no cover
     
     async def resolve_many(
         self,
@@ -300,9 +293,7 @@ class Container:
     async def _create_instance(factory: Factory[object]) -> object:
         """Invoke factory, handling sync/async."""
         result = factory()
-        if asyncio.iscoroutine(result):
-            return await result
-        return result
+        return await result if asyncio.iscoroutine(result) else result
     
     @asynccontextmanager
     async def scope(self) -> AsyncIterator[ScopedContext]:
@@ -324,11 +315,11 @@ class Container:
         """Dispose all singleton resources."""
         async with self._lock:
             for provider in self._providers.values():
-                if provider.instance is not None:
-                    if isinstance(provider.instance, Disposable):
-                        await provider.instance.close()
-                    elif hasattr(provider.instance, "aclose"):
-                        await provider.instance.aclose()
+                if (inst := provider.instance) is not None:
+                    if isinstance(inst, Disposable):
+                        await inst.close()
+                    elif hasattr(inst, "aclose"):
+                        await inst.aclose()
                     provider.instance = None
     
     def clear(self) -> None:

@@ -40,7 +40,7 @@ import inspect
 import re
 from contextvars import ContextVar
 from functools import wraps
-from typing import TYPE_CHECKING, Callable, ParamSpec, TypeVar, get_type_hints, overload
+from typing import TYPE_CHECKING, Callable, ParamSpec, get_type_hints, overload
 
 from pydantic import BaseModel, Field, create_model
 
@@ -58,7 +58,6 @@ if TYPE_CHECKING:
     from toolcase.io.progress import ToolProgress
 
 P = ParamSpec("P")
-T = TypeVar("T")
 
 # Context variable for passing injected dependencies
 # Note: No default set to avoid mutable default dict shared across contexts
