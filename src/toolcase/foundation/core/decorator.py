@@ -166,8 +166,13 @@ class FunctionTool(BaseTool[BaseModel]):
         return self._effects
     
     async def _async_run(self, params: BaseModel) -> str:
-        """Execute the wrapped function. Async-first: sync funcs run via to_thread."""
+        """Execute the wrapped function. Async-first: sync funcs run via to_thread. Injects effect handlers if available."""
+        from toolcase.foundation.effects import get_handler
         kwargs = params.model_dump() | (get_injected_deps() if self._inject else {})
+        # Inject effect handlers for declared effects (replace None defaults)
+        for effect in self._effects:
+            if (handler := get_handler(effect)) and kwargs.get(effect) is None:
+                kwargs[effect] = handler
         return await self._func(**kwargs) if self._is_async else await to_thread(self._func, **kwargs)  # type: ignore[misc, arg-type]
     
     async def _async_run_result(self, params: BaseModel) -> ToolResult:
@@ -202,7 +207,12 @@ class StreamingFunctionTool(FunctionTool):
     
     async def stream_run(self, params: BaseModel) -> AsyncIterator[ToolProgress]:
         """Stream progress events from the wrapped generator function."""
+        from toolcase.foundation.effects import get_handler
         kwargs = params.model_dump() | (get_injected_deps() if self._inject else {})
+        # Inject effect handlers (replace None defaults)
+        for effect in self._effects:
+            if (handler := get_handler(effect)) and kwargs.get(effect) is None:
+                kwargs[effect] = handler
         async for progress in self._func(**kwargs):  # type: ignore[union-attr]
             yield progress
 
@@ -218,7 +228,12 @@ class ResultStreamingFunctionTool(FunctionTool):
     
     async def stream_result(self, params: BaseModel) -> AsyncIterator[str]:
         """Stream string chunks from the wrapped async generator."""
+        from toolcase.foundation.effects import get_handler
         kwargs = params.model_dump() | (get_injected_deps() if self._inject else {})
+        # Inject effect handlers (replace None defaults)
+        for effect in self._effects:
+            if (handler := get_handler(effect)) and kwargs.get(effect) is None:
+                kwargs[effect] = handler
         async for chunk in self._func(**kwargs):  # type: ignore[union-attr]
             yield chunk
     
@@ -246,6 +261,7 @@ def tool(
     cache_enabled: bool = True,
     cache_ttl: float = DEFAULT_TTL,
     inject: list[str] | None = None,
+    effects: list[str] | set[str] | frozenset[str] | None = None,
     # Capability negotiation
     capabilities: ToolCapabilities | None = None,
     max_concurrent: int | None = None,
@@ -267,6 +283,7 @@ def tool(
     cache_enabled: bool = True,
     cache_ttl: float = DEFAULT_TTL,
     inject: list[str] | None = None,
+    effects: list[str] | set[str] | frozenset[str] | None = None,
     # Capability negotiation
     capabilities: ToolCapabilities | None = None,
     max_concurrent: int | None = None,
@@ -291,6 +308,8 @@ def tool(
         cache_enabled: Enable result caching
         cache_ttl: Cache TTL in seconds
         inject: List of dependency names to inject from registry container
+        effects: List of side effects declared by this tool (e.g., ["db", "http"])
+                 Enables compile-time verification and testing without mocks
         capabilities: Full ToolCapabilities object (overrides individual capability params)
         max_concurrent: Max concurrent executions for rate-limited APIs
         idempotent: Whether repeated calls with same params are safe
@@ -308,6 +327,16 @@ def tool(
         >>> search(query="python")  # Direct call
         'Results for: python'
         >>> registry.register(search)  # Register as BaseTool
+    
+    Effect System:
+        >>> @tool(description="Fetch from DB", effects=["db", "cache"])
+        ... async def fetch_user(user_id: str, db: Database) -> str:
+        ...     return await db.fetch_one("SELECT * FROM users WHERE id = $1", user_id)
+        ...
+        >>> # Test without mocks using pure handlers
+        >>> from toolcase.foundation.effects import test_effects, InMemoryDB
+        >>> async with test_effects(db=InMemoryDB()):
+        ...     result = await fetch_user(user_id="123")
     
     Capability Negotiation:
         >>> @tool(
@@ -340,6 +369,7 @@ def tool(
         - Async functions are fully supported
         - streaming=True with async generator enables result streaming
         - Injected parameters are excluded from the generated schema
+        - Effects are tracked for verification and pure testing
     """
     def decorator(fn: Callable[P, str]) -> FunctionTool:
         tool_name = name or _to_snake_case(fn.__name__)
@@ -364,11 +394,14 @@ def tool(
         )
         schema = _generate_schema(fn, f"{_to_pascal_case(tool_name)}Params", exclude=inject or [])
         
+        # Normalize effects to frozenset
+        effect_set = frozenset(e.lower() if isinstance(e, str) else e for e in (effects or ()))
+        
         # Determine tool class based on function type and streaming flag
         tool_cls = (ResultStreamingFunctionTool if streaming and inspect.isasyncgenfunction(fn) else
                     StreamingFunctionTool if streaming and asyncio.iscoroutinefunction(fn) else FunctionTool)
         
-        tool_instance = tool_cls(fn, meta, schema, cache_enabled=cache_enabled, cache_ttl=cache_ttl, inject=inject)
+        tool_instance = tool_cls(fn, meta, schema, cache_enabled=cache_enabled, cache_ttl=cache_ttl, inject=inject, effects=effect_set)
         wraps(fn)(tool_instance)
         return tool_instance
     

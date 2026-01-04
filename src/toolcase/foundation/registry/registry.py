@@ -9,6 +9,7 @@ The registry provides:
 - Integration adapters (e.g., LangChain)
 - Centralized validation via ValidationMiddleware
 - Capability-aware execution (respects max_concurrent, caching, etc.)
+- Effect system verification (declare side effects, enable pure testing)
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from collections.abc import AsyncIterator, Iterator
 from beartype import beartype as typechecked
 from pydantic import BaseModel, ValidationError
 
-from toolcase.foundation.core import BaseTool, ToolCapabilities, ToolMetadata
+from toolcase.foundation.core import AnyTool, BaseTool, ToolCapabilities, ToolMetadata, ToolProtocol
 from toolcase.foundation.di import Container, Factory, Scope
 from toolcase.foundation.errors import ErrorCode, ToolError, ToolException, format_validation_error
 from toolcase.runtime.middleware import Context, Middleware, Next, ValidationMiddleware, compose, compose_streaming, StreamMiddleware
@@ -57,30 +58,46 @@ class ToolRegistry:
         >>> @tool(description="API call", max_concurrent=5)
         >>> async def call_api(endpoint: str) -> str: ...
         >>> # Registry respects the limit automatically
+    
+    Effect System:
+        >>> registry.require_effects()  # Enable effect verification
+        >>> registry.provide_effect("db", InMemoryDB())  # Register handlers
+        >>> @tool(description="Fetch data", effects=["db"])
+        ... async def fetch(db: Database) -> str: ...
+        >>> registry.register(fetch)  # Verifies db handler exists
     """
     
-    __slots__ = ("_tools", "_middleware", "_chain", "_stream_chain", "_container", "_validation", "_limiters")
+    __slots__ = ("_tools", "_middleware", "_chain", "_stream_chain", "_container", "_validation", "_limiters", "_effect_handlers", "_require_effects")
     
     def __init__(self) -> None:
-        self._tools: dict[str, BaseTool[BaseModel]] = {}
+        self._tools: dict[str, AnyTool] = {}
         self._middleware: list[Middleware | StreamMiddleware] = []
         self._chain: Next | None = None
         self._stream_chain: object | None = None  # StreamingChain, lazy import
         self._container = Container()
         self._validation: ValidationMiddleware | None = None
         self._limiters: dict[str, CapacityLimiter] = {}  # Concurrency control per tool
+        self._effect_handlers: dict[str, object] = {}  # Effect handlers (e.g., InMemoryDB)
+        self._require_effects: bool = False  # Whether to verify effects on registration
     
     @typechecked
-    def register(self, tool: BaseTool[BaseModel]) -> None:
+    def register(self, tool: AnyTool) -> None:
         """Register a tool instance with validation.
         
+        Accepts either BaseTool subclasses or any object conforming to ToolProtocol.
         Automatically creates a CapacityLimiter for tools with max_concurrent set.
+        Verifies effect handlers exist when require_effects() is enabled.
         """
         name = tool.metadata.name
         if name in self._tools:
             raise ValueError(f"Tool '{name}' already registered. Use unregister() first.")
         if len(tool.metadata.description) < 10:
             raise ValueError(f"Tool '{name}' description too short for LLM selection.")
+        
+        # Verify effects if enabled
+        if self._require_effects:
+            self._verify_tool_effects(tool)
+        
         self._tools[name] = tool
         
         # Create CapacityLimiter for rate-limited tools
@@ -94,7 +111,7 @@ class ToolRegistry:
         return self._tools.pop(name, None) is not None
     
     @typechecked
-    def get(self, name: str) -> BaseTool[BaseModel] | None:
+    def get(self, name: str) -> AnyTool | None:
         """Get tool by name."""
         return self._tools.get(name)
     
@@ -130,7 +147,107 @@ class ToolRegistry:
         """
         self._container.provide(name, factory, scope)
     
-    def __getitem__(self, name: str) -> BaseTool[BaseModel]:
+    # ─────────────────────────────────────────────────────────────────
+    # Effect System
+    # ─────────────────────────────────────────────────────────────────
+    
+    def require_effects(self, *, enabled: bool = True) -> None:
+        """Enable/disable effect verification on tool registration.
+        
+        When enabled, tools declaring effects must have corresponding handlers
+        registered via provide_effect(). This provides compile-time-style safety.
+        
+        Args:
+            enabled: Whether to enforce effect verification
+        
+        Example:
+            >>> registry.require_effects()
+            >>> registry.provide_effect("db", InMemoryDB())
+            >>> @tool(effects=["db"])  # OK - handler exists
+            ... async def fetch(): ...
+            >>> @tool(effects=["unknown"])  # Raises MissingEffectHandler
+            ... async def broken(): ...
+        """
+        self._require_effects = enabled
+    
+    def provide_effect(self, effect: str, handler: object) -> None:
+        """Register an effect handler.
+        
+        Effect handlers are automatically injected into tools that declare
+        the effect. Pure handlers enable testing without mocks.
+        
+        Args:
+            effect: Effect name (e.g., "db", "http", "cache")
+            handler: Handler instance (e.g., InMemoryDB, RecordingHTTP)
+        
+        Example:
+            >>> registry.provide_effect("db", InMemoryDB())
+            >>> registry.provide_effect("http", RecordingHTTP())
+        """
+        self._effect_handlers[effect.lower()] = handler
+    
+    def get_effect(self, effect: str) -> object | None:
+        """Get registered effect handler."""
+        return self._effect_handlers.get(effect.lower())
+    
+    def has_effect(self, effect: str) -> bool:
+        """Check if effect handler is registered."""
+        return effect.lower() in self._effect_handlers
+    
+    @property
+    def registered_effects(self) -> frozenset[str]:
+        """All registered effect types."""
+        return frozenset(self._effect_handlers.keys())
+    
+    def _verify_tool_effects(self, tool: AnyTool) -> None:
+        """Verify tool's declared effects have handlers.
+        
+        Raises:
+            MissingEffectHandler: If a declared effect has no handler
+        """
+        from toolcase.foundation.effects import MissingEffectHandler, get_effects
+        
+        declared = get_effects(tool)
+        if not declared:
+            return
+        
+        for effect in declared:
+            if effect not in self._effect_handlers:
+                raise MissingEffectHandler(effect, tool.metadata.name)
+    
+    def verify_all_effects(self) -> list[tuple[str, str]]:
+        """Verify all registered tools have their effects satisfied.
+        
+        Returns:
+            List of (tool_name, effect) tuples for missing handlers
+        """
+        from toolcase.foundation.effects import get_effects
+        
+        missing: list[tuple[str, str]] = []
+        for name, tool in self._tools.items():
+            for effect in get_effects(tool):
+                if effect not in self._effect_handlers:
+                    missing.append((name, effect))
+        return missing
+    
+    def tools_by_effect(self, *effects: str) -> list[ToolMetadata]:
+        """Get tools that declare specific effects.
+        
+        Args:
+            *effects: Effect names to filter by
+        
+        Returns:
+            Tools declaring all specified effects
+        """
+        from toolcase.foundation.effects import has_effects
+        
+        return [
+            tool.metadata
+            for tool in self._tools.values()
+            if has_effects(tool, *effects)
+        ]
+    
+    def __getitem__(self, name: str) -> AnyTool:
         """Get tool by name, raises KeyError if not found."""
         return self._tools[name]
     
@@ -140,7 +257,7 @@ class ToolRegistry:
     def __len__(self) -> int:
         return len(self._tools)
     
-    def __iter__(self) -> Iterator[BaseTool[BaseModel]]:
+    def __iter__(self) -> Iterator[AnyTool]:
         return iter(self._tools.values())
     
     # ─────────────────────────────────────────────────────────────────
@@ -265,7 +382,7 @@ class ToolRegistry:
         context["tool_name"] = name
         context["capabilities"] = tool.metadata.capabilities
         
-        # Execute with scoped DI context and optional semaphore for rate limiting
+        # Execute with scoped DI context, effect handlers, and optional semaphore
         async with self._container.scope() as di_ctx:
             context["_di_context"] = di_ctx
             context["_container"] = self._container
@@ -277,16 +394,19 @@ class ToolRegistry:
                 except KeyError as e:
                     return ToolError.create(name, f"Missing dependency: {e}", ErrorCode.INVALID_PARAMS, recoverable=False).render()
             
-            # Execute through chain with exception handling (rate-limited if needed)
-            try:
-                if (limiter := self._limiters.get(name)) is not None:
-                    async with limiter:
-                        return await self._get_chain()(tool, validated, context)  # type: ignore[arg-type]
-                return await self._get_chain()(tool, validated, context)  # type: ignore[arg-type]
-            except ToolException as e:
-                return e.error.render()
-            except Exception as e:
-                return ToolError.from_exception(name, e, "Execution failed").render()
+            # Set up effect handlers in context for tool execution
+            from toolcase.foundation.effects import EffectScope
+            async with EffectScope(**self._effect_handlers):
+                # Execute through chain with exception handling (rate-limited if needed)
+                try:
+                    if (limiter := self._limiters.get(name)) is not None:
+                        async with limiter:
+                            return await self._get_chain()(tool, validated, context)  # type: ignore[arg-type]
+                    return await self._get_chain()(tool, validated, context)  # type: ignore[arg-type]
+                except ToolException as e:
+                    return e.error.render()
+                except Exception as e:
+                    return ToolError.from_exception(name, e, "Execution failed").render()
     
     def execute_sync(
         self,
@@ -366,7 +486,7 @@ class ToolRegistry:
         context["tool_name"] = name
         context["capabilities"] = tool.metadata.capabilities
         
-        # Execute with scoped DI context
+        # Execute with scoped DI context and effect handlers
         async with self._container.scope() as di_ctx:
             context["_di_context"] = di_ctx
             context["_container"] = self._container
@@ -393,16 +513,19 @@ class ToolRegistry:
                 else:
                     yield await tool.arun(validated)  # type: ignore[arg-type]
             
-            try:
-                if limiter is not None:
-                    async with limiter:
+            # Set up effect handlers and execute
+            from toolcase.foundation.effects import EffectScope
+            async with EffectScope(**self._effect_handlers):
+                try:
+                    if limiter is not None:
+                        async with limiter:
+                            async for chunk in _stream():
+                                yield chunk
+                    else:
                         async for chunk in _stream():
                             yield chunk
-                else:
-                    async for chunk in _stream():
-                        yield chunk
-            except Exception as e:
-                yield ToolError.from_exception(name, e, "Stream execution failed").render()
+                except Exception as e:
+                    yield ToolError.from_exception(name, e, "Stream execution failed").render()
     
     async def stream_execute_events(
         self,
@@ -491,19 +614,21 @@ class ToolRegistry:
     # Bulk Operations
     # ─────────────────────────────────────────────────────────────────
     
-    def register_all(self, *tools: BaseTool[BaseModel]) -> None:
+    def register_all(self, *tools: AnyTool) -> None:
         """Register multiple tools at once."""
         for tool in tools:
             self.register(tool)
     
     def clear(self) -> None:
-        """Remove all registered tools, middleware, and providers."""
+        """Remove all registered tools, middleware, providers, and effect handlers."""
         self._tools.clear()
         self._middleware.clear()
         self._chain = self._stream_chain = None
         self._validation = None
         self._limiters.clear()
         self._container.clear()
+        self._effect_handlers.clear()
+        self._require_effects = False
     
     # ─────────────────────────────────────────────────────────────────
     # Capability Introspection
