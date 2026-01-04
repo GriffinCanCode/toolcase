@@ -147,8 +147,6 @@ MESSAGE OVERRIDES:
     rule = required().with_code("MISSING_REQUIRED")
 
 VALIDATION RESULT:
-    from toolcase.runtime.middleware.plugins import valid, invalid
-    
     result = schema.validate(params)
     
     result.is_valid              # bool

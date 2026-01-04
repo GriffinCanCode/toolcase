@@ -16,6 +16,8 @@ BUILT-IN MIDDLEWARE:
     TimeoutMiddleware         Enforce execution time limits
     RateLimitMiddleware       Throttle call frequency
     CircuitBreakerMiddleware  Fail fast on repeated failures
+    TracingMiddleware         Create spans for distributed tracing
+    CorrelationMiddleware     Add correlation IDs to requests
 
 USAGE:
     from toolcase import (
@@ -42,8 +44,10 @@ REGISTRY INTEGRATION (Recommended):
     # Execute through middleware chain
     result = await registry.execute("search", {"query": "python"})
 
-VALIDATION MIDDLEWARE:
-    from toolcase import min_length, max_length, in_range, matches, one_of, not_empty, https_only
+VALIDATION MIDDLEWARE (Legacy API):
+    from toolcase.runtime.middleware.plugins import (
+        min_length, max_length, in_range, matches, one_of, not_empty, https_only
+    )
     
     # Enable centralized validation (runs first in chain)
     validation = registry.use_validation()
@@ -52,11 +56,13 @@ VALIDATION MIDDLEWARE:
     validation.add_rule("search", "query", min_length(3), "query too short")
     validation.add_rule("http_request", "url", https_only, "must use HTTPS")
     validation.add_rule("search", "limit", in_range(1, 100), "limit out of range")
-    validation.add_rule("tag", "name", matches(r"^[a-z_]+$"), "invalid format")
-    validation.add_rule("priority", "level", one_of("low", "medium", "high"), "invalid level")
     
     # Cross-field constraints
-    validation.add_constraint("report", lambda p: p.start <= p.end or "invalid date range")
+    validation.add_constraint("report", lambda p: p.start <= p.end or "invalid range")
+
+RULE DSL (Recommended):
+    See 'toolcase help validation' for the composable Rule DSL with
+    algebraic combinators (&, |, ~), conditional validation, and schemas.
 
 CUSTOM MIDDLEWARE:
     from toolcase import Middleware, Context, Next
@@ -71,10 +77,15 @@ CUSTOM MIDDLEWARE:
             return result
 
 STREAMING MIDDLEWARE:
-    Middleware also works with registry.stream_execute() for streaming tools.
-    Regular middleware is auto-adapted to streaming context.
+    from toolcase.runtime.middleware import StreamMiddleware, compose_streaming
+    
+    # Streaming middleware for chunk-level hooks
+    registry.use(StreamLoggingMiddleware())
+    async for chunk in registry.stream_execute("generate", {"topic": "AI"}):
+        print(chunk, end="")
 
 RELATED TOPICS:
+    toolcase help validation Composable validation DSL
     toolcase help retry      Retry policies and backoff
     toolcase help tracing    Distributed tracing
     toolcase help registry   Registry middleware integration

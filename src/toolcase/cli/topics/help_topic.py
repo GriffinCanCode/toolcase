@@ -15,6 +15,7 @@ CORE TOPICS:
     toolcase help result       Monadic error handling with Result types
     toolcase help middleware   Request/response middleware
     toolcase help pipeline     Tool composition patterns
+    toolcase help validation   Composable validation DSL
 
 EXECUTION:
     toolcase help batch        Batch execution for multiple params
@@ -25,6 +26,11 @@ CONFIGURATION:
     toolcase help settings     Environment variables and .env files
     toolcase help capabilities Tool capabilities for scheduling
     toolcase help http         HTTP tool with auth strategies
+
+INTEGRATION:
+    toolcase help formats      Multi-framework format converters
+    toolcase help mcp          Model Context Protocol server
+    toolcase help discovery    Tool discovery and search
 
 OBSERVABILITY:
     toolcase help logging      Structured logging with trace correlation

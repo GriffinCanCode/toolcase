@@ -14,8 +14,13 @@ KEY FEATURES:
     - Built-in caching with TTL
     - Async/sync interoperability
     - Progress streaming for long operations
+    - Result streaming for LLM output
     - Multi-framework format converters (OpenAI, Anthropic, Google)
     - LangChain and MCP protocol integration
+    - Composable validation DSL
+    - Structured concurrency with TaskGroup and CancelScope
+    - Distributed tracing with multiple exporters
+    - Batch execution for parallel tool runs
 
 QUICK START:
     from toolcase import tool, get_registry
@@ -28,8 +33,15 @@ QUICK START:
     registry.register(search)
     result = search(query="python")
 
+INIT HELPER:
+    from toolcase import init_tools
+    
+    # Registers DiscoveryTool plus your tools
+    registry = init_tools(MyTool(), AnotherTool())
+
 RELATED TOPICS:
     toolcase help tool         Creating tools
     toolcase help registry     Tool registration and discovery
     toolcase help formats      Multi-framework format conversion
+    toolcase help mcp          MCP protocol server
 """

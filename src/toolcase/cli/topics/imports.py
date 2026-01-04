@@ -17,11 +17,13 @@ TOP-LEVEL (Most common):
         # Pipeline
         pipeline, parallel, fallback, router, race, gate,
         # Concurrency
-        Concurrency, TaskGroup,
+        Concurrency, TaskGroup, CancelScope,
         # Batch
         batch_execute, BatchConfig, BatchResult,
         # Settings
         get_settings, get_env, require_env, load_env,
+        # Observability
+        configure_tracing, configure_logging, get_tracer, get_logger,
     )
 
 BUILT-IN TOOLS & AUTH:
@@ -35,16 +37,17 @@ BUILT-IN TOOLS & AUTH:
         EnvBearerAuth, EnvApiKeyAuth, EnvBasicAuth,
         # Discovery
         DiscoveryTool, ToolQuery, find_by_param,
+        # Statistics
+        StatsMiddleware, get_stats, format_stats,
     )
 
 SUBMODULE IMPORTS:
 
     # Foundation
-    from toolcase.foundation.core import BaseTool, tool
-    from toolcase.foundation.errors import Result, Ok, Err
-    from toolcase.foundation.di import Container, Scope
+    from toolcase.foundation.core import BaseTool, tool, ToolCapabilities
+    from toolcase.foundation.errors import Result, Ok, Err, sequence, traverse
+    from toolcase.foundation.di import Container, Scope, ScopedContext
     from toolcase.foundation.registry import get_registry
-    from toolcase.foundation.formats import to_openai, to_anthropic, to_google
     from toolcase.foundation.testing import ToolTestCase, mock_tool
     from toolcase.foundation.config import get_settings
     
@@ -54,20 +57,22 @@ SUBMODULE IMPORTS:
     from toolcase.io.streaming import StreamEvent, sse_adapter, ws_adapter
     
     # Runtime
-    from toolcase.runtime.middleware import compose, Middleware, ValidationMiddleware
+    from toolcase.runtime.middleware import compose, Middleware
+    from toolcase.runtime.middleware.plugins import ValidationMiddleware, Schema
     from toolcase.runtime.retry import RetryPolicy, ExponentialBackoff
     from toolcase.runtime.pipeline import pipeline, parallel, streaming_pipeline
     from toolcase.runtime.agents import router, fallback, race, gate, retry_with_escalation
-    from toolcase.runtime.concurrency import Concurrency, TaskGroup, run_sync
+    from toolcase.runtime.concurrency import Concurrency, TaskGroup, run_sync, to_thread
     from toolcase.runtime.observability import configure_tracing, configure_logging
     from toolcase.runtime.batch import batch_execute, BatchConfig
     
     # Extensions
     from toolcase.ext.integrations import to_langchain_tools
+    from toolcase.ext.integrations.frontiers import to_openai, to_anthropic, to_google
     from toolcase.ext.mcp import serve_mcp, serve_http
     
     # Built-in tools
-    from toolcase.tools import HttpTool, DiscoveryTool
+    from toolcase.tools import HttpTool, DiscoveryTool, standard_tools
 
 RELATED TOPICS:
     toolcase help overview      What is toolcase

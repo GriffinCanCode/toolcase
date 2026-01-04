@@ -26,6 +26,7 @@ from .logging import LOGGING
 from .batch import BATCH
 from .capabilities import CAPABILITIES
 from .validation import VALIDATION
+from .mcp import MCP
 
 TOPICS: dict[str, str] = {
     "help": HELP,
@@ -54,6 +55,7 @@ TOPICS: dict[str, str] = {
     "batch": BATCH,
     "capabilities": CAPABILITIES,
     "validation": VALIDATION,
+    "mcp": MCP,
 }
 
 __all__ = ["TOPICS"]

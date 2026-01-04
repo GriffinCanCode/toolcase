@@ -5,7 +5,7 @@ TOPIC: formats
 Multi-framework format converters for AI providers.
 
 CONVERTERS:
-    from toolcase.foundation.formats import (
+    from toolcase.ext.integrations.frontiers import (
         to_openai, to_anthropic, to_google
     )
     
@@ -19,6 +19,16 @@ CONVERTERS:
     
     # Google Gemini function declarations
     gemini_tools = to_google(registry)
+
+SINGLE TOOL CONVERTERS:
+    from toolcase.ext.integrations.frontiers import (
+        tool_to_openai, tool_to_anthropic, tool_to_google
+    )
+    
+    # Convert a single tool
+    openai_spec = tool_to_openai(my_tool)
+    anthropic_spec = tool_to_anthropic(my_tool)
+    gemini_spec = tool_to_google(my_tool)
 
 LANGCHAIN INTEGRATION:
     from toolcase.ext.integrations import to_langchain_tools
@@ -44,4 +54,5 @@ HTTP REST:
 RELATED TOPICS:
     toolcase help registry   Tool registration
     toolcase help tool       Creating tools
+    toolcase help mcp        MCP protocol server
 """
