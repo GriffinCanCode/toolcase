@@ -160,7 +160,26 @@ from .di import (
 )
 
 # Built-in tools
-from .tools import DiscoveryParams, DiscoveryTool
+from .tools import (
+    DiscoveryParams,
+    DiscoveryTool,
+    # Base classes for extensibility
+    ConfigurableTool,
+    ToolConfig,
+    # HTTP Tool
+    HttpTool,
+    HttpConfig,
+    HttpParams,
+    HttpResponse,
+    # Auth strategies (concrete classes)
+    NoAuth,
+    BearerAuth,
+    BasicAuth,
+    ApiKeyAuth,
+    CustomAuth,
+    # Utility
+    standard_tools,
+)
 
 # Monadic error handling
 from .monads import (
@@ -208,6 +227,20 @@ from .streaming import (
     stream_error,
     stream_start,
     ws_adapter,
+)
+
+# Testing utilities
+from .testing import (
+    Invocation,
+    MockAPI,
+    MockResponse,
+    MockTool,
+    ToolTestCase,
+    fixture,
+    mock_api,
+    mock_api_slow,
+    mock_api_with_errors,
+    mock_tool,
 )
 
 __all__ = [
@@ -284,6 +317,18 @@ __all__ = [
     # Built-in tools
     "DiscoveryTool",
     "DiscoveryParams",
+    "ConfigurableTool",
+    "ToolConfig",
+    "HttpTool",
+    "HttpConfig",
+    "HttpParams",
+    "HttpResponse",
+    "NoAuth",
+    "BearerAuth",
+    "BasicAuth",
+    "ApiKeyAuth",
+    "CustomAuth",
+    "standard_tools",
     # Monadic error handling
     "Result",
     "Ok",
@@ -323,6 +368,17 @@ __all__ = [
     "sse_adapter",
     "ws_adapter",
     "json_lines_adapter",
+    # Testing utilities
+    "ToolTestCase",
+    "mock_tool",
+    "MockTool",
+    "Invocation",
+    "fixture",
+    "MockAPI",
+    "MockResponse",
+    "mock_api",
+    "mock_api_with_errors",
+    "mock_api_slow",
     # Convenience
     "init_tools",
 ]
