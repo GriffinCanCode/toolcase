@@ -477,3 +477,18 @@ class BaseTool(ABC, Generic[TParams]):
         """Async invoke with keyword arguments."""
         params = self.params_schema(**kwargs)  # type: ignore[call-arg]
         return await self.arun(params)  # type: ignore[arg-type]
+    
+    # ─────────────────────────────────────────────────────────────────
+    # Composition
+    # ─────────────────────────────────────────────────────────────────
+    
+    def __rshift__(self, other: BaseTool[BaseModel]) -> BaseTool[BaseModel]:
+        """Chain tools: self >> other creates a sequential pipeline.
+        
+        Example:
+            >>> search = SearchTool()
+            >>> summarize = SummarizeTool()
+            >>> pipeline = search >> summarize
+        """
+        from ..pipeline import PipelineTool, Step
+        return PipelineTool(steps=[Step(self), Step(other)])

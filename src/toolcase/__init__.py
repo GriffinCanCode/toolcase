@@ -131,6 +131,15 @@ from .retry import (
     NO_RETRY,
 )
 
+# Pipeline composition
+from .pipeline import (
+    PipelineTool,
+    ParallelTool,
+    Step,
+    pipeline,
+    parallel,
+)
+
 # Built-in tools
 from .tools import DiscoveryParams, DiscoveryTool
 
@@ -208,6 +217,12 @@ __all__ = [
     "RetryPolicy",
     "DEFAULT_RETRYABLE",
     "NO_RETRY",
+    # Pipeline composition
+    "PipelineTool",
+    "ParallelTool",
+    "Step",
+    "pipeline",
+    "parallel",
     # Built-in tools
     "DiscoveryTool",
     "DiscoveryParams",
