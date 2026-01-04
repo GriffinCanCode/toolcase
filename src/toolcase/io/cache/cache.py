@@ -42,10 +42,11 @@ class CacheBackend(Protocol):
     def set(self, key: str, value: str, ttl: float) -> None: ...
     def delete(self, key: str) -> bool: ...
     def clear(self) -> None: ...
+    def ping(self) -> bool: ...
 
 
 class ToolCache(ABC):
-    """Abstract base for tool caches."""
+    """Abstract base for sync tool caches."""
     
     @abstractmethod
     def get(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
@@ -78,6 +79,16 @@ class ToolCache(ABC):
         """Clear entire cache."""
         ...
     
+    @abstractmethod
+    def ping(self) -> bool:
+        """Check if cache backend is available. Returns True if healthy."""
+        ...
+    
+    @abstractmethod
+    def stats(self) -> JsonDict:
+        """Get cache statistics for monitoring."""
+        ...
+    
     @staticmethod
     def make_key(tool_name: str, params: BaseModel | JsonDict) -> str:
         """Generate cache key from tool name and parameters."""
@@ -91,6 +102,56 @@ class ToolCache(ABC):
         params_hash = hashlib.md5(params_json.encode(), usedforsecurity=False).hexdigest()[:12]
         
         return f"{tool_name}:{params_hash}"
+
+
+class AsyncToolCache(ABC):
+    """Abstract base for async tool caches."""
+    
+    @abstractmethod
+    async def aget(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
+        """Get cached result if exists and not expired."""
+        ...
+    
+    @abstractmethod
+    async def aset(
+        self,
+        tool_name: str,
+        params: BaseModel | JsonDict,
+        value: str,
+        ttl: float | None = None,
+    ) -> None:
+        """Store result in cache."""
+        ...
+    
+    @abstractmethod
+    async def ainvalidate(self, tool_name: str, params: BaseModel | JsonDict) -> bool:
+        """Remove specific entry from cache."""
+        ...
+    
+    @abstractmethod
+    async def ainvalidate_tool(self, tool_name: str) -> int:
+        """Remove all entries for a tool. Returns count removed."""
+        ...
+    
+    @abstractmethod
+    async def aclear(self) -> None:
+        """Clear entire cache."""
+        ...
+    
+    @abstractmethod
+    async def aping(self) -> bool:
+        """Check if cache backend is available. Returns True if healthy."""
+        ...
+    
+    @abstractmethod
+    async def astats(self) -> JsonDict:
+        """Get cache statistics for monitoring."""
+        ...
+    
+    @staticmethod
+    def make_key(tool_name: str, params: BaseModel | JsonDict) -> str:
+        """Generate cache key from tool name and parameters."""
+        return ToolCache.make_key(tool_name, params)
 
 
 class MemoryCache(ToolCache):
@@ -168,6 +229,10 @@ class MemoryCache(ToolCache):
             for k in sorted(self._cache, key=lambda k: self._cache[k].expires_at)[:self._max_entries // 4]:
                 del self._cache[k]
     
+    def ping(self) -> bool:
+        """Memory cache is always available."""
+        return True
+    
     @property
     def size(self) -> int:
         with self._lock:
@@ -178,6 +243,7 @@ class MemoryCache(ToolCache):
         with self._lock:
             expired = sum(1 for v in self._cache.values() if v.expired)
             return {
+                "backend": "memory",
                 "total_entries": len(self._cache),
                 "expired_entries": expired,
                 "active_entries": len(self._cache) - expired,

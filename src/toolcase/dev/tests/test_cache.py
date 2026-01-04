@@ -30,6 +30,12 @@ class MockRedisClient:
     def scan_iter(self, match: str) -> list[str]:
         import fnmatch
         return [k for k in self._data if fnmatch.fnmatch(k, match)]
+    
+    def ping(self) -> bool:
+        return True
+    
+    def info(self, section: str = "") -> dict[str, object]:
+        return {"used_memory_human": "1M"}
 
 
 class MockAsyncRedisClient:
@@ -47,9 +53,56 @@ class MockAsyncRedisClient:
     async def delete(self, *names: str) -> int:
         return self._sync.delete(*names)
     
-    async def scan_iter(self, match: str) -> object:
-        for k in self._sync.scan_iter(match):
-            yield k
+    def scan_iter(self, match: str) -> object:
+        async def _gen() -> object:
+            for k in self._sync.scan_iter(match):
+                yield k
+        return _gen()
+    
+    async def ping(self) -> bool:
+        return True
+    
+    async def info(self, section: str = "") -> dict[str, object]:
+        return {"used_memory_human": "1M"}
+
+
+class MockMemcachedClient:
+    """In-memory mock of sync Memcached client for testing."""
+    
+    def __init__(self) -> None:
+        self._data: dict[str, bytes] = {}
+    
+    def get(self, key: str) -> bytes | None:
+        return self._data.get(key)
+    
+    def set(self, key: str, value: bytes, expire: int = 0) -> bool:
+        self._data[key] = value
+        return True
+    
+    def delete(self, key: str) -> bool:
+        return self._data.pop(key, None) is not None
+    
+    def stats(self) -> dict[bytes, dict[bytes, bytes]]:
+        return {b"localhost:11211": {b"curr_items": b"1", b"bytes": b"100"}}
+
+
+class MockAsyncMemcachedClient:
+    """In-memory mock of async Memcached client for testing."""
+    
+    def __init__(self) -> None:
+        self._sync = MockMemcachedClient()
+    
+    async def get(self, key: bytes) -> bytes | None:
+        return self._sync.get(key.decode())
+    
+    async def set(self, key: bytes, value: bytes, exptime: int = 0) -> bool:
+        return self._sync.set(key.decode(), value, exptime)
+    
+    async def delete(self, key: bytes) -> bool:
+        return self._sync.delete(key.decode())
+    
+    async def stats(self) -> dict[bytes, bytes]:
+        return {b"curr_items": b"1", b"bytes": b"100"}
 
 
 @pytest.fixture(autouse=True)
@@ -267,24 +320,157 @@ async def test_async_redis_clear() -> None:
     assert await cache.aget("tool2", {"q": "b"}) is None
 
 
-def test_async_redis_sync_methods_raise() -> None:
-    """Test that sync methods on async cache raise NotImplementedError."""
+def test_memory_cache_ping() -> None:
+    """Test MemoryCache ping always returns True."""
+    cache = MemoryCache()
+    assert cache.ping() is True
+
+
+def test_memory_cache_stats() -> None:
+    """Test MemoryCache stats structure."""
+    cache = MemoryCache(default_ttl=60, max_entries=100)
+    cache.set("tool", {"q": "a"}, "result_a")
+    cache.set("tool", {"q": "b"}, "result_b")
+    
+    stats = cache.stats()
+    assert stats["backend"] == "memory"
+    assert stats["total_entries"] == 2
+    assert stats["active_entries"] == 2
+    assert stats["expired_entries"] == 0
+    assert stats["default_ttl"] == 60
+    assert stats["max_entries"] == 100
+
+
+def test_redis_cache_ping() -> None:
+    """Test RedisCache ping."""
+    from toolcase.io.cache import RedisCache
+    
+    client = MockRedisClient()
+    cache = RedisCache(client, prefix="test:")
+    assert cache.ping() is True
+
+
+def test_redis_cache_stats() -> None:
+    """Test RedisCache stats structure."""
+    from toolcase.io.cache import RedisCache
+    
+    client = MockRedisClient()
+    cache = RedisCache(client, prefix="test:")
+    cache.set("tool", {"q": "test"}, "result")
+    
+    stats = cache.stats()
+    assert stats["backend"] == "redis"
+    assert stats["prefix"] == "test:"
+    assert stats["connected"] is True
+    assert "total_entries" in stats
+
+
+@pytest.mark.asyncio
+async def test_async_redis_cache_ping() -> None:
+    """Test AsyncRedisCache ping."""
     from toolcase.io.cache import AsyncRedisCache
     
     client = MockAsyncRedisClient()
-    cache = AsyncRedisCache(client)
+    cache = AsyncRedisCache(client, prefix="test:")
+    assert await cache.aping() is True
+
+
+@pytest.mark.asyncio
+async def test_async_redis_cache_stats() -> None:
+    """Test AsyncRedisCache stats structure."""
+    from toolcase.io.cache import AsyncRedisCache
     
-    with pytest.raises(NotImplementedError):
-        cache.get("tool", {"q": "test"})
+    client = MockAsyncRedisClient()
+    cache = AsyncRedisCache(client, prefix="test:")
+    await cache.aset("tool", {"q": "test"}, "result")
     
-    with pytest.raises(NotImplementedError):
-        cache.set("tool", {"q": "test"}, "value")
+    stats = await cache.astats()
+    assert stats["backend"] == "redis"
+    assert stats["prefix"] == "test:"
+    assert stats["connected"] is True
+
+
+def test_memcached_cache_basic() -> None:
+    """Test sync MemcachedCache with mock client."""
+    from toolcase.io.cache import MemcachedCache
     
-    with pytest.raises(NotImplementedError):
-        cache.invalidate("tool", {"q": "test"})
+    client = MockMemcachedClient()
+    cache = MemcachedCache(client, prefix="test:")
     
-    with pytest.raises(NotImplementedError):
-        cache.invalidate_tool("tool")
+    cache.set("tool", {"q": "test"}, "result")
+    assert cache.get("tool", {"q": "test"}) == "result"
+    assert cache.get("tool", {"q": "other"}) is None
+
+
+def test_memcached_cache_invalidate() -> None:
+    """Test MemcachedCache invalidation."""
+    from toolcase.io.cache import MemcachedCache
     
-    with pytest.raises(NotImplementedError):
-        cache.clear()
+    client = MockMemcachedClient()
+    cache = MemcachedCache(client, prefix="test:")
+    
+    cache.set("tool", {"q": "a"}, "result_a")
+    cache.set("tool", {"q": "b"}, "result_b")
+    
+    assert cache.invalidate("tool", {"q": "a"})
+    assert cache.get("tool", {"q": "a"}) is None
+    assert cache.get("tool", {"q": "b"}) == "result_b"
+
+
+def test_memcached_cache_ping() -> None:
+    """Test MemcachedCache ping."""
+    from toolcase.io.cache import MemcachedCache
+    
+    client = MockMemcachedClient()
+    cache = MemcachedCache(client, prefix="test:")
+    assert cache.ping() is True
+
+
+def test_memcached_cache_stats() -> None:
+    """Test MemcachedCache stats structure."""
+    from toolcase.io.cache import MemcachedCache
+    
+    client = MockMemcachedClient()
+    cache = MemcachedCache(client, prefix="test:")
+    
+    stats = cache.stats()
+    assert stats["backend"] == "memcached"
+    assert stats["prefix"] == "test:"
+    assert stats["connected"] is True
+
+
+@pytest.mark.asyncio
+async def test_async_memcached_cache_basic() -> None:
+    """Test async MemcachedCache with mock client."""
+    from toolcase.io.cache import AsyncMemcachedCache
+    
+    client = MockAsyncMemcachedClient()
+    cache = AsyncMemcachedCache(client, prefix="test:")
+    
+    await cache.aset("tool", {"q": "test"}, "result")
+    assert await cache.aget("tool", {"q": "test"}) == "result"
+    assert await cache.aget("tool", {"q": "other"}) is None
+
+
+@pytest.mark.asyncio
+async def test_async_memcached_cache_ping() -> None:
+    """Test AsyncMemcachedCache ping."""
+    from toolcase.io.cache import AsyncMemcachedCache
+    
+    client = MockAsyncMemcachedClient()
+    cache = AsyncMemcachedCache(client, prefix="test:")
+    assert await cache.aping() is True
+
+
+@pytest.mark.asyncio
+async def test_async_memcached_cache_stats() -> None:
+    """Test AsyncMemcachedCache stats structure."""
+    from toolcase.io.cache import AsyncMemcachedCache
+    
+    client = MockAsyncMemcachedClient()
+    cache = AsyncMemcachedCache(client, prefix="test:")
+    
+    stats = await cache.astats()
+    assert stats["backend"] == "memcached"
+    assert stats["prefix"] == "test:"
+    assert stats["connected"] is True

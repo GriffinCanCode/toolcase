@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from toolcase.foundation.errors import JsonDict
 
-from .cache import DEFAULT_TTL, ToolCache
+from .cache import DEFAULT_TTL, AsyncToolCache, ToolCache
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -24,7 +24,9 @@ class RedisClient(Protocol):
     def get(self, key: str) -> bytes | None: ...
     def setex(self, name: str, time: int, value: str) -> bool: ...
     def delete(self, *names: str) -> int: ...
-    def scan_iter(self, match: str) -> object: ...  # Iterator
+    def scan_iter(self, match: str) -> object: ...
+    def ping(self) -> bool: ...
+    def info(self, section: str = "") -> dict[str, object]: ...
 
 
 @runtime_checkable  
@@ -33,7 +35,9 @@ class AsyncRedisClient(Protocol):
     async def get(self, key: str) -> bytes | None: ...
     async def setex(self, name: str, time: int, value: str) -> bool: ...
     async def delete(self, *names: str) -> int: ...
-    def scan_iter(self, match: str) -> object: ...  # AsyncIterator
+    def scan_iter(self, match: str) -> object: ...
+    async def ping(self) -> bool: ...
+    async def info(self, section: str = "") -> dict[str, object]: ...
 
 
 def _import_redis() -> object:
@@ -133,9 +137,37 @@ class RedisCache(ToolCache):
         """Clear all toolcase keys using SCAN."""
         if keys := list(self._client.scan_iter(match=f"{self._prefix}*")):
             self._client.delete(*keys)
+    
+    def ping(self) -> bool:
+        """Check Redis connection health."""
+        try:
+            return bool(self._client.ping())
+        except Exception:
+            return False
+    
+    def stats(self) -> JsonDict:
+        """Get Redis cache statistics."""
+        try:
+            info = self._client.info("memory")
+            keys = list(self._client.scan_iter(match=f"{self._prefix}*"))
+            return {
+                "backend": "redis",
+                "total_entries": len(keys),
+                "prefix": self._prefix,
+                "default_ttl": self._default_ttl,
+                "used_memory": info.get("used_memory_human", "unknown"),
+                "connected": True,
+            }
+        except Exception:
+            return {
+                "backend": "redis",
+                "prefix": self._prefix,
+                "default_ttl": self._default_ttl,
+                "connected": False,
+            }
 
 
-class AsyncRedisCache(ToolCache):
+class AsyncRedisCache(AsyncToolCache):
     """Async Redis-backed tool cache for async deployments.
     
     Uses redis.asyncio for non-blocking operations.
@@ -189,29 +221,6 @@ class AsyncRedisCache(ToolCache):
     def _key(self, tool_name: str, params: BaseModel | JsonDict) -> str:
         return f"{self._prefix}{self.make_key(tool_name, params)}"
     
-    # Sync methods delegate to async (required by ABC, but use async variants)
-    def get(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
-        raise NotImplementedError("Use aget() for async cache")
-    
-    def set(
-        self,
-        tool_name: str,
-        params: BaseModel | JsonDict,
-        value: str,
-        ttl: float | None = None,
-    ) -> None:
-        raise NotImplementedError("Use aset() for async cache")
-    
-    def invalidate(self, tool_name: str, params: BaseModel | JsonDict) -> bool:
-        raise NotImplementedError("Use ainvalidate() for async cache")
-    
-    def invalidate_tool(self, tool_name: str) -> int:
-        raise NotImplementedError("Use ainvalidate_tool() for async cache")
-    
-    def clear(self) -> None:
-        raise NotImplementedError("Use aclear() for async cache")
-    
-    # Async variants
     async def aget(self, tool_name: str, params: BaseModel | JsonDict) -> str | None:
         val = await self._client.get(self._key(tool_name, params))
         return val.decode() if val else None
@@ -235,3 +244,31 @@ class AsyncRedisCache(ToolCache):
     async def aclear(self) -> None:
         if keys := [k async for k in self._client.scan_iter(match=f"{self._prefix}*")]:
             await self._client.delete(*keys)
+    
+    async def aping(self) -> bool:
+        """Check Redis connection health."""
+        try:
+            return bool(await self._client.ping())
+        except Exception:
+            return False
+    
+    async def astats(self) -> JsonDict:
+        """Get Redis cache statistics."""
+        try:
+            info = await self._client.info("memory")
+            keys = [k async for k in self._client.scan_iter(match=f"{self._prefix}*")]
+            return {
+                "backend": "redis",
+                "total_entries": len(keys),
+                "prefix": self._prefix,
+                "default_ttl": self._default_ttl,
+                "used_memory": info.get("used_memory_human", "unknown"),
+                "connected": True,
+            }
+        except Exception:
+            return {
+                "backend": "redis",
+                "prefix": self._prefix,
+                "default_ttl": self._default_ttl,
+                "connected": False,
+            }

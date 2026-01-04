@@ -161,6 +161,7 @@ from .io.progress import (
 # IO: Cache
 from .io.cache import (
     DEFAULT_TTL,
+    AsyncToolCache,
     CacheBackend,
     MemoryCache,
     ToolCache,
@@ -232,20 +233,41 @@ from .runtime.pipeline import (
 
 # Runtime: Observability
 from .runtime.observability import (
+    AsyncBatchExporter,
+    BatchExporter,
     BoundLogger,
+    CompositeExporter,
+    ConsoleExporter,
     CorrelationMiddleware,
+    DatadogExporter,
+    Exporter,
+    FilteredExporter,
+    HoneycombExporter,
+    JsonExporter,
+    NoOpExporter,
+    OTLPBridge,
+    OTLPHttpBridge,
+    SampledExporter,
     Span,
     SpanKind,
+    SpanPredicate,
     SpanStatus,
     Tracer,
     TracingMiddleware,
+    ZipkinExporter,
     configure_logging,
     configure_tracing,
+    create_otlp_exporter,
+    datadog,
+    errors_only,
     get_logger,
     get_tracer,
+    honeycomb,
     log_context,
+    slow_spans,
     timed,
     traced,
+    zipkin,
 )
 
 # Runtime: Agents
@@ -348,7 +370,7 @@ __all__ = [
     "ToolProgress", "ProgressKind", "ProgressCallback",
     "status", "step", "source_found", "complete", "error",
     # Cache
-    "ToolCache", "MemoryCache", "CacheBackend",
+    "ToolCache", "AsyncToolCache", "MemoryCache", "CacheBackend",
     "get_cache", "set_cache", "reset_cache", "DEFAULT_TTL",
     # Registry
     "ToolRegistry", "get_registry", "set_registry", "reset_registry",
@@ -393,11 +415,19 @@ __all__ = [
     "batch_results", "sequence", "traverse", "collect_results",
     # TypeAdapter validation utilities (fast dict→model validation)
     "validate_context", "validate_trace", "validate_progress", "validate_policy",
-    # Observability
+    # Observability - Core
     "configure_tracing", "get_tracer", "traced",
     "configure_logging", "get_logger", "log_context", "timed", "BoundLogger",
     "CorrelationMiddleware", "TracingMiddleware",
     "Span", "SpanKind", "SpanStatus", "Tracer",
+    # Observability - Exporters
+    "Exporter", "ConsoleExporter", "JsonExporter", "NoOpExporter",
+    "BatchExporter", "AsyncBatchExporter", "CompositeExporter",
+    "OTLPBridge", "OTLPHttpBridge", "create_otlp_exporter",
+    "DatadogExporter", "HoneycombExporter", "ZipkinExporter",
+    "datadog", "honeycomb", "zipkin",
+    "SampledExporter", "FilteredExporter", "SpanPredicate",
+    "errors_only", "slow_spans",
     # Streaming (Result Streaming)
     "StreamAdapter", "StreamChunk", "StreamEvent", "StreamEventKind",
     "StreamResult", "StreamState",
