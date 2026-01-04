@@ -5,10 +5,17 @@ Cache keys are generated from tool name + hashed parameters.
 
 Backends:
     - MemoryCache: Thread-safe in-memory (default)
+    - TaggedMemoryCache: In-memory with tag-based invalidation and SWR
     - RedisCache: Sync redis-py backend, msgpack storage (requires toolcase[redis])
     - AsyncRedisCache: Async redis.asyncio backend, msgpack storage (requires toolcase[redis])
     - MemcachedCache: Sync pymemcache backend, msgpack storage (requires toolcase[memcached])
     - AsyncMemcachedCache: Async aiomcache backend, msgpack storage (requires aiomcache)
+
+Advanced Invalidation:
+    - TagIndex: Reverse index for O(1) tag-based invalidation
+    - PatternMatcher: fnmatch/regex pattern matching for keys
+    - SWRCache: Stale-while-revalidate wrapper with background refresh
+    - SWRConfig: Configuration for stale windows and revalidation limits
 
 All backends implement ping() for health checks and stats() for monitoring.
 Distributed backends use msgpack binary serialization (~40% smaller than JSON).
@@ -28,8 +35,21 @@ from .cache import (
     set_cache,
     unpack_value,
 )
+from .strategy import (
+    DEFAULT_STALE_MULTIPLIER,
+    AsyncInvalidationStrategy,
+    InvalidationStrategy,
+    PatternMatcher,
+    SWRCache,
+    SWRConfig,
+    SWRState,
+    TaggedEntry,
+    TaggedMemoryCache,
+    TagIndex,
+)
 
 __all__ = [
+    # Core cache
     "ToolCache",
     "AsyncToolCache",
     "MemoryCache",
@@ -49,6 +69,18 @@ __all__ = [
     # Memcached (lazy import)
     "MemcachedCache",
     "AsyncMemcachedCache",
+    # Advanced invalidation strategies
+    "TaggedMemoryCache",
+    "TaggedEntry",
+    "TagIndex",
+    "PatternMatcher",
+    "InvalidationStrategy",
+    "AsyncInvalidationStrategy",
+    # Stale-while-revalidate
+    "SWRCache",
+    "SWRConfig",
+    "SWRState",
+    "DEFAULT_STALE_MULTIPLIER",
 ]
 
 
