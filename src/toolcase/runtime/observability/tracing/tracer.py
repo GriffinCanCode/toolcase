@@ -197,6 +197,46 @@ def get_tracer() -> Tracer:
     return Tracer.current()
 
 
+def instrument_httpx() -> bool:
+    """Enable automatic OpenTelemetry instrumentation for httpx HTTP client.
+    
+    Creates spans for all HTTP requests made via httpx with:
+    - HTTP method, URL, status code as attributes
+    - Request/response headers (configurable)
+    - Timing information
+    
+    Requires: `pip install toolcase[otel]` or `pip install opentelemetry-instrumentation-httpx`
+    
+    Returns:
+        True if instrumentation was enabled, False if dependencies unavailable.
+    
+    Example:
+        >>> from toolcase.observability import configure_tracing, instrument_httpx
+        >>> configure_tracing(service_name="my-agent", exporter="otlp")
+        >>> instrument_httpx()  # All httpx requests now create spans
+    """
+    try:
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+        HTTPXClientInstrumentor().instrument()
+        return True
+    except ImportError:
+        return False
+
+
+def uninstrument_httpx() -> bool:
+    """Disable automatic OpenTelemetry httpx instrumentation.
+    
+    Returns:
+        True if uninstrumented, False if dependencies unavailable.
+    """
+    try:
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+        HTTPXClientInstrumentor().uninstrument()
+        return True
+    except ImportError:
+        return False
+
+
 def configure_tracing(
     service_name: str = "toolcase",
     exporter: str | Exporter = "console",

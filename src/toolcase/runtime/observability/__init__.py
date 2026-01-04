@@ -52,15 +52,15 @@ from .tracing import (
     Tracer,
     configure_tracing,
     get_tracer,
+    instrument_httpx,
     trace_context,
     traced,
+    uninstrument_httpx,
 )
 
 # Logging
 from .logging import (
     BoundLogger,
-    LogEntry,
-    LogRenderer,
     LogScope,
     TracedLogger,
     configure_logging,
@@ -114,10 +114,11 @@ __all__ = [
     "get_tracer",
     "configure_tracing",
     "traced",
+    # HTTPX Instrumentation
+    "instrument_httpx",
+    "uninstrument_httpx",
     # Logging
     "BoundLogger",
-    "LogEntry",
-    "LogRenderer",
     "LogScope",
     "TracedLogger",
     "configure_logging",

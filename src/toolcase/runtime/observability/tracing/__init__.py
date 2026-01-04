@@ -2,7 +2,7 @@
 
 from .context import SpanContext, TraceContext, trace_context
 from .span import Span, SpanEvent, SpanKind, SpanStatus
-from .tracer import Tracer, configure_tracing, get_tracer, traced
+from .tracer import Tracer, configure_tracing, get_tracer, instrument_httpx, traced, uninstrument_httpx
 
 __all__ = [
     # Context
@@ -19,4 +19,7 @@ __all__ = [
     "configure_tracing",
     "get_tracer",
     "traced",
+    # HTTPX Instrumentation
+    "instrument_httpx",
+    "uninstrument_httpx",
 ]

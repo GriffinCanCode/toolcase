@@ -27,6 +27,7 @@ dependencies = [
     "beartype>=0.18",
     "orjson>=3.9",
     "msgpack>=1.0",
+    "structlog>=24.1",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +52,7 @@ otel = [
     "opentelemetry-sdk>=1.20",
     "opentelemetry-exporter-otlp-proto-grpc>=1.20",
     "opentelemetry-exporter-otlp-proto-http>=1.20",
+    "opentelemetry-instrumentation-httpx>=0.42b0",
 ]
 all = [
     "toolcase[langchain,mcp,http,redis,memcached,otel]",
