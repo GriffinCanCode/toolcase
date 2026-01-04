@@ -112,6 +112,7 @@ from .middleware import (
     Middleware,
     Next,
     compose,
+    CircuitBreakerMiddleware,
     LoggingMiddleware,
     MetricsMiddleware,
     RateLimitMiddleware,
@@ -161,6 +162,19 @@ from .monads import (
     try_tool_operation_async,
 )
 
+# Observability
+from .observability import (
+    configure_tracing,
+    get_tracer,
+    traced,
+    CorrelationMiddleware,
+    TracingMiddleware,
+    Span,
+    SpanKind,
+    SpanStatus,
+    Tracer,
+)
+
 __all__ = [
     # Version
     "__version__",
@@ -203,6 +217,7 @@ __all__ = [
     "Context",
     "Next",
     "compose",
+    "CircuitBreakerMiddleware",
     "LoggingMiddleware",
     "MetricsMiddleware",
     "RateLimitMiddleware",
@@ -241,6 +256,16 @@ __all__ = [
     "sequence",
     "traverse",
     "collect_results",
+    # Observability
+    "configure_tracing",
+    "get_tracer",
+    "traced",
+    "CorrelationMiddleware",
+    "TracingMiddleware",
+    "Span",
+    "SpanKind",
+    "SpanStatus",
+    "Tracer",
     # Convenience
     "init_tools",
 ]

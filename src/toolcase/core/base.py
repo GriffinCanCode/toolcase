@@ -241,6 +241,7 @@ class BaseTool(ABC, Generic[TParams]):
         This provides type-safe error propagation with railway-oriented programming.
         
         If not overridden, falls back to _run() with string-based error handling.
+        Catches exceptions and converts them to Err results.
         
         Example:
             >>> def _run_result(self, params: MyParams) -> ToolResult:
@@ -253,9 +254,14 @@ class BaseTool(ABC, Generic[TParams]):
         Returns:
             ToolResult (Result[str, ErrorTrace]) with success or error
         """
-        # Default: delegate to string-based _run and convert
-        result_str = self._run(params)
-        return string_to_result(result_str, self.metadata.name)
+        from ..monads.tool import try_tool_operation
+        
+        # Use try_tool_operation for automatic exception handling
+        return try_tool_operation(
+            self.metadata.name,
+            lambda: self._run(params),
+            context="execution",
+        )
     
     @abstractmethod
     def _run(self, params: TParams) -> str:
@@ -283,9 +289,25 @@ class BaseTool(ABC, Generic[TParams]):
         """Execute tool asynchronously with Result-based error handling.
         
         Override for native async implementations using Result types.
-        Default delegates to _run_result in a thread.
+        Catches exceptions and converts them to Err results.
         """
-        return await asyncio.to_thread(self._run_result, params)
+        from ..monads import Ok, Err
+        from ..monads.types import ErrorTrace
+        from ..errors import classify_exception
+        
+        try:
+            result = await self._async_run(params)
+            return string_to_result(result, self.metadata.name)
+        except Exception as e:
+            import traceback
+            code = classify_exception(e)
+            trace = ErrorTrace(
+                message=f"async execution: {e}",
+                error_code=code.value,
+                recoverable=True,
+                details=traceback.format_exc(),
+            ).with_operation(f"tool:{self.metadata.name}")
+            return Err(trace)
     
     def run(self, params: TParams) -> str:
         """Execute with caching support.

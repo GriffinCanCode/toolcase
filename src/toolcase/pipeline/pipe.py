@@ -13,10 +13,12 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Generic, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ..core.base import BaseTool, EmptyParams, ToolMetadata
+from ..errors import ErrorCode, ToolError
 from ..monads import Err, Ok, ToolResult, collect_results, sequence
+from ..monads.types import ErrorTrace
 
 if TYPE_CHECKING:
     pass
@@ -161,10 +163,19 @@ class PipelineTool(BaseTool[PipelineParams]):
     async def _async_run_result(self, params: PipelineParams) -> ToolResult:
         """Execute with Result-based error handling."""
         current_params = params.input
+        output = ""
         
-        for step in self._steps:
-            # Build params for this step
-            step_params = step.tool.params_schema(**current_params)
+        for i, step in enumerate(self._steps):
+            # Build params for this step with validation error handling
+            try:
+                step_params = step.tool.params_schema(**current_params)
+            except ValidationError as e:
+                trace = ErrorTrace(
+                    message=f"Step {i+1} ({step.tool.metadata.name}) params invalid: {e}",
+                    error_code=ErrorCode.INVALID_PARAMS.value,
+                    recoverable=False,
+                ).with_operation(f"pipeline:{self._meta.name}")
+                return Err(trace)
             
             # Execute step
             result = await step.execute(step_params)
@@ -175,9 +186,17 @@ class PipelineTool(BaseTool[PipelineParams]):
                     lambda e: e.with_operation(f"pipeline:{self._meta.name}")
                 )
             
-            # Transform output for next step
+            # Transform output for next step with exception handling
             output = result.unwrap()
-            current_params = step.prepare_next(output)
+            try:
+                current_params = step.prepare_next(output)
+            except Exception as e:
+                trace = ErrorTrace(
+                    message=f"Transform after step {i+1} failed: {e}",
+                    error_code=ErrorCode.PARSE_ERROR.value,
+                    recoverable=False,
+                ).with_operation(f"pipeline:{self._meta.name}")
+                return Err(trace)
         
         # Return final output
         return Ok(output)
@@ -264,9 +283,17 @@ class ParallelTool(BaseTool[ParallelParams]):
     
     async def _async_run_result(self, params: ParallelParams) -> ToolResult:
         """Execute all tools concurrently."""
-        # Create params for each tool
+        # Create params for each tool with validation error handling
         async def run_tool(tool: BaseTool[BaseModel]) -> ToolResult:
-            tool_params = tool.params_schema(**params.input)
+            try:
+                tool_params = tool.params_schema(**params.input)
+            except ValidationError as e:
+                trace = ErrorTrace(
+                    message=f"Params invalid for {tool.metadata.name}: {e}",
+                    error_code=ErrorCode.INVALID_PARAMS.value,
+                    recoverable=False,
+                )
+                return Err(trace)
             return await tool.arun_result(tool_params)
         
         # Execute all concurrently
@@ -282,13 +309,21 @@ class ParallelTool(BaseTool[ParallelParams]):
                 return Err(
                     sequenced.unwrap_err().with_operation(f"parallel:{self._meta.name}")
                 )
-            return Ok(self._merge(sequenced.unwrap()))
+            # Handle merge errors
+            try:
+                return Ok(self._merge(sequenced.unwrap()))
+            except Exception as e:
+                trace = ErrorTrace(
+                    message=f"Merge failed in {self._meta.name}: {e}",
+                    error_code=ErrorCode.PARSE_ERROR.value,
+                    recoverable=False,
+                )
+                return Err(trace)
         
         # Collect all (accumulate errors)
         collected = collect_results(list(results))
         if collected.is_err():
             errors = collected.unwrap_err()
-            from ..monads.types import ErrorTrace
             combined = ErrorTrace(
                 message=f"Multiple failures in {self._meta.name}",
                 contexts=[],
@@ -297,7 +332,16 @@ class ParallelTool(BaseTool[ParallelParams]):
             )
             return Err(combined)
         
-        return Ok(self._merge(collected.unwrap()))
+        # Handle merge errors
+        try:
+            return Ok(self._merge(collected.unwrap()))
+        except Exception as e:
+            trace = ErrorTrace(
+                message=f"Merge failed in {self._meta.name}: {e}",
+                error_code=ErrorCode.PARSE_ERROR.value,
+                recoverable=False,
+            )
+            return Err(trace)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

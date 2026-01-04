@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+
+from ..errors import ErrorCode, ToolError, ToolException
 
 if TYPE_CHECKING:
     from ..core import BaseTool
@@ -21,7 +23,7 @@ def tool_to_handler(tool: BaseTool[BaseModel]) -> Callable[..., str]:
     Creates a callable that:
     - Accepts **kwargs matching the tool's params_schema
     - Validates inputs via Pydantic
-    - Returns string result
+    - Returns string result (or structured error on failure)
     
     Args:
         tool: Toolcase tool instance to wrap
@@ -30,13 +32,26 @@ def tool_to_handler(tool: BaseTool[BaseModel]) -> Callable[..., str]:
         Async function suitable for MCP tool registration
     """
     schema = tool.params_schema
+    name = tool.metadata.name
     
     async def handler(**kwargs: object) -> str:
-        params = schema(**kwargs)
-        return await tool.arun(params)  # type: ignore[arg-type]
+        try:
+            params = schema(**kwargs)
+        except ValidationError as e:
+            return ToolError.create(
+                name, f"Invalid parameters: {e}",
+                ErrorCode.INVALID_PARAMS, recoverable=False
+            ).render()
+        
+        try:
+            return await tool.arun(params)  # type: ignore[arg-type]
+        except ToolException as e:
+            return e.error.render()
+        except Exception as e:
+            return ToolError.from_exception(name, e, "Execution failed").render()
     
     # Preserve metadata for introspection
-    handler.__name__ = tool.metadata.name
+    handler.__name__ = name
     handler.__doc__ = tool.metadata.description
     handler.__annotations__ = _extract_annotations(schema)
     

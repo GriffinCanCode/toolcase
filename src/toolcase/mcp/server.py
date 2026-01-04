@@ -27,7 +27,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+
+from ..errors import ErrorCode, ToolError, ToolException
 
 if TYPE_CHECKING:
     from ..core import BaseTool
@@ -87,14 +89,31 @@ class ToolServer(ABC):
         ]
     
     async def invoke(self, tool_name: str, params: dict[str, object]) -> str:
-        """Invoke a tool by name with parameters."""
+        """Invoke a tool by name with parameters.
+        
+        Returns structured error string on failure instead of raising.
+        """
         tool = self._registry.get(tool_name)
         if tool is None:
-            raise KeyError(f"Tool '{tool_name}' not found")
+            return ToolError.create(
+                tool_name, f"Tool '{tool_name}' not found",
+                ErrorCode.NOT_FOUND, recoverable=False
+            ).render()
         
-        schema = tool.params_schema
-        validated = schema(**params)
-        return await tool.arun(validated)  # type: ignore[arg-type]
+        try:
+            validated = tool.params_schema(**params)
+        except ValidationError as e:
+            return ToolError.create(
+                tool_name, f"Invalid parameters: {e}",
+                ErrorCode.INVALID_PARAMS, recoverable=False
+            ).render()
+        
+        try:
+            return await tool.arun(validated)  # type: ignore[arg-type]
+        except ToolException as e:
+            return e.error.render()
+        except Exception as e:
+            return ToolError.from_exception(tool_name, e, "Execution failed").render()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -227,13 +246,15 @@ class HTTPToolServer(ToolServer):
             except Exception:
                 body = {}
             
-            try:
-                result = await self.invoke(tool_name, body)
-                return JSONResponse({"result": result})
-            except KeyError as e:
-                return JSONResponse({"error": str(e)}, status_code=404)
-            except Exception as e:
-                return JSONResponse({"error": str(e)}, status_code=500)
+            result = await self.invoke(tool_name, body)
+            
+            # Check if result is an error (starts with **Tool Error)
+            if result.startswith("**Tool Error"):
+                # Determine status code from error content
+                status = 404 if "not found" in result.lower() else 400 if "Invalid parameters" in result else 500
+                return JSONResponse({"error": result}, status_code=status)
+            
+            return JSONResponse({"result": result})
         
         async def get_tool_schema(request):
             tool_name = request.path_params["name"]

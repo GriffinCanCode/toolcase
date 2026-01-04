@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+
+from ..errors import ErrorCode, ToolError, ToolException
 
 if TYPE_CHECKING:
     from langchain_core.tools import StructuredTool
@@ -21,6 +23,9 @@ if TYPE_CHECKING:
 
 def to_langchain(tool: BaseTool[BaseModel]) -> StructuredTool:
     """Convert a toolcase tool to a LangChain StructuredTool.
+    
+    Wraps tool execution with proper error handling, returning
+    structured error responses instead of raising exceptions.
     
     Args:
         tool: The toolcase tool instance to convert
@@ -45,17 +50,38 @@ def to_langchain(tool: BaseTool[BaseModel]) -> StructuredTool:
         ) from e
     
     schema = tool.params_schema
+    name = tool.metadata.name
     
     def _invoke(**kwargs: object) -> str:
-        return tool.run(schema(**kwargs))  # type: ignore[arg-type, call-arg]
+        try:
+            return tool.run(schema(**kwargs))  # type: ignore[arg-type, call-arg]
+        except ValidationError as e:
+            return ToolError.create(
+                name, f"Invalid parameters: {e}",
+                ErrorCode.INVALID_PARAMS, recoverable=False
+            ).render()
+        except ToolException as e:
+            return e.error.render()
+        except Exception as e:
+            return ToolError.from_exception(name, e, "Execution failed").render()
     
     async def _ainvoke(**kwargs: object) -> str:
-        return await tool.arun(schema(**kwargs))  # type: ignore[arg-type, call-arg]
+        try:
+            return await tool.arun(schema(**kwargs))  # type: ignore[arg-type, call-arg]
+        except ValidationError as e:
+            return ToolError.create(
+                name, f"Invalid parameters: {e}",
+                ErrorCode.INVALID_PARAMS, recoverable=False
+            ).render()
+        except ToolException as e:
+            return e.error.render()
+        except Exception as e:
+            return ToolError.from_exception(name, e, "Execution failed").render()
     
     return StructuredTool.from_function(
         func=_invoke,
         coroutine=_ainvoke,
-        name=tool.metadata.name,
+        name=name,
         description=tool.metadata.description,
         args_schema=schema,
     )

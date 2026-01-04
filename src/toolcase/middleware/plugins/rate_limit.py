@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
+from ...errors import ErrorCode, ToolException, ToolError
 from ..middleware import Context, Next
 
 if TYPE_CHECKING:
@@ -19,8 +20,8 @@ if TYPE_CHECKING:
 class RateLimitMiddleware:
     """Token bucket rate limiter per tool.
     
-    Limits concurrent and per-window executions. Raises RuntimeError
-    when limit exceeded (recoverable - caller can retry).
+    Limits concurrent and per-window executions. Raises ToolException
+    with RATE_LIMITED code when limit exceeded (recoverable).
     
     Args:
         max_calls: Maximum calls per window
@@ -67,9 +68,11 @@ class RateLimitMiddleware:
         key = tool.metadata.name if self.per_tool else "_global_"
         
         if not self._check_limit(key):
-            raise RuntimeError(
-                f"Rate limit exceeded for '{tool.metadata.name}': "
-                f"{self.max_calls} calls per {self.window_seconds}s"
-            )
+            raise ToolException(ToolError.create(
+                tool.metadata.name,
+                f"Rate limit exceeded: {self.max_calls} calls per {self.window_seconds}s",
+                ErrorCode.RATE_LIMITED,
+                recoverable=True,
+            ))
         
         return await next(tool, params, ctx)

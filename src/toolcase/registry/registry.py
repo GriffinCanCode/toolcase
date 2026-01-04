@@ -14,9 +14,10 @@ import asyncio
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ..core import BaseTool, ToolMetadata
+from ..errors import ErrorCode, ToolError, ToolException
 from ..middleware import Context, Middleware, Next, compose
 
 if TYPE_CHECKING:
@@ -116,6 +117,7 @@ class ToolRegistry:
         
         This is the primary execution method when middleware is configured.
         Validates params, builds context, and runs through the chain.
+        Returns structured error responses for all failure modes.
         
         Args:
             name: Tool name to execute
@@ -123,30 +125,41 @@ class ToolRegistry:
             ctx: Optional pre-built context (default: new Context)
         
         Returns:
-            Tool result string
-        
-        Raises:
-            KeyError: If tool not found
-            ValidationError: If params fail validation
+            Tool result string (or formatted error string on failure)
         
         Example:
             >>> result = await registry.execute("search", {"query": "python"})
         """
+        # Tool not found
+        if name not in self._tools:
+            return ToolError.create(
+                name, f"Tool '{name}' not found in registry",
+                ErrorCode.NOT_FOUND, recoverable=False
+            ).render()
+        
         tool = self._tools[name]
         
         # Validate params if dict
-        if isinstance(params, dict):
-            validated = tool.params_schema(**params)
-        else:
-            validated = params
+        try:
+            validated = tool.params_schema(**params) if isinstance(params, dict) else params
+        except ValidationError as e:
+            return ToolError.create(
+                name, f"Invalid parameters: {e}",
+                ErrorCode.INVALID_PARAMS, recoverable=False
+            ).render()
         
         # Build context
         context = ctx or Context()
         context["tool_name"] = name
         
-        # Execute through chain
-        chain = self._get_chain()
-        return await chain(tool, validated, context)
+        # Execute through chain with exception handling
+        try:
+            chain = self._get_chain()
+            return await chain(tool, validated, context)
+        except ToolException as e:
+            return e.error.render()
+        except Exception as e:
+            return ToolError.from_exception(name, e, "Execution failed").render()
     
     def execute_sync(
         self,
@@ -159,8 +172,12 @@ class ToolRegistry:
         
         For sync callers that need middleware support. Uses asyncio.run()
         internally, so cannot be called from within an async context.
+        Returns structured error string on failure.
         """
-        return asyncio.run(self.execute(name, params, ctx=ctx))
+        try:
+            return asyncio.run(self.execute(name, params, ctx=ctx))
+        except Exception as e:
+            return ToolError.from_exception(name, e, "Sync execution failed").render()
     
     # ─────────────────────────────────────────────────────────────────
     # Querying

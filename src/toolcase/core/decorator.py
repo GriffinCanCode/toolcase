@@ -41,6 +41,7 @@ from typing import (
 from pydantic import BaseModel, Field, create_model
 
 from ..cache import DEFAULT_TTL
+from ..errors import ToolError, ToolException
 from .base import BaseTool, ToolMetadata
 
 if TYPE_CHECKING:
@@ -163,14 +164,20 @@ class FunctionTool(BaseTool[BaseModel]):
         )
     
     def _run(self, params: BaseModel) -> str:
-        """Execute the wrapped function synchronously."""
+        """Execute the wrapped function synchronously.
+        
+        Exceptions propagate to _run_result() which handles conversion to Result.
+        """
         kwargs = params.model_dump()
         if self._is_async:
             return self._run_async_sync(self._func(**kwargs))  # type: ignore[arg-type]
         return self._func(**kwargs)  # type: ignore[return-value]
     
     async def _async_run(self, params: BaseModel) -> str:
-        """Execute the wrapped function asynchronously."""
+        """Execute the wrapped function asynchronously.
+        
+        Exceptions propagate to _async_run_result() which handles conversion.
+        """
         kwargs = params.model_dump()
         if self._is_async:
             result: str = await self._func(**kwargs)  # type: ignore[misc]

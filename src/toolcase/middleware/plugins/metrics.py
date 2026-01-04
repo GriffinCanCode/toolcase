@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
+from ...errors import ErrorCode, ToolException, classify_exception
 from ..middleware import Context, Next
 
 if TYPE_CHECKING:
@@ -42,11 +43,12 @@ class LogMetricsBackend:
 
 @dataclass(slots=True)
 class MetricsMiddleware:
-    """Collect execution metrics (counters, timing).
+    """Collect execution metrics (counters, timing) with error code tracking.
     
     Emits:
     - tool.calls: Counter per tool
-    - tool.errors: Counter for error results
+    - tool.errors: Counter for error results (with error_code tag)
+    - tool.exceptions: Counter for exceptions (with error_code tag)
     - tool.duration_ms: Timing histogram
     
     Args:
@@ -84,7 +86,14 @@ class MetricsMiddleware:
             
             return result
             
-        except Exception:
+        except ToolException as e:
+            error_tags = {**tags, "error_code": e.error.code.value}
             self.backend.increment(f"{self.prefix}.calls", tags=tags)
-            self.backend.increment(f"{self.prefix}.exceptions", tags=tags)
+            self.backend.increment(f"{self.prefix}.exceptions", tags=error_tags)
+            raise
+        except Exception as e:
+            code = classify_exception(e)
+            error_tags = {**tags, "error_code": code.value}
+            self.backend.increment(f"{self.prefix}.calls", tags=tags)
+            self.backend.increment(f"{self.prefix}.exceptions", tags=error_tags)
             raise

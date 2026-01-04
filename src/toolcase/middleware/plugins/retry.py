@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
+from ...errors import ErrorCode, ToolException, ToolError, classify_exception
 from ...retry import Backoff, ExponentialBackoff
 from ..middleware import Context, Next
 
@@ -21,17 +22,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("toolcase.middleware")
 
+# Default retryable error codes for exception-based retry
+RETRYABLE_CODES: frozenset[ErrorCode] = frozenset({
+    ErrorCode.RATE_LIMITED,
+    ErrorCode.TIMEOUT,
+    ErrorCode.NETWORK_ERROR,
+})
+
 
 @dataclass(slots=True)
 class RetryMiddleware:
     """Retry failed executions with configurable backoff.
     
-    Retries on exceptions only (not on error results). For error-code-based
-    retries, use RetryPolicy on the tool class instead.
+    Retries on exceptions with retryable error codes (RATE_LIMITED, TIMEOUT,
+    NETWORK_ERROR by default). For error-code-based retries on Result types,
+    use RetryPolicy on the tool class instead.
     
     Args:
         max_attempts: Total attempts including initial (minimum 1)
         backoff: Backoff strategy (default: ExponentialBackoff with jitter)
+        retryable_codes: Error codes that trigger retry (default: transient errors)
     
     Example:
         >>> from toolcase.retry import ExponentialBackoff, LinearBackoff
@@ -45,6 +55,15 @@ class RetryMiddleware:
     
     max_attempts: int = 3
     backoff: Backoff = field(default_factory=ExponentialBackoff)
+    retryable_codes: frozenset[ErrorCode] = RETRYABLE_CODES
+    
+    def _should_retry(self, exc: Exception) -> bool:
+        """Determine if exception is retryable based on error code."""
+        # ToolExceptions already have classified codes
+        if isinstance(exc, ToolException):
+            return exc.error.code in self.retryable_codes
+        # Classify other exceptions
+        return classify_exception(exc) in self.retryable_codes
     
     async def __call__(
         self,
@@ -62,15 +81,24 @@ class RetryMiddleware:
                 return result
             except Exception as e:
                 last_exc = e
-                if attempt + 1 >= self.max_attempts:
+                code = classify_exception(e)
+                ctx["last_error_code"] = code.value
+                
+                if attempt + 1 >= self.max_attempts or not self._should_retry(e):
                     break
                 
                 delay = self.backoff.delay(attempt)
                 logger.warning(
-                    f"[{tool.metadata.name}] Attempt {attempt + 1} failed: {e}. "
+                    f"[{tool.metadata.name}] Attempt {attempt + 1} failed ({code}): {e}. "
                     f"Retrying in {delay:.1f}s"
                 )
                 await asyncio.sleep(delay)
         
         ctx["retry_attempts"] = self.max_attempts
+        
+        # Wrap non-ToolExceptions for consistent error handling
+        if last_exc and not isinstance(last_exc, ToolException):
+            raise ToolException(ToolError.from_exception(
+                tool.metadata.name, last_exc, recoverable=False
+            )) from last_exc
         raise last_exc  # type: ignore[misc]

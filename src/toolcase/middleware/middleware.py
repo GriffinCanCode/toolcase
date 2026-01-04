@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
+from ..errors import ToolError, ToolException
+
 if TYPE_CHECKING:
     from typing import Any
     from ..core import BaseTool
@@ -94,7 +96,7 @@ def compose(middleware: Sequence[Middleware]) -> Next:
     """Compose middleware into a single execution function.
     
     Uses functional composition via iteration. The resulting function
-    wraps each middleware around the base executor.
+    wraps each middleware around the base executor with error handling.
     
     Args:
         middleware: Ordered list of middleware (first = outermost)
@@ -103,7 +105,14 @@ def compose(middleware: Sequence[Middleware]) -> Next:
         Composed async function: (tool, params, ctx) -> result
     """
     async def base(tool: BaseTool[BaseModel], params: BaseModel, ctx: Context) -> str:
-        return await tool.arun(params)
+        try:
+            return await tool.arun(params)
+        except ToolException as e:
+            return e.error.render()
+        except Exception as e:
+            return ToolError.from_exception(
+                tool.metadata.name, e, "Execution failed"
+            ).render()
     
     # Build chain by wrapping from innermost to outermost
     chain: Next = base
