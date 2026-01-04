@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Callable
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult, format_validation_error
 
 if TYPE_CHECKING:
     pass
@@ -152,7 +152,7 @@ class RouterTool(BaseTool[RouterParams]):
             tool_params = tool.params_schema(**input_dict)
         except ValidationError as e:
             trace = ErrorTrace(
-                message=f"Route '{route_name}' params invalid: {e}",
+                message=format_validation_error(e, tool_name=tool.metadata.name),
                 error_code=ErrorCode.INVALID_PARAMS.value,
                 recoverable=False,
             ).with_operation(f"router:{self._meta.name}")

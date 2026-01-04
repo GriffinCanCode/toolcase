@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult, format_validation_error
 from toolcase.runtime.concurrency import to_thread, checkpoint
 
 if TYPE_CHECKING:
@@ -314,7 +314,7 @@ class EscalationTool(BaseTool[EscalationParams]):
             tool_params = self._tool.params_schema(**params.input)
         except ValidationError as e:
             trace = ErrorTrace(
-                message=f"Invalid params for {self._tool.metadata.name}: {e}",
+                message=format_validation_error(e, tool_name=self._tool.metadata.name),
                 error_code=ErrorCode.INVALID_PARAMS.value,
                 recoverable=False,
             )

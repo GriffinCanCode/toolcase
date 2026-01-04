@@ -47,6 +47,22 @@ RESULT-BASED ERROR (Recommended):
             )
         return Ok(external_call())
 
+VALIDATION ERROR FORMATTING (LLM-friendly):
+    from pydantic import ValidationError
+    from toolcase import format_validation_error
+    
+    # Converts Pydantic errors to natural language
+    try:
+        params = MyModel(count="not_a_number")
+    except ValidationError as e:
+        msg = format_validation_error(e, tool_name="my_tool")
+        # Output:
+        # [my_tool] Parameter issue:
+        #   • 'count' must be a whole number (you provided: 'not_a_number')
+        #     → Provide an integer without decimals
+    
+    # Handled automatically by registry.execute() and tool primitives
+
 RELATED TOPICS:
     toolcase help result     Monadic Result types
     toolcase help tool       Tool creation

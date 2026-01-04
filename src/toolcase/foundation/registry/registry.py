@@ -20,7 +20,7 @@ from pydantic import BaseModel, ValidationError
 
 from toolcase.foundation.core import BaseTool, ToolMetadata
 from toolcase.foundation.di import Container, Factory, Scope, ScopedContext
-from toolcase.foundation.errors import ErrorCode, ToolError, ToolException
+from toolcase.foundation.errors import ErrorCode, ToolError, ToolException, format_validation_error
 from toolcase.runtime.middleware import Context, Middleware, Next, compose, compose_streaming, StreamMiddleware
 from toolcase.runtime.concurrency import run_sync
 from toolcase.io.streaming import (
@@ -211,7 +211,7 @@ class ToolRegistry:
             validated = tool.params_schema(**params) if isinstance(params, dict) else params
         except ValidationError as e:
             return ToolError.create(
-                name, f"Invalid parameters: {e}",
+                name, format_validation_error(e, tool_name=name),
                 ErrorCode.INVALID_PARAMS, recoverable=False
             ).render()
         
@@ -312,7 +312,7 @@ class ToolRegistry:
             validated = tool.params_schema(**params) if isinstance(params, dict) else params
         except ValidationError as e:
             yield ToolError.create(
-                name, f"Invalid parameters: {e}",
+                name, format_validation_error(e, tool_name=name),
                 ErrorCode.INVALID_PARAMS, recoverable=False
             ).render()
             return

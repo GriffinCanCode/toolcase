@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Callable
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, Result, ToolResult
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, Result, ToolResult, format_validation_error
 
 if TYPE_CHECKING:
     pass
@@ -183,7 +183,7 @@ class GateTool(BaseTool[GateParams]):
             tool_params = self._tool.params_schema(**input_dict)
         except ValidationError as e:
             trace = ErrorTrace(
-                message=f"Invalid params: {e}",
+                message=format_validation_error(e, tool_name=self._tool.metadata.name),
                 error_code=ErrorCode.INVALID_PARAMS.value,
                 recoverable=False,
             )

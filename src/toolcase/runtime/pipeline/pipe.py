@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Callable, TypeVar
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult, collect_results, sequence
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, Ok, ToolResult, collect_results, format_validation_error, sequence
 from toolcase.io.streaming import StreamChunk, StreamEvent, StreamEventKind, stream_error
 from toolcase.runtime.concurrency import Concurrency
 
@@ -220,7 +220,7 @@ class PipelineTool(BaseTool[PipelineParams]):
                 step_params = step.tool.params_schema(**current_params)
             except ValidationError as e:
                 trace = ErrorTrace(
-                    message=f"Step {i+1} ({step.tool.metadata.name}) params invalid: {e}",
+                    message=format_validation_error(e, tool_name=step.tool.metadata.name),
                     error_code=ErrorCode.INVALID_PARAMS.value,
                     recoverable=False,
                 ).with_operation(f"pipeline:{self._meta.name}")
@@ -370,7 +370,7 @@ class StreamingPipelineTool(BaseTool[PipelineParams]):
                 step_params = step.tool.params_schema(**current_params)
             except ValidationError as e:
                 # Yield error as single chunk on validation failure
-                yield f"[Pipeline Error] Step {i+1} ({step.tool.metadata.name}): {e}"
+                yield f"[Pipeline Error] {format_validation_error(e, tool_name=step.tool.metadata.name)}"
                 return
             
             if is_final:
@@ -504,7 +504,7 @@ class ParallelTool(BaseTool[ParallelParams]):
                 tool_params = tool.params_schema(**params.input)
             except ValidationError as e:
                 return Err(ErrorTrace(
-                    message=f"Params invalid for {tool.metadata.name}: {e}",
+                    message=format_validation_error(e, tool_name=tool.metadata.name),
                     error_code=ErrorCode.INVALID_PARAMS.value,
                     recoverable=False,
                 ))
@@ -678,7 +678,7 @@ class StreamingParallelTool(BaseTool[ParallelParams]):
             try:
                 tool_params = tool.params_schema(**params.input)
             except ValidationError as e:
-                yield f"[Error {tool.metadata.name}]: {e}"
+                yield f"[Error] {format_validation_error(e, tool_name=tool.metadata.name)}"
                 return
             async for chunk in tool.stream_result(tool_params):
                 yield chunk

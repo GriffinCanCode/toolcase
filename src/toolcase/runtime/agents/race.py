@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, ToolResult
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, ToolResult, format_validation_error
 from toolcase.runtime.concurrency import CancelScope, checkpoint
 
 if TYPE_CHECKING:
@@ -119,7 +119,7 @@ class RaceTool(BaseTool[RaceParams]):
                 tool_params = tool.params_schema(**input_dict)
             except ValidationError as e:
                 return idx, Err(ErrorTrace(
-                    message=f"Tool {tool.metadata.name} params invalid: {e}",
+                    message=format_validation_error(e, tool_name=tool.metadata.name),
                     error_code=ErrorCode.INVALID_PARAMS.value,
                     recoverable=False,
                 ))
