@@ -47,6 +47,22 @@ Idempotent Batch (Exactly-Once Semantics):
     # Execute with exactly-once guarantees
     results = await batch_execute_idempotent(tool, params_list, config)
     print(f"Cache hits: {results.cache_hit_rate:.0%}")
+
+Dead Letter Queue (Poison Message Handling):
+    from toolcase.runtime.batch import DLQConfig, route_to_dlq, get_dlq_store
+    
+    # Route failed items to DLQ after 3 consecutive failures
+    config = DLQConfig(max_poison_threshold=3)
+    
+    # Manual routing with callback
+    async def on_dlq(entry):
+        print(f"DLQ: {entry.tool_name} failed {entry.attempts}x")
+    
+    entry = await route_to_dlq(item, "batch-123", "http", params, 3, callback=on_dlq)
+    
+    # Query DLQ
+    store = get_dlq_store()
+    failed = store.list(tool_name="http")
 """
 
 from .batch import (
@@ -69,6 +85,19 @@ from .idempotent import (
     NO_BATCH_RETRY,
     batch_execute_idempotent,
     batch_execute_idempotent_sync,
+)
+from .dlq import (
+    DLQCallback,
+    DLQConfig,
+    DLQEntry,
+    DLQStore,
+    MemoryDLQStore,
+    NO_DLQ,
+    get_dlq_store,
+    reset_dlq_store,
+    reprocess_entry,
+    route_to_dlq,
+    set_dlq_store,
 )
 
 __all__ = [
@@ -93,4 +122,16 @@ __all__ = [
     # Idempotency adapter (uses existing cache infrastructure)
     "IdempotencyStore",
     "CacheIdempotencyAdapter",
+    # Dead Letter Queue
+    "DLQConfig",
+    "DLQEntry",
+    "DLQStore",
+    "DLQCallback",
+    "MemoryDLQStore",
+    "NO_DLQ",
+    "get_dlq_store",
+    "set_dlq_store",
+    "reset_dlq_store",
+    "route_to_dlq",
+    "reprocess_entry",
 ]
