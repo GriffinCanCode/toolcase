@@ -28,22 +28,16 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ParamSpec, TypeVar
 
-if TYPE_CHECKING:
-    from types import TracebackType
-
-T = TypeVar("T")
-U = TypeVar("U")
+T, U = TypeVar("T"), TypeVar("U")
 P = ParamSpec("P")
 
 
 @dataclass(slots=True)
 class ConcurrencyConfig:
     """Configuration for Concurrency facade."""
-    
     default_timeout: float = 30.0
     default_pool_size: int = 10
     default_thread_workers: int | None = None  # Uses system default
@@ -87,22 +81,14 @@ class Concurrency:
     
     @classmethod
     def configure(
-        cls,
-        *,
-        default_timeout: float | None = None,
-        default_pool_size: int | None = None,
-        default_thread_workers: int | None = None,
-        default_process_workers: int | None = None,
+        cls, *, default_timeout: float | None = None, default_pool_size: int | None = None,
+        default_thread_workers: int | None = None, default_process_workers: int | None = None,
     ) -> None:
         """Configure global defaults for concurrency operations."""
-        if default_timeout is not None:
-            cls._config.default_timeout = default_timeout
-        if default_pool_size is not None:
-            cls._config.default_pool_size = default_pool_size
-        if default_thread_workers is not None:
-            cls._config.default_thread_workers = default_thread_workers
-        if default_process_workers is not None:
-            cls._config.default_process_workers = default_process_workers
+        if default_timeout is not None: cls._config.default_timeout = default_timeout
+        if default_pool_size is not None: cls._config.default_pool_size = default_pool_size
+        if default_thread_workers is not None: cls._config.default_thread_workers = default_thread_workers
+        if default_process_workers is not None: cls._config.default_process_workers = default_process_workers
     
     # ─────────────────────────────────────────────────────────────────
     # Task Management
@@ -193,30 +179,19 @@ class Concurrency:
     
     @classmethod
     async def map(
-        cls,
-        func: Callable[[T], Awaitable[U]],
-        items: list[T],
-        *,
-        limit: int | None = None,
-        return_exceptions: bool = False,
+        cls, func: Callable[[T], Awaitable[U]], items: list[T], *, limit: int | None = None, return_exceptions: bool = False,
     ) -> list[U]:
         """Parallel map with optional concurrency limit.
         
         Example:
-            >>> results = await Concurrency.map(
-            ...     fetch_url, urls, limit=10
-            ... )
+            >>> results = await Concurrency.map(fetch_url, urls, limit=10)
         """
         from .execution import map_async
         return await map_async(func, items, limit=limit or cls._config.default_pool_size, return_exceptions=return_exceptions)
     
     @staticmethod
     async def retry(
-        factory: Callable[[], Awaitable[T]],
-        *,
-        max_attempts: int = 3,
-        delay: float = 1.0,
-        backoff: float = 2.0,
+        factory: Callable[[], Awaitable[T]], *, max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0,
     ) -> T:
         """Retry operation until success."""
         from .execution import retry_until_success
@@ -242,17 +217,17 @@ class Concurrency:
         from .execution import run_in_process
         return await run_in_process(func, *args, **kwargs)
     
-    @staticmethod
-    def thread_pool(max_workers: int | None = None) -> "ThreadPool":
+    @classmethod
+    def thread_pool(cls, max_workers: int | None = None) -> "ThreadPool":
         """Create a thread pool context manager."""
         from .execution import ThreadPool
-        return ThreadPool(max_workers=max_workers or Concurrency._config.default_thread_workers or 4)
+        return ThreadPool(max_workers=max_workers or cls._config.default_thread_workers or 4)
     
-    @staticmethod
-    def process_pool(max_workers: int | None = None) -> "ProcessPool":
+    @classmethod
+    def process_pool(cls, max_workers: int | None = None) -> "ProcessPool":
         """Create a process pool context manager."""
         from .execution import ProcessPool
-        return ProcessPool(max_workers=max_workers or Concurrency._config.default_process_workers or 4)
+        return ProcessPool(max_workers=max_workers or cls._config.default_process_workers or 4)
     
     # ─────────────────────────────────────────────────────────────────
     # Synchronization Primitives
@@ -288,8 +263,7 @@ class Concurrency:
         
         Example:
             >>> limiter = Concurrency.limiter(10)  # Max 10 concurrent
-            >>> async with limiter:
-            ...     await api_call()
+            >>> async with limiter: await api_call()
         """
         from .primitives import CapacityLimiter
         return CapacityLimiter(capacity)
@@ -332,13 +306,10 @@ class Concurrency:
     
     @staticmethod
     def run_sync(coro: Coroutine[object, object, T]) -> T:
-        """Run async code from sync context.
-        
-        Handles running from within existing event loops (e.g., Jupyter, FastAPI).
+        """Run async code from sync context. Handles running from within existing event loops (e.g., Jupyter, FastAPI).
         
         Example:
-            >>> # From sync code
-            >>> result = Concurrency.run_sync(async_operation())
+            >>> result = Concurrency.run_sync(async_operation())  # From sync code
         """
         from .interop import run_sync
         return run_sync(coro)

@@ -25,13 +25,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import deque
 from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
 from typing import Callable, Generic, TypeVar
 
-T = TypeVar("T")
-U = TypeVar("U")
+T, U = TypeVar("T"), TypeVar("U")
 
 __all__ = [
     "merge_streams",
@@ -75,34 +73,25 @@ async def merge_streams(*streams: AsyncIterator[T]) -> AsyncIterator[T]:
     if not streams:
         return
     
-    pending: dict[int, asyncio.Task[tuple[int, T | None, bool]]] = {}
-    active: set[int] = set(range(len(streams)))
-    iterators = list(streams)
+    iters = list(streams)
     
     async def get_next(idx: int) -> tuple[int, T | None, bool]:
         try:
-            value = await iterators[idx].__anext__()
-            return (idx, value, True)
+            return (idx, await iters[idx].__anext__(), True)
         except StopAsyncIteration:
             return (idx, None, False)
     
     # Start initial fetch for each stream
-    for i in active:
-        pending[i] = asyncio.create_task(get_next(i))
+    pending = {i: asyncio.create_task(get_next(i)) for i in range(len(streams))}
     
     while pending:
         done, _ = await asyncio.wait(pending.values(), return_when=asyncio.FIRST_COMPLETED)
-        
         for task in done:
             idx, value, has_more = task.result()
             del pending[idx]
-            
             if has_more:
                 yield value  # type: ignore[misc]
-                # Re-arm this stream
-                pending[idx] = asyncio.create_task(get_next(idx))
-            else:
-                active.discard(idx)
+                pending[idx] = asyncio.create_task(get_next(idx))  # Re-arm
 
 
 async def interleave_streams(*streams: AsyncIterator[T]) -> AsyncIterator[T]:
@@ -118,27 +107,21 @@ async def interleave_streams(*streams: AsyncIterator[T]) -> AsyncIterator[T]:
     if not streams:
         return
     
-    iterators = list(streams)
+    iters = list(streams)
     active = list(range(len(streams)))
     
     while active:
         next_active: list[int] = []
-        
         for idx in active:
             try:
-                value = await iterators[idx].__anext__()
-                yield value
+                yield await iters[idx].__anext__()
                 next_active.append(idx)
             except StopAsyncIteration:
                 pass  # Stream exhausted
-        
         active = next_active
 
 
-async def buffer_stream(
-    stream: AsyncIterator[T],
-    maxsize: int = 10,
-) -> AsyncIterator[T]:
+async def buffer_stream(stream: AsyncIterator[T], maxsize: int = 10) -> AsyncIterator[T]:
     """Buffer stream items for smoother consumption.
     
     Pre-fetches items from the source stream into a buffer.
@@ -153,46 +136,33 @@ async def buffer_stream(
         >>> async for item in buffer_stream(slow_producer, maxsize=100):
         ...     fast_process(item)
     """
-    buffer: asyncio.Queue[T | None] = asyncio.Queue(maxsize=maxsize)
-    done = asyncio.Event()
+    buf: asyncio.Queue[T | None] = asyncio.Queue(maxsize=maxsize)
     error: BaseException | None = None
     
     async def producer() -> None:
         nonlocal error
         try:
             async for item in stream:
-                await buffer.put(item)
+                await buf.put(item)
         except BaseException as e:
             error = e
         finally:
-            await buffer.put(None)  # Sentinel
-            done.set()
+            await buf.put(None)  # Sentinel
     
     task = asyncio.create_task(producer())
-    
     try:
-        while True:
-            item = await buffer.get()
-            if item is None:
-                break
+        while (item := await buf.get()) is not None:
             yield item
-        
         if error:
             raise error
     finally:
         task.cancel()
-        try:
+        with asyncio.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 async def throttle_stream(
-    stream: AsyncIterator[T],
-    rate: float,
-    *,
-    per: float = 1.0,
-    burst: int = 1,
+    stream: AsyncIterator[T], rate: float, *, per: float = 1.0, burst: int = 1,
 ) -> AsyncIterator[T]:
     """Rate-limit stream consumption.
     
@@ -210,31 +180,23 @@ async def throttle_stream(
         >>> async for item in throttle_stream(fast_source, rate=10):
         ...     await api_call(item)
     """
-    interval = per / rate
-    tokens = float(burst)
-    last_time = time.monotonic()
+    interval, tokens, last = per / rate, float(burst), time.monotonic()
     
     async for item in stream:
         now = time.monotonic()
-        elapsed = now - last_time
-        tokens = min(burst, tokens + elapsed * rate / per)
-        last_time = now
+        tokens = min(burst, tokens + (now - last) * rate / per)
+        last = now
         
         if tokens < 1.0:
-            wait_time = (1.0 - tokens) * interval
-            await asyncio.sleep(wait_time)
+            await asyncio.sleep((1.0 - tokens) * interval)
             tokens = 0.0
         else:
             tokens -= 1.0
-        
         yield item
 
 
 async def batch_stream(
-    stream: AsyncIterator[T],
-    size: int,
-    *,
-    timeout: float | None = None,
+    stream: AsyncIterator[T], size: int, *, timeout: float | None = None,
 ) -> AsyncIterator[list[T]]:
     """Group stream items into batches.
     
@@ -252,54 +214,39 @@ async def batch_stream(
     """
     batch: list[T] = []
     deadline: float | None = None
-    exhausted = False
     
-    while not exhausted:
+    while True:
         if not batch and timeout:
             deadline = time.monotonic() + timeout
-        
         try:
-            if timeout and deadline:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    # Timeout—flush current batch
-                    if batch:
-                        yield batch
-                        batch = []
-                    deadline = None
-                    continue
-                item = await asyncio.wait_for(stream.__anext__(), timeout=remaining)
-            else:
-                item = await stream.__anext__()
-            
+            if timeout and deadline and (remaining := deadline - time.monotonic()) <= 0:
+                if batch:  # Timeout—flush current batch
+                    yield batch
+                    batch = []
+                deadline = None
+                continue
+            item = await (asyncio.wait_for(stream.__anext__(), timeout=remaining) 
+                         if timeout and deadline else stream.__anext__())
             batch.append(item)
             if len(batch) >= size:
                 yield batch
-                batch = []
-                deadline = None
-                
+                batch, deadline = [], None
         except asyncio.TimeoutError:
             if batch:
                 yield batch
-                batch = []
-            deadline = None
+            batch, deadline = [], None
         except StopAsyncIteration:
-            exhausted = True
-    
+            break
     if batch:
         yield batch
 
 
 async def timeout_stream(
-    stream: AsyncIterator[T],
-    timeout: float,
-    *,
-    on_timeout: Callable[[], Awaitable[T]] | T | None = None,
+    stream: AsyncIterator[T], timeout: float, *, on_timeout: Callable[[], Awaitable[T]] | T | None = None,
 ) -> AsyncIterator[T]:
     """Add timeout to stream item retrieval.
     
-    If fetching the next item takes longer than timeout, either
-    yields a default value or raises TimeoutError.
+    If fetching the next item takes longer than timeout, either yields a default value or raises TimeoutError.
     
     Args:
         stream: Source async iterator
@@ -312,61 +259,47 @@ async def timeout_stream(
     """
     while True:
         try:
-            item = await asyncio.wait_for(stream.__anext__(), timeout=timeout)
-            yield item
+            yield await asyncio.wait_for(stream.__anext__(), timeout=timeout)
         except asyncio.TimeoutError:
             if on_timeout is None:
                 raise
-            elif callable(on_timeout):
-                yield await on_timeout()  # type: ignore[misc]
-            else:
-                yield on_timeout
+            yield await on_timeout() if callable(on_timeout) else on_timeout  # type: ignore[misc]
         except StopAsyncIteration:
             break
 
 
 async def take_stream(stream: AsyncIterator[T], n: int) -> AsyncIterator[T]:
     """Take first n items from stream."""
-    count = 0
-    async for item in stream:
-        if count >= n:
+    async for i, item in enumerate_stream(stream):
+        if i >= n:
             break
         yield item
-        count += 1
 
 
 async def skip_stream(stream: AsyncIterator[T], n: int) -> AsyncIterator[T]:
     """Skip first n items from stream."""
-    count = 0
-    async for item in stream:
-        if count >= n:
+    async for i, item in enumerate_stream(stream):
+        if i >= n:
             yield item
-        count += 1
 
 
 async def filter_stream(
-    stream: AsyncIterator[T],
-    predicate: Callable[[T], bool] | Callable[[T], Awaitable[bool]],
+    stream: AsyncIterator[T], predicate: Callable[[T], bool] | Callable[[T], Awaitable[bool]],
 ) -> AsyncIterator[T]:
     """Filter stream items by predicate."""
+    is_async = asyncio.iscoroutinefunction(predicate)
     async for item in stream:
-        result = predicate(item)
-        if asyncio.iscoroutine(result):
-            result = await result
-        if result:
+        if (await predicate(item)) if is_async else predicate(item):  # type: ignore[misc]
             yield item
 
 
 async def map_stream(
-    stream: AsyncIterator[T],
-    func: Callable[[T], U] | Callable[[T], Awaitable[U]],
+    stream: AsyncIterator[T], func: Callable[[T], U] | Callable[[T], Awaitable[U]],
 ) -> AsyncIterator[U]:
     """Map function over stream items."""
+    is_async = asyncio.iscoroutinefunction(func)
     async for item in stream:
-        result = func(item)
-        if asyncio.iscoroutine(result):
-            result = await result
-        yield result  # type: ignore[misc]
+        yield (await func(item)) if is_async else func(item)  # type: ignore[misc]
 
 
 async def flatten_stream(stream: AsyncIterator[AsyncIterator[T]]) -> AsyncIterator[T]:
@@ -382,11 +315,7 @@ class StreamMerger(Generic[T]):
     
     Provides more control over stream merging than merge_streams().
     
-    Features:
-        - Priority ordering
-        - Error handling modes
-        - Completion callbacks
-        - Cancellation support
+    Features: Priority ordering, error handling modes, completion callbacks, cancellation support
     
     Example:
         >>> merger = StreamMerger()
@@ -401,21 +330,8 @@ class StreamMerger(Generic[T]):
     _streams: list[tuple[AsyncIterator[T], int]] = field(default_factory=list, repr=False)
     _started: bool = field(default=False, repr=False)
     
-    def add(
-        self,
-        stream: AsyncIterator[T],
-        *,
-        priority: int = 0,
-    ) -> StreamMerger[T]:
-        """Add a stream to merge.
-        
-        Args:
-            stream: Async iterator to add
-            priority: Higher = checked first (default: 0)
-        
-        Returns:
-            self for chaining
-        """
+    def add(self, stream: AsyncIterator[T], *, priority: int = 0) -> StreamMerger[T]:
+        """Add a stream to merge. Args: stream (async iterator), priority (higher=first). Returns self."""
         if self._started:
             raise RuntimeError("Cannot add streams after iteration started")
         self._streams.append((stream, priority))
@@ -423,64 +339,45 @@ class StreamMerger(Generic[T]):
     
     def __aiter__(self) -> AsyncIterator[T]:
         self._started = True
-        # Sort by priority (higher first)
-        sorted_streams = sorted(self._streams, key=lambda x: -x[1])
-        streams = [s[0] for s in sorted_streams]
-        return self._merge(streams)
+        return self._merge([s for s, _ in sorted(self._streams, key=lambda x: -x[1])])
     
     async def _merge(self, streams: list[AsyncIterator[T]]) -> AsyncIterator[T]:
         """Internal merge implementation."""
         if not streams:
             return
         
-        pending: dict[int, asyncio.Task[tuple[int, T | None, bool, BaseException | None]]] = {}
-        active: set[int] = set(range(len(streams)))
-        
         async def get_next(idx: int) -> tuple[int, T | None, bool, BaseException | None]:
             try:
-                value = await streams[idx].__anext__()
-                return (idx, value, True, None)
+                return (idx, await streams[idx].__anext__(), True, None)
             except StopAsyncIteration:
                 return (idx, None, False, None)
             except BaseException as e:
                 return (idx, None, False, e)
         
         # Start initial fetch
-        for i in active:
-            pending[i] = asyncio.create_task(get_next(i))
+        pending = {i: asyncio.create_task(get_next(i)) for i in range(len(streams))}
         
         while pending:
             done, _ = await asyncio.wait(pending.values(), return_when=asyncio.FIRST_COMPLETED)
-            
             for task in done:
                 idx, value, has_more, error = task.result()
                 del pending[idx]
                 
                 if error:
-                    if self.on_error == "propagate":
-                        # Cancel other tasks
+                    if self.on_error in ("propagate", "stop"):
                         for t in pending.values():
                             t.cancel()
-                        raise error
-                    elif self.on_error == "stop":
-                        for t in pending.values():
-                            t.cancel()
+                        if self.on_error == "propagate":
+                            raise error
                         return
-                    # 'skip' - continue without this stream
-                    active.discard(idx)
-                    continue
+                    continue  # 'skip' - continue without this stream
                 
                 if has_more:
                     yield value  # type: ignore[misc]
                     pending[idx] = asyncio.create_task(get_next(idx))
-                else:
-                    active.discard(idx)
 
 
-async def enumerate_stream(
-    stream: AsyncIterator[T],
-    start: int = 0,
-) -> AsyncIterator[tuple[int, T]]:
+async def enumerate_stream(stream: AsyncIterator[T], start: int = 0) -> AsyncIterator[tuple[int, T]]:
     """Add index to stream items."""
     idx = start
     async for item in stream:
@@ -489,24 +386,16 @@ async def enumerate_stream(
 
 
 async def zip_streams(*streams: AsyncIterator[object]) -> AsyncIterator[tuple[object, ...]]:
-    """Zip multiple streams together.
-    
-    Yields tuples of items from each stream. Stops when shortest
-    stream is exhausted.
-    """
+    """Zip multiple streams together. Yields tuples of items from each stream. Stops when shortest stream is exhausted."""
     if not streams:
         return
     
-    iterators = list(streams)
-    
+    iters = list(streams)
     while True:
-        items: list[object] = []
-        for it in iterators:
-            try:
-                items.append(await it.__anext__())
-            except StopAsyncIteration:
-                return
-        yield tuple(items)
+        try:
+            yield tuple([await it.__anext__() for it in iters])
+        except StopAsyncIteration:
+            return
 
 
 async def chain_streams(*streams: AsyncIterator[T]) -> AsyncIterator[T]:
