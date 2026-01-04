@@ -22,6 +22,13 @@ Resilience Stack Example:
     >>> registry.use(RetryMiddleware(max_attempts=3))
     >>> registry.use(TimeoutMiddleware(timeout_seconds=30))
 
+Streaming Middleware Example:
+    >>> from toolcase.middleware import StreamLoggingMiddleware, compose_streaming
+    >>> # Streaming middleware receives chunk-level hooks
+    >>> registry.use(StreamLoggingMiddleware())
+    >>> async for chunk in registry.stream_execute("generate", {"topic": "AI"}):
+    ...     print(chunk, end="")
+
 Tracing Example:
     >>> from toolcase.observability import configure_tracing, TracingMiddleware
     >>> configure_tracing(service_name="my-agent", exporter="console")
@@ -39,6 +46,14 @@ from .plugins import (
     RetryMiddleware,
     TimeoutMiddleware,
 )
+from .streaming import (
+    StreamMiddleware,
+    StreamingAdapter,
+    StreamingChain,
+    StreamLoggingMiddleware,
+    StreamMetricsMiddleware,
+    compose_streaming,
+)
 
 __all__ = [
     # Core
@@ -46,6 +61,13 @@ __all__ = [
     "Next",
     "Context",
     "compose",
+    # Streaming
+    "StreamMiddleware",
+    "StreamingAdapter",
+    "StreamingChain",
+    "compose_streaming",
+    "StreamLoggingMiddleware",
+    "StreamMetricsMiddleware",
     # Plugins
     "CircuitBreakerMiddleware",
     "LoggingMiddleware",

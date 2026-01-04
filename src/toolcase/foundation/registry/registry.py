@@ -21,7 +21,7 @@ from pydantic import BaseModel, ValidationError
 from toolcase.foundation.core import BaseTool, ToolMetadata
 from toolcase.foundation.di import Container, Factory, Scope, ScopedContext
 from toolcase.foundation.errors import ErrorCode, ToolError, ToolException
-from toolcase.runtime.middleware import Context, Middleware, Next, compose
+from toolcase.runtime.middleware import Context, Middleware, Next, compose, compose_streaming, StreamMiddleware
 from toolcase.io.streaming import (
     StreamChunk,
     StreamEvent,
@@ -51,14 +51,20 @@ class ToolRegistry:
         >>> registry.register(MyTool())
         >>> registry.use(LoggingMiddleware())
         >>> result = await registry.execute("my_tool", {"query": "test"})
+        
+    Streaming with Middleware:
+        >>> registry.use(StreamLoggingMiddleware())
+        >>> async for chunk in registry.stream_execute("gen", {"topic": "AI"}):
+        ...     print(chunk, end="")
     """
     
-    __slots__ = ("_tools", "_middleware", "_chain", "_container")
+    __slots__ = ("_tools", "_middleware", "_chain", "_stream_chain", "_container")
     
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool[BaseModel]] = {}
-        self._middleware: list[Middleware] = []
+        self._middleware: list[Middleware | StreamMiddleware] = []
         self._chain: Next | None = None
+        self._stream_chain: object | None = None  # StreamingChain, lazy import
         self._container = Container()
     
     def register(self, tool: BaseTool[BaseModel]) -> None:
@@ -129,27 +135,38 @@ class ToolRegistry:
     # Middleware
     # ─────────────────────────────────────────────────────────────────
     
-    def use(self, middleware: Middleware) -> None:
+    def use(self, middleware: Middleware | StreamMiddleware) -> None:
         """Add middleware to the execution pipeline.
         
         Middleware is applied in order: first added = outermost (runs first).
         Invalidates the compiled chain, forcing recompilation on next execute.
         
+        Both regular Middleware and StreamMiddleware are supported. Regular
+        middleware is auto-adapted for streaming context.
+        
         Args:
-            middleware: Middleware instance implementing the Middleware protocol
+            middleware: Middleware instance implementing Middleware or StreamMiddleware
         
         Example:
             >>> registry.use(LoggingMiddleware())
+            >>> registry.use(StreamLoggingMiddleware())  # Streaming-aware
             >>> registry.use(RateLimitMiddleware(max_calls=10, window_seconds=60))
         """
         self._middleware.append(middleware)
         self._chain = None  # Invalidate cached chain
+        self._stream_chain = None  # Invalidate streaming chain
     
     def _get_chain(self) -> Next:
         """Get or compile the middleware chain."""
         if self._chain is None:
-            self._chain = compose(self._middleware)
+            self._chain = compose(self._middleware)  # type: ignore[arg-type]
         return self._chain
+    
+    def _get_stream_chain(self) -> object:
+        """Get or compile the streaming middleware chain."""
+        if self._stream_chain is None:
+            self._stream_chain = compose_streaming(self._middleware)
+        return self._stream_chain
     
     async def execute(
         self,
@@ -255,14 +272,14 @@ class ToolRegistry:
         *,
         ctx: Context | None = None,
     ) -> AsyncIterator[str]:
-        """Stream tool execution results as they're generated.
+        """Stream tool execution through the middleware pipeline.
         
         For tools that support result streaming (streaming=True with async
-        generator), this yields string chunks incrementally. For regular
-        tools, yields the complete result as a single chunk.
+        generator), this yields string chunks incrementally through each
+        middleware's chunk hooks. For regular tools, yields complete result.
         
-        This is the primary method for consuming LLM-powered tools that
-        naturally produce incremental output.
+        Middleware receives lifecycle hooks: on_start, on_chunk, on_complete,
+        on_error. Regular Middleware is auto-adapted to streaming context.
         
         Args:
             name: Tool name to execute
@@ -272,13 +289,13 @@ class ToolRegistry:
         Yields:
             String chunks as they become available
         
-        Raises:
-            ToolException: If tool not found or validation fails
-        
         Example:
-            >>> async for chunk in registry.stream_execute("generate_report", {"topic": "AI"}):
+            >>> registry.use(StreamLoggingMiddleware())
+            >>> async for chunk in registry.stream_execute("generate", {"topic": "AI"}):
             ...     print(chunk, end="", flush=True)
         """
+        from toolcase.runtime.middleware.streaming import StreamingChain
+        
         # Tool not found
         if name not in self._tools:
             yield ToolError.create(
@@ -313,32 +330,28 @@ class ToolRegistry:
                 try:
                     injected = await self._container.resolve_many(tool._inject, di_ctx)
                     context["injected"] = injected
-                    # Set in context var for tool access
-                    from toolcase.foundation.core.decorator import _injected_deps
-                    token = _injected_deps.set(injected)
                 except KeyError as e:
                     yield ToolError.create(
                         name, f"Missing dependency: {e}",
                         ErrorCode.INVALID_PARAMS, recoverable=False
                     ).render()
                     return
-            else:
-                token = None
             
             try:
-                # Check if tool supports result streaming
-                if hasattr(tool, "supports_result_streaming") and tool.supports_result_streaming:
-                    async for chunk in tool.stream_result(validated):
-                        yield chunk
+                # Get streaming chain and execute through middleware
+                chain = self._get_stream_chain()
+                if isinstance(chain, StreamingChain):
+                    async for chunk in chain(tool, validated, context):
+                        yield chunk.content
                 else:
-                    # Fall back to regular execution, yield complete result
-                    result = await tool.arun(validated)
-                    yield result
+                    # Fallback if chain type unexpected
+                    if hasattr(tool, "supports_result_streaming") and tool.supports_result_streaming:
+                        async for content in tool.stream_result(validated):
+                            yield content
+                    else:
+                        yield await tool.arun(validated)
             except Exception as e:
                 yield ToolError.from_exception(name, e, "Stream execution failed").render()
-            finally:
-                if token is not None:
-                    _injected_deps.reset(token)
     
     async def stream_execute_events(
         self,
@@ -477,6 +490,7 @@ class ToolRegistry:
         self._tools.clear()
         self._middleware.clear()
         self._chain = None
+        self._stream_chain = None
         self._container.clear()
     
     async def dispose(self) -> None:
