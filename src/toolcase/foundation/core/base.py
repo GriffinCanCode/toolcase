@@ -1,8 +1,26 @@
-"""Core tool abstractions: BaseTool, ToolMetadata, and parameter types.
+"""Core tool abstractions: BaseTool, ToolMetadata, ToolProtocol, and parameter types.
 
 This module provides the foundation for building type-safe, extensible tools
 that AI agents can invoke. Tools are defined by subclassing BaseTool with
 a typed parameter schema.
+
+Two approaches for tool implementation:
+1. **BaseTool (recommended)**: Inherit to get caching, retry, batch, streaming, error handling
+2. **ToolProtocol**: Duck typing interface for third-party tools without inheritance
+
+Example (inheritance - recommended):
+    >>> class MyTool(BaseTool[MyParams]):
+    ...     metadata = ToolMetadata(name="my_tool", description="...")
+    ...     params_schema = MyParams
+    ...     async def _async_run(self, params: MyParams) -> str: ...
+
+Example (protocol - advanced):
+    >>> class ExternalTool:
+    ...     metadata = ToolMetadata(name="external", description="...")
+    ...     params_schema = ExternalParams
+    ...     def run(self, params): ...
+    ...     async def arun(self, params): ...
+    >>> # Works with registry if it matches ToolProtocol
 """
 
 from __future__ import annotations
@@ -18,7 +36,9 @@ from typing import (
     Callable,
     ClassVar,
     Generic,
+    Protocol,
     TypeVar,
+    runtime_checkable,
 )
 
 from pydantic import (
@@ -259,6 +279,67 @@ _EmptyParamsAdapter: TypeAdapter[EmptyParams] = TypeAdapter(EmptyParams)
 
 # Type variable for tool parameter schemas
 TParams = TypeVar("TParams", bound=BaseModel)
+TParams_co = TypeVar("TParams_co", bound=BaseModel, covariant=True)
+
+
+@runtime_checkable
+class ToolProtocol(Protocol[TParams_co]):
+    """Protocol for duck-typed tool implementations.
+    
+    Enables third-party tools to work with toolcase registry/middleware
+    without inheriting from BaseTool. Useful for integrating external
+    tool systems or creating lightweight tool implementations.
+    
+    For most use cases, inherit from BaseTool instead - it provides
+    caching, retry, batch execution, streaming, and error handling.
+    
+    Minimal implementation required:
+        >>> class MyTool:
+        ...     metadata = ToolMetadata(name="my_tool", description="Does something useful")
+        ...     params_schema = MyParams
+        ...     
+        ...     def run(self, params: MyParams) -> str:
+        ...         return "result"
+        ...     
+        ...     async def arun(self, params: MyParams, timeout: float = 30.0) -> str:
+        ...         return "result"
+        ...     
+        ...     def run_result(self, params: MyParams) -> ToolResult:
+        ...         return Result("result", _OK)
+        ...     
+        ...     async def arun_result(self, params: MyParams, timeout: float = 30.0) -> ToolResult:
+        ...         return Result("result", _OK)
+    
+    Note:
+        runtime_checkable allows isinstance() checks, but only verifies
+        method/property existence at runtime, not signatures.
+    """
+    
+    @property
+    def metadata(self) -> ToolMetadata:
+        """Tool metadata (name, description, capabilities)."""
+        ...
+    
+    @property
+    def params_schema(self) -> type[BaseModel]:
+        """Pydantic model for parameter validation."""
+        ...
+    
+    def run(self, params: TParams_co) -> str:
+        """Execute synchronously, return string result."""
+        ...
+    
+    async def arun(self, params: TParams_co, timeout: float = 30.0) -> str:
+        """Execute asynchronously with timeout."""
+        ...
+    
+    def run_result(self, params: TParams_co) -> ToolResult:
+        """Execute synchronously, return Result type for monadic error handling."""
+        ...
+    
+    async def arun_result(self, params: TParams_co, timeout: float = 30.0) -> ToolResult:
+        """Execute asynchronously, return Result type."""
+        ...
 
 
 class BaseTool(ABC, Generic[TParams]):
@@ -551,3 +632,7 @@ class BaseTool(ABC, Generic[TParams]):
     ) -> BatchResult[TParams]:
         """Synchronous batch execution. Wraps batch_run for sync contexts."""
         return run_sync(self.batch_run(params_list, config))
+
+
+# Type alias for registry/middleware that accept either BaseTool or protocol-conforming objects
+AnyTool = BaseTool[BaseModel] | ToolProtocol[BaseModel]

@@ -71,6 +71,7 @@ __version__ = "0.2.0"
 
 # Foundation: Core
 from .foundation.core import (
+    AnyTool,
     BaseTool,
     EmptyParams,
     FunctionTool,
@@ -78,6 +79,7 @@ from .foundation.core import (
     StreamingFunctionTool,
     ToolCapabilities,
     ToolMetadata,
+    ToolProtocol,
     tool,
 )
 
@@ -362,7 +364,7 @@ __all__ = [
     # Version
     "__version__",
     # Core
-    "BaseTool", "ToolMetadata", "ToolCapabilities", "EmptyParams", "tool",
+    "BaseTool", "ToolProtocol", "AnyTool", "ToolMetadata", "ToolCapabilities", "EmptyParams", "tool",
     "FunctionTool", "StreamingFunctionTool", "ResultStreamingFunctionTool",
     # Errors
     "ErrorCode", "ToolError", "ToolException", "classify_exception",
@@ -457,11 +459,12 @@ __all__ = [
 ]
 
 
-def init_tools(*tools: BaseTool) -> ToolRegistry:  # type: ignore[type-arg]
+def init_tools(*tools: AnyTool) -> ToolRegistry:
     """Initialize the registry with tools.
     
     Convenience function that registers the discovery tool and any
-    additional tools provided.
+    additional tools provided. Accepts both BaseTool subclasses and
+    any object conforming to ToolProtocol.
     
     Args:
         *tools: Additional tool instances to register

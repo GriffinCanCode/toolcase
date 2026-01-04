@@ -17,7 +17,7 @@ from toolcase.foundation.errors import ErrorCode, ToolError, ToolException, form
 if TYPE_CHECKING:
     from langchain_core.tools import StructuredTool
 
-    from toolcase.foundation.core import BaseTool
+    from toolcase.foundation.core import AnyTool
     from toolcase.foundation.registry import ToolRegistry
 
 
@@ -33,7 +33,7 @@ def _wrap_error(name: str, exc: Exception) -> str:
     return ToolError.from_exception(name, exc, "Execution failed").render()
 
 
-def to_langchain(tool: BaseTool[BaseModel]) -> StructuredTool:
+def to_langchain(tool: AnyTool) -> StructuredTool:
     """Convert a toolcase tool to a LangChain StructuredTool.
     
     Wraps tool execution with proper error handling, returning

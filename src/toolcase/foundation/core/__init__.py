@@ -1,7 +1,9 @@
 """Core tool abstractions and decorators.
 
 This module provides the foundation for building type-safe, extensible tools:
-- BaseTool: Abstract base class for all tools
+- BaseTool: Abstract base class for all tools (recommended - includes caching, retry, batch, etc.)
+- ToolProtocol: Duck typing interface for third-party tools without inheritance
+- AnyTool: Type alias accepting either BaseTool or ToolProtocol-conforming objects
 - ToolMetadata: Tool metadata and capabilities
 - ToolCapabilities: Advertised capabilities for intelligent scheduling
 - EmptyParams: Default parameter schema for parameterless tools
@@ -12,7 +14,7 @@ This module provides the foundation for building type-safe, extensible tools:
 - Dependency injection helpers
 """
 
-from .base import BaseTool, EmptyParams, ToolCapabilities, ToolMetadata
+from .base import AnyTool, BaseTool, EmptyParams, ToolCapabilities, ToolMetadata, ToolProtocol
 from .decorator import (
     FunctionTool,
     InjectedDeps,
@@ -26,6 +28,8 @@ from .decorator import (
 
 __all__ = [
     "BaseTool",
+    "ToolProtocol",
+    "AnyTool",
     "ToolMetadata",
     "ToolCapabilities",
     "EmptyParams",
