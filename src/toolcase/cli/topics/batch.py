@@ -62,6 +62,21 @@ STANDALONE BATCH FUNCTION:
     # Sync wrapper
     results = batch_execute_sync(tool, params_list)
 
+STREAMING BATCH PROGRESS:
+    from toolcase.runtime.batch import batch_execute_stream, BatchEventKind
+    
+    # Stream progress events as items complete
+    async for event in batch_execute_stream(tool, params_list, config):
+        match event.kind:
+            case BatchEventKind.START:
+                print(f"Starting {event.total} items...")
+            case BatchEventKind.ITEM:
+                item = event.item
+                status = "OK" if item.is_ok else f"FAIL: {item.error}"
+                print(f"[{event.completed}/{event.total}] {status}")
+            case BatchEventKind.COMPLETE:
+                print(f"Done: {event.batch_result.success_rate:.0%} success")
+
 IDEMPOTENT BATCH (EXACTLY-ONCE SEMANTICS):
     from toolcase import (
         batch_execute_idempotent,
@@ -104,6 +119,18 @@ CACHE INTEGRATION:
     - RedisCache       Redis-backed (distributed)
     - MemcachedCache   Memcached-backed (distributed)
     - get_cache()      Global cache instance
+
+CUSTOM IDEMPOTENCY STORE:
+    from toolcase.runtime.batch import IdempotencyStore, CacheIdempotencyAdapter
+    
+    # Use cache adapter (recommended)
+    store = CacheIdempotencyAdapter(get_cache())
+    
+    # Or implement custom store
+    class MyStore(IdempotencyStore):
+        async def get(self, key: str) -> str | None: ...
+        async def set(self, key: str, value: str, ttl: float) -> None: ...
+        async def delete(self, key: str) -> None: ...
 
 USE CASES:
     - Parallel API calls to external services
