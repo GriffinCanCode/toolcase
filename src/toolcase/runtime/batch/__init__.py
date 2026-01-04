@@ -1,7 +1,7 @@
 """Intelligent batching for tool execution.
 
 Provides configurable batch execution with concurrency control,
-partial failure handling, and result aggregation.
+partial failure handling, result aggregation, and streaming progress.
 
 Usage:
     from toolcase.runtime.batch import BatchConfig, batch_execute
@@ -18,6 +18,19 @@ Usage:
             print(f"[{r.index}] Success: {r.value}")
         else:
             print(f"[{r.index}] Failed: {r.error}")
+
+Streaming Progress:
+    from toolcase.runtime.batch import batch_execute_stream, BatchEventKind
+    
+    # Stream progress events as items complete
+    async for event in batch_execute_stream(tool, params_list, config):
+        match event.kind:
+            case BatchEventKind.START:
+                print(f"Starting {event.total} items...")
+            case BatchEventKind.ITEM:
+                print(f"[{event.completed}/{event.total}] {event.progress:.0%}")
+            case BatchEventKind.COMPLETE:
+                print(f"Done: {event.batch_result.success_rate:.0%} success")
 
 Idempotent Batch (Exactly-Once Semantics):
     from toolcase.runtime.batch import (
@@ -38,9 +51,12 @@ Idempotent Batch (Exactly-Once Semantics):
 
 from .batch import (
     BatchConfig,
+    BatchEventKind,
     BatchItem,
+    BatchItemEvent,
     BatchResult,
     batch_execute,
+    batch_execute_stream,
     batch_execute_sync,
 )
 from .idempotent import (
@@ -62,6 +78,10 @@ __all__ = [
     "BatchResult",
     "batch_execute",
     "batch_execute_sync",
+    # Streaming batch
+    "BatchEventKind",
+    "BatchItemEvent",
+    "batch_execute_stream",
     # Idempotent batch
     "IdempotentBatchConfig",
     "IdempotentBatchResult",
