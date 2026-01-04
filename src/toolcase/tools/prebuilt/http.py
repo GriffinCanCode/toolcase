@@ -482,8 +482,12 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
         if self._client: await self._client.aclose(); self._client = None
     
     def _build_request(self, params: HttpParams) -> tuple[dict[str, str], str | bytes | None]:
-        """Build headers and content for a request."""
+        """Build headers and content for a request. Injects W3C trace context if propagate_trace enabled."""
         headers = self.config.auth.apply(self.config.default_headers | params.headers)
+        # Inject W3C trace context headers for distributed tracing
+        if self.metadata.propagate_trace:
+            from toolcase.runtime.observability.tracing import inject_trace_context
+            inject_trace_context(headers)
         if params.json_body is not None: headers.setdefault("Content-Type", "application/json"); return headers, orjson.dumps(params.json_body).decode()
         return headers, params.body
     

@@ -185,6 +185,10 @@ class ToolMetadata(BaseModel):
     requires_api_key: bool = False
     enabled: bool = True
     streaming: bool = False
+    propagate_trace: bool = Field(
+        default=True,
+        description="Enable W3C trace context propagation for distributed tracing",
+    )
     tags: frozenset[str] = Field(default_factory=frozenset, repr=False)  # Exclude from repr (can be verbose)
     version: str = Field(default="1.0.0", pattern=r"^\d+\.\d+\.\d+$")
     capabilities: ToolCapabilities = Field(default_factory=ToolCapabilities)
