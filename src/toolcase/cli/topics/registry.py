@@ -30,6 +30,21 @@ USING TOOLS:
     # Get tool instance
     tool = registry.get("my_tool")
 
+EXECUTING TOOLS:
+    # Direct execution (string result)
+    result = await registry.execute("search", {"query": "python"})
+    
+    # With Result type for error handling
+    from toolcase import Ok, Err
+    result = await registry.execute_result("search", {"query": "python"})
+    match result:
+        case Ok(value): print(value)
+        case Err(error): print(f"Error: {error}")
+    
+    # Streaming execution
+    async for chunk in registry.stream_execute("generate", {"topic": "AI"}):
+        print(chunk, end="")
+
 DISCOVERY:
     # List all tools
     tools = registry.list_tools()
@@ -46,7 +61,20 @@ INIT HELPER:
     # Registers DiscoveryTool plus your tools
     registry = init_tools(MyTool(), AnotherTool())
 
+MIDDLEWARE:
+    from toolcase import LoggingMiddleware, TimeoutMiddleware
+    
+    # Add middleware to all executions
+    registry.use(LoggingMiddleware())
+    registry.use(TimeoutMiddleware(30.0))
+    
+    # Enable validation with custom rules
+    validation = registry.use_validation()
+    validation.add_rule("search", "query", min_len(3), "query too short")
+
 RELATED TOPICS:
     toolcase help tool       Creating tools
     toolcase help formats    Exporting to OpenAI/Anthropic/Google
+    toolcase help middleware Middleware composition
+    toolcase help quickstart Complete agent setup guide
 """

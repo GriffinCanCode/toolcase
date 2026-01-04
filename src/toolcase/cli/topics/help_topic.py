@@ -9,8 +9,11 @@ USAGE:
     toolcase help <topic>      Show detailed info about a topic
     toolcase help help         Show this message
 
-CORE TOPICS:
+GETTING STARTED:
+    toolcase help quickstart   Complete guide to building an AI agent
     toolcase help overview     What is toolcase and why use it
+
+CORE TOPICS:
     toolcase help tool         How to create tools (async-first design)
     toolcase help result       Monadic error handling with Result types
     toolcase help middleware   Request/response middleware
@@ -26,6 +29,10 @@ CONFIGURATION:
     toolcase help settings     Environment variables and .env files
     toolcase help capabilities Tool capabilities for scheduling
     toolcase help http         HTTP tool with auth strategies
+    toolcase help effects      Effect system for side-effect tracking
+
+BUILT-IN TOOLS:
+    toolcase help web          Web search, URL fetch, HTML parse, extraction
 
 INTEGRATION:
     toolcase help formats      Multi-framework format converters

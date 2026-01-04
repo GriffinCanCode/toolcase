@@ -2,6 +2,7 @@
 
 from .help_topic import HELP
 from .overview import OVERVIEW
+from .quickstart import QUICKSTART
 from .architecture import ARCHITECTURE
 from .tool import TOOL
 from .result import RESULT
@@ -27,10 +28,13 @@ from .batch import BATCH
 from .capabilities import CAPABILITIES
 from .validation import VALIDATION
 from .mcp import MCP
+from .effects import EFFECTS
+from .web import WEB
 
 TOPICS: dict[str, str] = {
     "help": HELP,
     "overview": OVERVIEW,
+    "quickstart": QUICKSTART,
     "architecture": ARCHITECTURE,
     "tool": TOOL,
     "result": RESULT,
@@ -56,6 +60,8 @@ TOPICS: dict[str, str] = {
     "capabilities": CAPABILITIES,
     "validation": VALIDATION,
     "mcp": MCP,
+    "effects": EFFECTS,
+    "web": WEB,
 }
 
 __all__ = ["TOPICS"]

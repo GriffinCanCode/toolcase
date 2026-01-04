@@ -40,6 +40,7 @@ INIT HELPER:
     registry = init_tools(MyTool(), AnotherTool())
 
 RELATED TOPICS:
+    toolcase help quickstart   Complete agent setup guide
     toolcase help tool         Creating tools
     toolcase help registry     Tool registration and discovery
     toolcase help formats      Multi-framework format conversion

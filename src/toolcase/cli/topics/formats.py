@@ -8,6 +8,7 @@ CONVERTERS:
     from toolcase.ext.integrations.frontiers import (
         to_openai, to_anthropic, to_google
     )
+    from toolcase import get_registry
     
     registry = get_registry()
     
@@ -29,6 +30,14 @@ SINGLE TOOL CONVERTERS:
     openai_spec = tool_to_openai(my_tool)
     anthropic_spec = tool_to_anthropic(my_tool)
     gemini_spec = tool_to_google(my_tool)
+
+UNIVERSAL CONVERTER:
+    from toolcase.ext.integrations.frontiers import to_provider
+    
+    # Convert to any supported provider
+    tools = to_provider(registry, "openai", strict=True)
+    tools = to_provider(registry, "anthropic")
+    tools = to_provider(registry, "google")
 
 LANGCHAIN INTEGRATION:
     from toolcase.ext.integrations import to_langchain_tools
@@ -55,4 +64,5 @@ RELATED TOPICS:
     toolcase help registry   Tool registration
     toolcase help tool       Creating tools
     toolcase help mcp        MCP protocol server
+    toolcase help quickstart Complete agent setup guide
 """
