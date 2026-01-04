@@ -6,7 +6,7 @@ Enables declarative resilience patterns like:
 Example:
     >>> strategy = (
     ...     RetryStrategy()
-    ...     .with_retry(max_retries=3, backoff=ExponentialBackoff())
+    ...     .with_retry(max_retries=3)
     ...     .with_fallback([BackupAPI(), CacheAPI()], timeout=5.0)
     ...     .with_escalation(QueueEscalation("approvals"))
     ... )
@@ -26,14 +26,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+import stamina
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, JsonDict, ToolResult, format_validation_error
 from toolcase.runtime.concurrency import CancelScope, checkpoint
 
-from .backoff import Backoff, ExponentialBackoff
 from .policy import DEFAULT_RETRYABLE, RetryPolicy
 
 if TYPE_CHECKING:
@@ -46,7 +47,7 @@ logger = logging.getLogger("toolcase.retry.strategy")
 
 @runtime_checkable
 class _EscalationHandlerProtocol(Protocol):
-    async def escalate(self, request: EscalationRequest) -> object: ...  # Avoids circular import
+    async def escalate(self, request: EscalationRequest) -> object: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,14 +76,23 @@ class EscalateStage:
 Stage = RetryStage | FallbackStage | EscalateStage
 
 
+class _RetryableResultError(Exception):
+    """Internal exception to signal retryable ToolResult error to stamina."""
+    __slots__ = ("code",)
+    
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(f"Retryable error: {code}")
+
+
 class RetryStrategy:
-    """Composable retry strategy builder.
+    """Composable retry strategy builder using stamina.
     
     Combines retry policies, fallback chains, and escalation into a single
     declarative strategy that can wrap any tool.
     
     Stages execute in order:
-    1. Retry: Retry the primary tool with backoff
+    1. Retry: Retry the primary tool with exponential backoff
     2. Fallback: Try alternative tools in sequence
     3. Escalate: Request human intervention
     
@@ -91,18 +101,13 @@ class RetryStrategy:
     Example:
         >>> strategy = (
         ...     RetryStrategy()
-        ...     .with_retry(max_retries=3, backoff=ExponentialBackoff(base=1.0))
+        ...     .with_retry(max_retries=3)
         ...     .with_fallback([BackupAPI()], timeout=5.0)
         ...     .with_escalation(SlackEscalation("#approvals"))
         ... )
         >>> 
         >>> # Wrap primary tool
         >>> search = strategy.wrap(GoogleAPI())
-        >>> 
-        >>> # Now search will:
-        >>> # 1. Try GoogleAPI up to 3 times with exponential backoff
-        >>> # 2. On failure, try BackupAPI
-        >>> # 3. On failure, escalate to Slack
     """
     
     __slots__ = ("_stages",)
@@ -111,18 +116,18 @@ class RetryStrategy:
         self._stages = stages
     
     def with_retry(
-        self, max_retries: int = 3, backoff: Backoff | None = None,
+        self, max_retries: int = 3, wait_initial: float = 1.0, wait_max: float = 30.0, timeout: float = 45.0,
         retryable_codes: frozenset[ErrorCode] | None = None,
         on_retry: RetryPolicy.__annotations__.get("on_retry") = None,  # type: ignore[name-defined]
     ) -> RetryStrategy:
-        """Add retry stage. Args: max_retries, backoff (default Exponential), retryable_codes, on_retry callback."""
+        """Add retry stage with stamina-style configuration."""
         return self.with_policy(RetryPolicy(
-            max_retries=max_retries, backoff=backoff or ExponentialBackoff(),
+            max_retries=max_retries, wait_initial=wait_initial, wait_max=wait_max, timeout=timeout,
             retryable_codes=retryable_codes or DEFAULT_RETRYABLE, on_retry=on_retry,
         ))
     
     def with_policy(self, policy: RetryPolicy) -> RetryStrategy:
-        return RetryStrategy((*self._stages, RetryStage(policy)))  # Add retry stage with existing policy
+        return RetryStrategy((*self._stages, RetryStage(policy)))
     
     def with_fallback(
         self, tools: list[BaseModel], *, timeout: float = 30.0, fallback_on: frozenset[ErrorCode] | None = None,
@@ -163,11 +168,10 @@ def _lazy_imports():
 
 
 class ResilientTool:
-    """Tool wrapped with a composable retry strategy.
+    """Tool wrapped with a composable retry strategy using stamina.
     
     Executes strategy stages in order until success or all stages fail.
     Created via RetryStrategy.wrap() or resilient_tool().
-    Implements tool protocol without inheriting BaseTool to avoid circular imports.
     """
     
     __slots__ = ("_tool", "_strategy", "_meta", "_params_schema")
@@ -192,7 +196,7 @@ class ResilientTool:
     
     @property
     def tool(self) -> BaseTool[BaseModel]:
-        return self._tool  # Wrapped primary tool
+        return self._tool
     
     @property
     def strategy(self) -> RetryStrategy:
@@ -214,7 +218,6 @@ class ResilientTool:
         """Execute strategy stages in order until success."""
         params = self._coerce_params(params)
         
-        # Validate params for primary tool
         try:
             tool_params = self._tool.params_schema(**params.input)
         except ValidationError as e:
@@ -224,7 +227,6 @@ class ResilientTool:
             return result
         last_error = result.unwrap_err()
         
-        # Execute each stage
         for stage in self._strategy.stages:
             await checkpoint()
             match stage:
@@ -240,29 +242,47 @@ class ResilientTool:
         return Err(last_error.with_operation(f"resilient:{self._meta.name}"))
     
     def run(self, params: ResilientParams | JsonDict) -> str:
-        return asyncio.get_event_loop().run_until_complete(self.arun(params))  # Sync string result
+        return asyncio.get_event_loop().run_until_complete(self.arun(params))
     
     def run_result(self, params: ResilientParams | JsonDict) -> ToolResult:
-        return asyncio.get_event_loop().run_until_complete(self.arun_result(params))  # Sync Result
+        return asyncio.get_event_loop().run_until_complete(self.arun_result(params))
     
     async def _execute_retry(self, tool_params: BaseModel, policy: RetryPolicy, last_error: ErrorTrace) -> tuple[ToolResult, ErrorTrace]:
-        """Execute retry stage."""
+        """Execute retry stage using stamina."""
         if policy.is_disabled:
             return Err(last_error), last_error
         
-        for attempt in range(policy.max_retries):
-            code = last_error.error_code or ErrorCode.UNKNOWN.value
-            if not policy.should_retry(code, attempt):
-                break
-            delay = policy.get_delay(attempt)
-            logger.info(f"[{self._meta.name}] Retry {attempt + 1}/{policy.max_retries} after {delay:.1f}s (code: {code})")
-            if policy.on_retry:
-                policy.on_retry(attempt, ErrorCode(code), delay)
-            await asyncio.sleep(delay)
-            await checkpoint()
-            if (result := await self._tool.arun_result(tool_params)).is_ok():
-                return result, last_error
-            last_error = result.unwrap_err()
+        attempt = 0
+        
+        async def _try_once() -> ToolResult:
+            nonlocal attempt, last_error
+            result = await self._tool.arun_result(tool_params)
+            if result.is_err():
+                last_error = result.unwrap_err()
+                code = last_error.error_code or ErrorCode.UNKNOWN.value
+                if policy.should_retry(code, attempt):
+                    attempt += 1
+                    logger.info(f"[{self._meta.name}] Retry {attempt}/{policy.max_retries} (code: {code})")
+                    if policy.on_retry:
+                        policy.on_retry(attempt - 1, ErrorCode(code), 0.0)
+                    raise _RetryableResultError(code)
+            return result
+        
+        try:
+            async for attempt_info in stamina.retry_context(
+                on=_RetryableResultError,
+                attempts=policy.max_retries + 1,
+                timeout=timedelta(seconds=policy.timeout) if policy.timeout else None,
+                wait_initial=timedelta(seconds=policy.wait_initial),
+                wait_max=timedelta(seconds=policy.wait_max),
+                wait_jitter=timedelta(seconds=policy.wait_initial * 0.5) if policy.wait_jitter else timedelta(0),
+            ):
+                with attempt_info:
+                    result = await _try_once()
+                    if result.is_ok():
+                        return result, last_error
+        except _RetryableResultError:
+            pass
         
         return Err(last_error), last_error
     
@@ -274,7 +294,7 @@ class ResilientTool:
             try:
                 tool_params = tool.params_schema(**input_dict)
             except ValidationError:
-                continue  # Skip tools that can't accept these params
+                continue
             
             async with CancelScope(timeout=timeout) as scope:
                 result = await tool.arun_result(tool_params)
@@ -285,12 +305,11 @@ class ResilientTool:
             if result.is_ok():
                 return result, last_error
             last_error = result.unwrap_err()
-            # Check if error triggers next fallback
             try:
                 if (ErrorCode(last_error.error_code) if last_error.error_code else ErrorCode.UNKNOWN) not in fallback_on:
-                    break  # Non-fallback error, stop trying
+                    break
             except ValueError:
-                pass  # Unknown code, continue to next fallback
+                pass
         return Err(last_error), last_error
     
     async def _execute_escalate(self, input_dict: JsonDict, handler: _EscalationHandlerProtocol, last_error: ErrorTrace) -> tuple[ToolResult, ErrorTrace]:

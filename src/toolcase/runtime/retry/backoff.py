@@ -1,10 +1,9 @@
-"""Backoff strategies for retry policies.
+"""Backoff strategies for batch retry policies.
 
-Provides pluggable delay calculation for retry attempts:
-- ExponentialBackoff: Exponential growth with optional jitter
-- LinearBackoff: Linear growth with cap
-- ConstantBackoff: Fixed delay
-- DecorrelatedJitter: AWS-style decorrelated jitter (optimal for many retriers)
+Provides pluggable delay calculation for batch-level retries.
+For tool-level retries, stamina handles backoff internally with exponential + jitter.
+
+These are primarily used by BatchRetryPolicy for batch-level retry coordination.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ from typing import Protocol, runtime_checkable
 class Backoff(Protocol):
     """Protocol for backoff delay calculation.
     
-    Implementations compute the delay before the next retry attempt.
+    Implementations compute delay before next retry attempt.
     Attempt numbers are 0-indexed (first retry = attempt 0).
     """
     
@@ -33,14 +32,7 @@ class ExponentialBackoff:
     """Exponential backoff with optional jitter.
     
     Delay = min(base * (multiplier ^ attempt), max_delay) * jitter
-    
     Jitter prevents thundering herd by randomizing delays.
-    
-    Attributes:
-        base: Initial delay in seconds (default: 1.0)
-        max_delay: Maximum delay cap in seconds (default: 30.0)
-        multiplier: Exponential growth factor (default: 2.0)
-        jitter: Add randomization 0.5-1.5x (default: True)
     """
     
     base: float = 1.0
@@ -55,15 +47,7 @@ class ExponentialBackoff:
 
 @dataclass(frozen=True, slots=True)
 class LinearBackoff:
-    """Linear backoff with cap.
-    
-    Delay = min(base + (increment * attempt), max_delay)
-    
-    Attributes:
-        base: Initial delay in seconds (default: 1.0)
-        increment: Additional delay per attempt (default: 1.0)
-        max_delay: Maximum delay cap (default: 30.0)
-    """
+    """Linear backoff with cap. Delay = min(base + (increment * attempt), max_delay)"""
     
     base: float = 1.0
     increment: float = 1.0
@@ -75,13 +59,7 @@ class LinearBackoff:
 
 @dataclass(frozen=True, slots=True)
 class ConstantBackoff:
-    """Fixed delay between retries.
-    
-    Simple strategy for rate-limited APIs with known cooldown.
-    
-    Attributes:
-        delay_seconds: Fixed delay in seconds (default: 1.0)
-    """
+    """Fixed delay between retries. Simple strategy for rate-limited APIs."""
     
     delay_seconds: float = 1.0
     
@@ -94,20 +72,13 @@ class DecorrelatedJitter:
     """AWS-style decorrelated jitter backoff.
     
     Optimal for distributed systems with many retriers.
-    Each delay is independent, bounded between base and previous*3.
-    
     Reference: https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
-    
-    Attributes:
-        base: Minimum delay in seconds (default: 1.0)
-        max_delay: Maximum delay cap (default: 30.0)
     """
     
     base: float = 1.0
     max_delay: float = 30.0
     
     def delay(self, attempt: int) -> float:
-        # Compute chain from start for determinism given attempt
         return reduce(
             lambda prev, _: min(self.max_delay, random.uniform(self.base, prev * 3)),
             range(attempt),

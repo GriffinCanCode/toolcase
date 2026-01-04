@@ -1,12 +1,12 @@
-"""Retry policies for tool execution.
+"""Retry policies for tool execution using stamina.
 
-Provides configurable retry behavior at the tool class level with
-pluggable backoff strategies. Includes composable retry strategies
-for combining retry, fallback, and escalation.
+Provides configurable retry behavior at the tool class level using
+stamina's clean retry API with exponential backoff and jitter.
+Includes composable retry strategies for combining retry, fallback, and escalation.
 
 Example:
     >>> from toolcase import BaseTool, ToolMetadata
-    >>> from toolcase.retry import RetryPolicy, ExponentialBackoff
+    >>> from toolcase.retry import RetryPolicy
     >>> from toolcase.errors import ErrorCode
     >>> 
     >>> class SearchTool(BaseTool[SearchParams]):
@@ -15,7 +15,8 @@ Example:
     ...     
     ...     retry_policy = RetryPolicy(
     ...         max_retries=3,
-    ...         backoff=ExponentialBackoff(base=1.0, max_delay=30.0),
+    ...         wait_initial=1.0,
+    ...         wait_max=30.0,
     ...         retryable_codes=frozenset({ErrorCode.RATE_LIMITED, ErrorCode.TIMEOUT}),
     ...     )
     ...     
@@ -28,7 +29,7 @@ Composed strategies:
     >>> # Fluent builder
     >>> strategy = (
     ...     RetryStrategy()
-    ...     .with_retry(max_retries=3, backoff=ExponentialBackoff())
+    ...     .with_retry(max_retries=3)
     ...     .with_fallback([BackupAPI()])
     ...     .with_escalation("approval_queue")
     ... )
@@ -59,6 +60,7 @@ from .policy import (
     validate_policy,
 )
 
+
 # Lazy imports for strategy module to avoid circular import with BaseTool
 def __getattr__(name: str):
     """Lazy load strategy module components."""
@@ -73,7 +75,7 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    # Backoff strategies
+    # Backoff strategies (for batch retry)
     "Backoff",
     "ExponentialBackoff",
     "LinearBackoff",
