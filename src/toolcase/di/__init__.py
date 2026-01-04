@@ -17,10 +17,11 @@ Example:
     ...     return f"User: {user['name']}"
 """
 
-from .container import Container, Disposable, Factory, Provider, Scope, ScopedContext
+from .container import Container, DIResult, Disposable, Factory, Provider, Scope, ScopedContext
 
 __all__ = [
     "Container",
+    "DIResult",
     "Disposable",
     "Factory",
     "Provider",

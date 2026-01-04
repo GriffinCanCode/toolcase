@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import (
     TYPE_CHECKING,
-    AsyncContextManager,
     Awaitable,
     Callable,
     Protocol,
@@ -31,11 +30,16 @@ from typing import (
     runtime_checkable,
 )
 
+from ..errors import Err, ErrorCode, ErrorTrace, Ok, Result
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
 T = TypeVar("T")
+
+# Type alias for DI resolution results
+DIResult = Result[object, ErrorTrace]
 
 
 class Scope(Enum):
@@ -161,6 +165,56 @@ class Container:
             case Scope.TRANSIENT:
                 return await self._create_instance(provider.factory)
     
+    async def resolve_result(self, name: str, ctx: ScopedContext | None = None) -> DIResult:
+        """Resolve dependency with Result-based error handling.
+        
+        Type-safe alternative to resolve() that returns Result instead of raising.
+        Enables monadic error handling in DI-heavy code paths.
+        
+        Args:
+            name: Provider name to resolve
+            ctx: Scoped context (required for SCOPED dependencies)
+        
+        Returns:
+            Result[object, ErrorTrace] with resolved instance or error
+        
+        Example:
+            >>> result = await container.resolve_result("db", ctx)
+            >>> db = result.unwrap_or_else(lambda e: fallback_db())
+        """
+        if name not in self._providers:
+            return Err(ErrorTrace(
+                message=f"Unknown dependency: {name}",
+                error_code=ErrorCode.NOT_FOUND.value,
+                recoverable=False,
+            ).with_operation("di:resolve", dependency=name))
+        
+        provider = self._providers[name]
+        
+        try:
+            match provider.scope:
+                case Scope.SINGLETON:
+                    return Ok(await self._resolve_singleton(provider))
+                case Scope.SCOPED:
+                    if ctx is None:
+                        return Err(ErrorTrace(
+                            message=f"Scoped dependency '{name}' requires context",
+                            error_code=ErrorCode.INVALID_PARAMS.value,
+                            recoverable=False,
+                        ).with_operation("di:resolve", dependency=name))
+                    return Ok(await self._resolve_scoped(name, provider, ctx))
+                case Scope.TRANSIENT:
+                    return Ok(await self._create_instance(provider.factory))
+        except Exception as e:
+            return Err(ErrorTrace(
+                message=f"Failed to resolve '{name}': {e}",
+                error_code=ErrorCode.EXTERNAL_SERVICE_ERROR.value,
+                recoverable=True,
+            ).with_operation("di:resolve", dependency=name))
+        
+        # Unreachable but satisfies type checker
+        return Err(ErrorTrace(message=f"Unknown scope for {name}"))  # pragma: no cover
+    
     async def resolve_many(
         self,
         names: list[str],
@@ -168,6 +222,28 @@ class Container:
     ) -> dict[str, object]:
         """Resolve multiple dependencies at once."""
         return {name: await self.resolve(name, ctx) for name in names}
+    
+    async def resolve_many_result(
+        self,
+        names: list[str],
+        ctx: ScopedContext | None = None,
+    ) -> Result[dict[str, object], ErrorTrace]:
+        """Resolve multiple dependencies with Result-based error handling.
+        
+        Fails fast on first resolution error.
+        
+        Returns:
+            Result with dict of resolved instances or first error
+        """
+        resolved: dict[str, object] = {}
+        for name in names:
+            result = await self.resolve_result(name, ctx)
+            if result.is_err():
+                return result.map_err(
+                    lambda e: e.with_operation("di:resolve_many", failed_at=name)
+                )
+            resolved[name] = result.unwrap()
+        return Ok(resolved)
     
     async def _resolve_singleton(self, provider: Provider) -> object:
         """Get or create singleton instance (thread-safe)."""

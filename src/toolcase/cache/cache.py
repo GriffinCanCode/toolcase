@@ -12,12 +12,15 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Callable, Protocol, TypeVar, runtime_checkable
+
+from ..errors import Err, ErrorCode, ErrorTrace, Ok, Result
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
 DEFAULT_TTL: float = 300.0  # 5 minutes
+T = TypeVar("T")
 
 
 @dataclass(slots=True)
@@ -217,3 +220,113 @@ def reset_cache() -> None:
     if _cache is not None:
         _cache.clear()
     _cache = None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Result-Based Cache Helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def cache_through(
+    cache: ToolCache,
+    tool_name: str,
+    params: BaseModel | dict[str, object],
+    operation: Callable[[], T],
+    *,
+    ttl: float | None = None,
+) -> Result[T, ErrorTrace]:
+    """Execute operation with cache-through pattern.
+    
+    Checks cache first, executes operation on miss, caches successful results.
+    Returns Result for type-safe error handling.
+    
+    Args:
+        cache: Cache instance to use
+        tool_name: Tool name for cache key
+        params: Parameters for cache key
+        operation: Callable to execute on cache miss
+        ttl: Optional TTL override
+    
+    Returns:
+        Result[T, ErrorTrace] with cached or computed value
+    
+    Example:
+        >>> result = cache_through(
+        ...     cache, "search", params,
+        ...     lambda: expensive_api_call(params),
+        ... )
+        >>> output = result.unwrap_or("fallback")
+    """
+    # Check cache
+    cached = cache.get(tool_name, params)
+    if cached is not None:
+        return Ok(cached)  # type: ignore[return-value]
+    
+    # Execute operation with exception handling
+    try:
+        result = operation()
+    except Exception as e:
+        from ..errors import classify_exception
+        trace = ErrorTrace(
+            message=str(e),
+            error_code=classify_exception(e).value,
+            recoverable=True,
+        ).with_operation(f"cache_through:{tool_name}")
+        return Err(trace)
+    
+    # Cache successful result (only strings are cached)
+    if isinstance(result, str):
+        cache.set(tool_name, params, result, ttl)
+    
+    return Ok(result)
+
+
+async def cache_through_async(
+    cache: ToolCache,
+    tool_name: str,
+    params: BaseModel | dict[str, object],
+    operation: Callable[[], T],
+    *,
+    ttl: float | None = None,
+) -> Result[T, ErrorTrace]:
+    """Async version of cache_through.
+    
+    Checks cache first, executes async operation on miss, caches successful results.
+    
+    Args:
+        cache: Cache instance to use
+        tool_name: Tool name for cache key
+        params: Parameters for cache key
+        operation: Async callable to execute on cache miss
+        ttl: Optional TTL override
+    
+    Returns:
+        Result[T, ErrorTrace] with cached or computed value
+    """
+    import asyncio
+    
+    # Check cache
+    cached = cache.get(tool_name, params)
+    if cached is not None:
+        return Ok(cached)  # type: ignore[return-value]
+    
+    # Execute operation with exception handling
+    try:
+        if asyncio.iscoroutinefunction(operation):
+            result = await operation()  # type: ignore[misc]
+        else:
+            result = await asyncio.to_thread(operation)
+    except Exception as e:
+        from ..errors import classify_exception
+        trace = ErrorTrace(
+            message=str(e),
+            error_code=classify_exception(e).value,
+            recoverable=True,
+        ).with_operation(f"cache_through:{tool_name}")
+        return Err(trace)
+    
+    # Cache successful result (only strings are cached)
+    if isinstance(result, str):
+        cache.set(tool_name, params, result, ttl)
+    
+    return Ok(result)

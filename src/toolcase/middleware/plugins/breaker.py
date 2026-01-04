@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from ...errors import ErrorCode, ToolException, ToolError, classify_exception
+from ...errors import ErrorCode, ErrorTrace, ToolError, ToolException, classify_exception
 from ..middleware import Context, Next
 
 if TYPE_CHECKING:
@@ -149,16 +149,30 @@ class CircuitBreakerMiddleware:
         circuit = self._get_circuit(key)
         state = self._check_state(circuit)
         
-        # Store circuit info in context
+        # Store circuit info in context for observability
         ctx["circuit_state"] = state.name
         ctx["circuit_failures"] = circuit.failures
+        ctx["circuit_key"] = key
         
         # Fail fast if open
         if state == State.OPEN:
+            retry_in = self.recovery_time - (time.time() - circuit.last_state_change)
+            trace = ErrorTrace(
+                message=f"Circuit open - failing fast after {circuit.failures} failures. "
+                        f"Retry in {retry_in:.0f}s",
+                error_code=ErrorCode.EXTERNAL_SERVICE_ERROR.value,
+                recoverable=True,
+            ).with_operation(
+                "middleware:circuit_breaker",
+                tool=tool.metadata.name,
+                state=state.name,
+                failures=circuit.failures,
+                retry_in_seconds=retry_in,
+            )
+            ctx["error_trace"] = trace
             raise ToolException(ToolError.create(
                 tool.metadata.name,
-                f"Circuit open - failing fast after {circuit.failures} failures. "
-                f"Retry in {self.recovery_time - (time.time() - circuit.last_state_change):.0f}s",
+                trace.message,
                 ErrorCode.EXTERNAL_SERVICE_ERROR,
                 recoverable=True,
             ))
@@ -166,23 +180,26 @@ class CircuitBreakerMiddleware:
         try:
             result = await next(tool, params, ctx)
             
-            # Check for error responses
+            # Check for error responses (string-based error detection)
             is_error = result.startswith("**Tool Error")
             if is_error:
-                # Try to extract error code from result
-                code = ErrorCode.EXTERNAL_SERVICE_ERROR  # Default
+                code = ErrorCode.EXTERNAL_SERVICE_ERROR
                 self._record_failure(circuit, code)
             else:
                 self._record_success(circuit)
             
+            # Update context with final state
+            ctx["circuit_state"] = circuit.state.name
             return result
             
         except ToolException as e:
             self._record_failure(circuit, e.error.code)
+            ctx["circuit_state"] = circuit.state.name
             raise
         except Exception as e:
             code = classify_exception(e)
             self._record_failure(circuit, code)
+            ctx["circuit_state"] = circuit.state.name
             raise
     
     def get_state(self, tool_name: str) -> State:

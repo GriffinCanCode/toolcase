@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from ...errors import ErrorCode, ToolException, ToolError, classify_exception
+from ...errors import ErrorCode, ErrorTrace, ToolError, ToolException, classify_exception
 from ...retry import Backoff, ExponentialBackoff
 from ..middleware import Context, Next
 
@@ -38,6 +38,9 @@ class RetryMiddleware:
     NETWORK_ERROR by default). For error-code-based retries on Result types,
     use RetryPolicy on the tool class instead.
     
+    Stores ErrorTrace in context for observability integration, tracking
+    all retry attempts and their outcomes.
+    
     Args:
         max_attempts: Total attempts including initial (minimum 1)
         backoff: Backoff strategy (default: ExponentialBackoff with jitter)
@@ -59,11 +62,23 @@ class RetryMiddleware:
     
     def _should_retry(self, exc: Exception) -> bool:
         """Determine if exception is retryable based on error code."""
-        # ToolExceptions already have classified codes
         if isinstance(exc, ToolException):
             return exc.error.code in self.retryable_codes
-        # Classify other exceptions
         return classify_exception(exc) in self.retryable_codes
+    
+    def _make_trace(self, exc: Exception, tool_name: str, attempt: int) -> ErrorTrace:
+        """Create ErrorTrace from exception with retry context."""
+        code = classify_exception(exc)
+        return ErrorTrace(
+            message=str(exc),
+            error_code=code.value,
+            recoverable=code in self.retryable_codes,
+        ).with_operation(
+            "middleware:retry",
+            tool=tool_name,
+            attempt=attempt + 1,
+            max_attempts=self.max_attempts,
+        )
     
     async def __call__(
         self,
@@ -73,16 +88,26 @@ class RetryMiddleware:
         next: Next,
     ) -> str:
         last_exc: Exception | None = None
+        retry_history: list[dict[str, object]] = []
         
         for attempt in range(self.max_attempts):
             try:
                 result = await next(tool, params, ctx)
                 ctx["retry_attempts"] = attempt + 1
+                ctx["retry_history"] = retry_history
                 return result
             except Exception as e:
                 last_exc = e
                 code = classify_exception(e)
                 ctx["last_error_code"] = code.value
+                
+                # Track retry history for observability
+                retry_history.append({
+                    "attempt": attempt + 1,
+                    "error_code": code.value,
+                    "message": str(e),
+                    "retryable": code in self.retryable_codes,
+                })
                 
                 if attempt + 1 >= self.max_attempts or not self._should_retry(e):
                     break
@@ -95,10 +120,16 @@ class RetryMiddleware:
                 await asyncio.sleep(delay)
         
         ctx["retry_attempts"] = self.max_attempts
+        ctx["retry_history"] = retry_history
         
-        # Wrap non-ToolExceptions for consistent error handling
-        if last_exc and not isinstance(last_exc, ToolException):
-            raise ToolException(ToolError.from_exception(
-                tool.metadata.name, last_exc, recoverable=False
-            )) from last_exc
+        # Create ErrorTrace for the final failure
+        if last_exc:
+            trace = self._make_trace(last_exc, tool.metadata.name, self.max_attempts - 1)
+            ctx["error_trace"] = trace
+            
+            if not isinstance(last_exc, ToolException):
+                raise ToolException(ToolError.from_exception(
+                    tool.metadata.name, last_exc, recoverable=False
+                )) from last_exc
+        
         raise last_exc  # type: ignore[misc]

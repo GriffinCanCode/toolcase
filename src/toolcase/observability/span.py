@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from ..errors import ErrorCode, ErrorTrace
+
 if TYPE_CHECKING:
     from .context import SpanContext
 
@@ -61,6 +63,7 @@ class Span:
         events: Timestamped events during execution
         status: Completion status
         error: Error message if failed
+        error_trace: Full ErrorTrace for structured error info
     
     Example:
         >>> span = Span(name="search", context=SpanContext.new(), kind=SpanKind.TOOL)
@@ -78,6 +81,7 @@ class Span:
     events: list[SpanEvent] = field(default_factory=list)
     status: SpanStatus = SpanStatus.UNSET
     error: str | None = None
+    error_trace: ErrorTrace | None = None
     
     # Tool-specific fields (AI observability)
     tool_name: str | None = None
@@ -119,6 +123,46 @@ class Span:
             self.error = error
         return self
     
+    def record_error(self, trace: ErrorTrace) -> Span:
+        """Record structured error from ErrorTrace.
+        
+        Sets status to ERROR and captures full error context for debugging.
+        Adds error event with code and recoverable status.
+        
+        Args:
+            trace: ErrorTrace with full error context
+        
+        Returns:
+            Self for chaining
+        """
+        self.status = SpanStatus.ERROR
+        self.error = trace.message
+        self.error_trace = trace
+        self.add_event("error", {
+            "message": trace.message,
+            "code": trace.error_code,
+            "recoverable": trace.recoverable,
+            "contexts": [str(c) for c in trace.contexts],
+        })
+        return self
+    
+    def record_exception(self, exc: Exception, *, code: ErrorCode | None = None) -> Span:
+        """Record error from exception.
+        
+        Creates ErrorTrace from exception and records it.
+        
+        Args:
+            exc: Exception to record
+            code: Optional error code override
+        
+        Returns:
+            Self for chaining
+        """
+        from ..errors import classify_exception, trace_from_exc
+        actual_code = code or classify_exception(exc)
+        trace = trace_from_exc(exc, operation=self.name, code=actual_code.value)
+        return self.record_error(trace)
+    
     def set_tool_context(
         self,
         tool_name: str,
@@ -137,19 +181,31 @@ class Span:
         self.result_preview = result[:max_len] + "..." if len(result) > max_len else result
         return self
     
-    def end(self, status: SpanStatus | None = None, error: str | None = None) -> Span:
-        """End the span with optional status."""
+    def end(
+        self,
+        status: SpanStatus | None = None,
+        error: str | ErrorTrace | None = None,
+    ) -> Span:
+        """End the span with optional status.
+        
+        Args:
+            status: Completion status
+            error: Error string or ErrorTrace for structured error capture
+        """
         self.end_time = time.time()
         if status:
             self.status = status
         if error:
-            self.error = error
-            self.status = SpanStatus.ERROR
+            if isinstance(error, ErrorTrace):
+                self.record_error(error)
+            else:
+                self.error = error
+                self.status = SpanStatus.ERROR
         return self
     
     def to_dict(self) -> dict[str, object]:
         """Serialize span for export."""
-        return {
+        result: dict[str, object] = {
             "name": self.name,
             "trace_id": self.context.trace_id,
             "span_id": self.context.span_id,
@@ -172,3 +228,13 @@ class Span:
                 "result_preview": self.result_preview,
             } if self.tool_name else None,
         }
+        # Include structured error info if present
+        if self.error_trace:
+            result["error_trace"] = {
+                "message": self.error_trace.message,
+                "code": self.error_trace.error_code,
+                "recoverable": self.error_trace.recoverable,
+                "contexts": [str(c) for c in self.error_trace.contexts],
+                "details": self.error_trace.details,
+            }
+        return result

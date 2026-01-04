@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from ...errors import ErrorCode, ToolException, ToolError
+from ...errors import ErrorCode, ErrorTrace, ToolError, ToolException
 from ..middleware import Context, Next
 
 if TYPE_CHECKING:
@@ -20,7 +20,7 @@ class TimeoutMiddleware:
     """Enforce execution timeout.
     
     Wraps execution in asyncio.wait_for. Raises ToolException with
-    TIMEOUT code if exceeded.
+    TIMEOUT code if exceeded. Stores ErrorTrace in context for observability.
     
     Args:
         timeout_seconds: Maximum execution time
@@ -44,12 +44,19 @@ class TimeoutMiddleware:
         next: Next,
     ) -> str:
         timeout = self.per_tool_overrides.get(tool.metadata.name, self.timeout_seconds)
+        ctx["timeout_configured"] = timeout
         try:
             return await asyncio.wait_for(next(tool, params, ctx), timeout=timeout)
         except asyncio.TimeoutError:
+            trace = ErrorTrace(
+                message=f"Execution timed out after {timeout}s",
+                error_code=ErrorCode.TIMEOUT.value,
+                recoverable=True,
+            ).with_operation(f"middleware:timeout", tool=tool.metadata.name, timeout=timeout)
+            ctx["error_trace"] = trace
             raise ToolException(ToolError.create(
                 tool.metadata.name,
-                f"Execution timed out after {timeout}s",
+                trace.message,
                 ErrorCode.TIMEOUT,
                 recoverable=True,
             )) from None
