@@ -1,6 +1,6 @@
 # Concurrency Module
 
-Structured concurrency primitives for async/parallel operations with proper cancellation, resource cleanup, and error propagation.
+Structured concurrency primitives for async/parallel operations with proper cancellation, resource cleanup, and error propagation. This is the **unified concurrency layer** for the entire toolcase framework - all async operations should use these primitives.
 
 ## Quick Start
 
@@ -21,8 +21,28 @@ results = await Concurrency.map(process, items, limit=10)
 # Run blocking code from async
 data = await Concurrency.to_thread(blocking_io)
 
-# Run async from sync context
+# Run async from sync context (handles nested event loops!)
 result = Concurrency.run_sync(async_operation())
+```
+
+## Integration with Toolcase
+
+The concurrency module is deeply integrated throughout toolcase:
+
+```python
+from toolcase import Concurrency, to_thread, run_sync, CancelScope
+
+# All tool async execution uses our primitives
+# BaseTool._run_async_sync() uses run_sync()
+# BaseTool._async_run() uses to_thread() for sync operations
+
+# All timeouts use CancelScope
+from toolcase.runtime.middleware import TimeoutMiddleware
+# TimeoutMiddleware wraps execution in CancelScope(timeout=...)
+
+# All parallel execution uses our gather/race
+from toolcase.runtime.pipeline import parallel
+# ParallelTool._async_run_result() uses Concurrency.gather()
 ```
 
 ## Module Structure

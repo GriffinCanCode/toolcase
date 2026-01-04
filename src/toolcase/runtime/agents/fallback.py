@@ -17,13 +17,13 @@ Example:
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, ToolResult
+from toolcase.runtime.concurrency import CancelScope
 
 if TYPE_CHECKING:
     pass
@@ -122,7 +122,7 @@ class FallbackTool(BaseTool[FallbackParams]):
         return result.unwrap_err().message
     
     async def _async_run_result(self, params: FallbackParams) -> ToolResult:
-        """Execute fallback chain with Result-based handling."""
+        """Execute fallback chain with Result-based handling using structured concurrency."""
         last_error: ErrorTrace | None = None
         errors: list[ErrorTrace] = []
         
@@ -139,13 +139,11 @@ class FallbackTool(BaseTool[FallbackParams]):
                 errors.append(trace)
                 continue  # Try next tool
             
-            # Execute with timeout
-            try:
-                result = await asyncio.wait_for(
-                    tool.arun_result(tool_params),
-                    timeout=self._timeout,
-                )
-            except asyncio.TimeoutError:
+            # Execute with timeout using CancelScope
+            async with CancelScope(timeout=self._timeout) as scope:
+                result = await tool.arun_result(tool_params)
+            
+            if scope.cancel_called:
                 trace = ErrorTrace(
                     message=f"Tool {tool.metadata.name} timed out after {self._timeout}s",
                     error_code=ErrorCode.TIMEOUT.value,

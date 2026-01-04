@@ -1,6 +1,8 @@
 """Race primitive for parallel execution with first-wins semantics.
 
 Runs multiple tools concurrently, returns first successful result.
+Uses structured concurrency for clean cancellation and error handling.
+
 Useful for:
 - Provider redundancy (fastest wins)
 - Speculative execution (try multiple approaches)
@@ -23,7 +25,8 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, ToolResult
+from toolcase.runtime.concurrency import CancelScope, checkpoint
 
 if TYPE_CHECKING:
     pass
@@ -101,69 +104,68 @@ class RaceTool(BaseTool[RaceParams]):
         return result.unwrap_err().message
     
     async def _async_run_result(self, params: RaceParams) -> ToolResult:
-        """Execute all tools, return first success."""
+        """Execute all tools, return first success using structured concurrency."""
         input_dict = params.input
+        errors: list[ErrorTrace | None] = [None] * len(self._tools)
+        timed_out = False
         
-        # Create tasks for each tool
-        async def run_tool(tool: BaseTool[BaseModel], idx: int) -> tuple[int, ToolResult]:
+        async def run_tool(idx: int, tool: BaseTool[BaseModel]) -> tuple[int, ToolResult]:
+            await checkpoint()  # Cooperative cancellation point
             try:
                 tool_params = tool.params_schema(**input_dict)
             except ValidationError as e:
-                trace = ErrorTrace(
+                return idx, Err(ErrorTrace(
                     message=f"Tool {tool.metadata.name} params invalid: {e}",
                     error_code=ErrorCode.INVALID_PARAMS.value,
                     recoverable=False,
-                )
-                return idx, Err(trace)
-            
-            result = await tool.arun_result(tool_params)
-            return idx, result
+                ))
+            return idx, await tool.arun_result(tool_params)
         
-        # Start all tasks
-        tasks = [
-            asyncio.create_task(run_tool(tool, i))
-            for i, tool in enumerate(self._tools)
-        ]
-        
-        errors: list[ErrorTrace] = [None] * len(tasks)  # type: ignore
+        tasks = [asyncio.create_task(run_tool(i, t)) for i, t in enumerate(self._tools)]
         pending = set(tasks)
         
         try:
             async with asyncio.timeout(self._timeout):
                 while pending:
-                    done, pending = await asyncio.wait(
-                        pending,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
+                    done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
                     
                     for task in done:
-                        idx, result = task.result()
-                        
-                        if result.is_ok():
-                            # Winner! Cancel remaining and return
-                            for p in pending:
-                                p.cancel()
-                            return result
-                        
-                        # Track error
-                        errors[idx] = result.unwrap_err()
-        
-        except asyncio.TimeoutError:
-            # Timeout - cancel all pending
-            for p in pending:
-                p.cancel()
-            
+                        if task.cancelled():
+                            continue
+                        try:
+                            idx, result = task.result()
+                            if result.is_ok():
+                                # Winner - cancel remaining
+                                for p in pending:
+                                    p.cancel()
+                                return result
+                            errors[idx] = result.unwrap_err()
+                        except Exception:
+                            pass  # Ignore exceptions from cancelled tasks
+        except TimeoutError:
+            timed_out = True
+        finally:
+            # Clean up any remaining tasks
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
             # Wait for cancellations to complete
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+            if any(not t.done() for t in tasks):
+                await asyncio.gather(*tasks, return_exceptions=True)
         
-        # All failed or timed out
+        # Build error response
         valid_errors = [e for e in errors if e is not None]
         
-        if not valid_errors:
+        if timed_out and not valid_errors:
             trace = ErrorTrace(
                 message=f"All {len(self._tools)} racing tools timed out",
                 error_code=ErrorCode.TIMEOUT.value,
+                recoverable=True,
+            )
+        elif not valid_errors:
+            trace = ErrorTrace(
+                message=f"All {len(self._tools)} racing tools failed",
+                error_code=ErrorCode.UNKNOWN.value,
                 recoverable=True,
             )
         else:
@@ -171,8 +173,10 @@ class RaceTool(BaseTool[RaceParams]):
                 message=f"All {len(self._tools)} racing tools failed",
                 error_code=valid_errors[0].error_code,
                 recoverable=any(e.recoverable for e in valid_errors),
-                details="\n".join(f"- [{self._tools[i].metadata.name}] {e.message}" 
-                                  for i, e in enumerate(errors) if e is not None),
+                details="\n".join(
+                    f"- [{self._tools[i].metadata.name}] {e.message}"
+                    for i, e in enumerate(errors) if e is not None
+                ),
             )
         
         return Err(trace.with_operation(f"race:{self._meta.name}"))

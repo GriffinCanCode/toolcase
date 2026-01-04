@@ -20,15 +20,13 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    NonNegativeInt,
-    PositiveFloat,
-    TypeAdapter,
     computed_field,
     field_serializer,
     field_validator,
 )
 
 from toolcase.foundation.errors import ErrorCode
+from toolcase.runtime.concurrency import checkpoint
 
 from .backoff import Backoff, ExponentialBackoff
 
@@ -166,6 +164,7 @@ async def execute_with_retry(
     """Execute async operation with retry policy.
     
     Retries on retryable error codes up to max_retries times.
+    Uses cooperative cancellation for clean shutdown.
     
     Args:
         operation: Async callable returning ToolResult
@@ -175,12 +174,12 @@ async def execute_with_retry(
     Returns:
         ToolResult from successful attempt or last failed attempt
     """
-    from toolcase.foundation.errors import Err, Ok
-    
     result = await operation()
     attempt = 0
     
     while result.is_err() and attempt < policy.max_retries:
+        await checkpoint()  # Cooperative cancellation point
+        
         trace = result.unwrap_err()
         code = trace.error_code
         
@@ -198,6 +197,7 @@ async def execute_with_retry(
             policy.on_retry(attempt, ErrorCode(code) if code else ErrorCode.UNKNOWN, delay)
         
         await asyncio.sleep(delay)
+        await checkpoint()  # Check cancellation after sleep
         result = await operation()
         attempt += 1
     

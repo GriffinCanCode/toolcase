@@ -52,6 +52,8 @@ from typing import (
 
 from pydantic import BaseModel, Field, create_model
 
+from toolcase.runtime.concurrency import to_thread
+
 from toolcase.io.cache import DEFAULT_TTL
 from toolcase.foundation.errors import ToolError, ToolException, ToolResult, classify_exception, ErrorTrace, Result
 from toolcase.foundation.errors.result import _ERR, _OK
@@ -247,7 +249,7 @@ class FunctionTool(BaseTool[BaseModel]):
         if self._is_async:
             result: str = await self._func(**kwargs)  # type: ignore[misc]
             return result
-        return await asyncio.to_thread(self._func, **kwargs)  # type: ignore[arg-type]
+        return await to_thread(self._func, **kwargs)  # type: ignore[arg-type]
     
     async def _async_run_result(self, params: BaseModel) -> ToolResult:
         """Execute asynchronously with Result-based error handling."""

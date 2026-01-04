@@ -250,6 +250,24 @@ from .runtime.agents import (
     router,
 )
 
+# Runtime: Concurrency
+from .runtime.concurrency import (
+    Concurrency,
+    ConcurrencyConfig,
+    TaskGroup,
+    TaskHandle,
+    CancelScope,
+    Lock,
+    Semaphore,
+    Event,
+    Barrier,
+    CapacityLimiter,
+    run_sync,
+    to_thread,
+    AsyncAdapter,
+    SyncAdapter,
+)
+
 # Built-in tools
 from .tools import (
     ApiKeyAuth,
@@ -331,6 +349,11 @@ __all__ = [
     "QueueEscalation", "retry_with_escalation",
     "RaceTool", "race",
     "GateTool", "gate",
+    # Concurrency
+    "Concurrency", "ConcurrencyConfig",
+    "TaskGroup", "TaskHandle", "CancelScope",
+    "Lock", "Semaphore", "Event", "Barrier", "CapacityLimiter",
+    "run_sync", "to_thread", "AsyncAdapter", "SyncAdapter",
     # Convenience
     "init_tools",
 ]

@@ -22,6 +22,7 @@ from toolcase.foundation.core import BaseTool, ToolMetadata
 from toolcase.foundation.di import Container, Factory, Scope, ScopedContext
 from toolcase.foundation.errors import ErrorCode, ToolError, ToolException
 from toolcase.runtime.middleware import Context, Middleware, Next, compose, compose_streaming, StreamMiddleware
+from toolcase.runtime.concurrency import run_sync
 from toolcase.io.streaming import (
     StreamChunk,
     StreamEvent,
@@ -252,12 +253,12 @@ class ToolRegistry:
     ) -> str:
         """Synchronous wrapper for execute().
         
-        For sync callers that need middleware support. Uses asyncio.run()
-        internally, so cannot be called from within an async context.
+        For sync callers that need middleware support. Uses run_sync()
+        which handles nested event loops (FastAPI, Jupyter).
         Returns structured error string on failure.
         """
         try:
-            return asyncio.run(self.execute(name, params, ctx=ctx))
+            return run_sync(self.execute(name, params, ctx=ctx))
         except Exception as e:
             return ToolError.from_exception(name, e, "Sync execution failed").render()
     
@@ -428,7 +429,9 @@ class ToolRegistry:
                 tool_name=name,
             )
         
-        return await asyncio.wait_for(collect(), timeout=timeout)
+        from toolcase.runtime.concurrency import CancelScope
+        async with CancelScope(timeout=timeout):
+            return await collect()
     
     # ─────────────────────────────────────────────────────────────────
     # Querying

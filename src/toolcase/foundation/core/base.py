@@ -11,7 +11,6 @@ import asyncio
 import re
 import time
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -47,6 +46,7 @@ from toolcase.foundation.errors import (
 )
 from toolcase.io.progress import ProgressCallback, ProgressKind, ToolProgress, complete
 from toolcase.runtime.retry import RetryPolicy, execute_with_retry, execute_with_retry_sync
+from toolcase.runtime.concurrency import run_sync, to_thread, CancelScope
 from toolcase.io.streaming import (
     StreamChunk,
     StreamEvent,
@@ -309,7 +309,7 @@ class BaseTool(ABC, Generic[TParams]):
             if asyncio.iscoroutinefunction(operation):
                 result = await operation()  # type: ignore[misc]
             else:
-                result = await asyncio.to_thread(operation)
+                result = await to_thread(operation)
             return Result(result, _OK)
         except Exception as e:
             return self._err_from_exc(e, context)
@@ -328,21 +328,14 @@ class BaseTool(ABC, Generic[TParams]):
     # ─────────────────────────────────────────────────────────────────
     
     def _run_async_sync(self, coro: Coroutine[None, None, str]) -> str:
-        """Run async coroutine from sync context.
+        """Run async coroutine from sync context using structured concurrency.
         
-        Handles edge cases:
-        - Running inside an existing event loop (e.g., FastAPI)
+        Delegates to toolcase.runtime.concurrency.run_sync which handles:
+        - Running inside an existing event loop (e.g., FastAPI, Jupyter)
         - Running in a sync context with no loop
+        - Clean shutdown and resource management
         """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop - just run it
-            return asyncio.run(coro)
-        
-        # Inside a running loop - use thread pool to avoid blocking
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
+        return run_sync(coro)
     
     # ─────────────────────────────────────────────────────────────────
     # Core Execution
@@ -393,7 +386,7 @@ class BaseTool(ABC, Generic[TParams]):
         Default implementation wraps `_run` in a thread. Override for
         native async implementations (e.g., httpx calls).
         """
-        return await asyncio.to_thread(self._run, params)
+        return await to_thread(self._run, params)
     
     async def _async_run_result(self, params: TParams) -> ToolResult:
         """Execute tool asynchronously with Result-based error handling.

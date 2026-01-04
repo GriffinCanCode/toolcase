@@ -1,8 +1,7 @@
-"""Timeout middleware for tool execution."""
+"""Timeout middleware for tool execution using structured concurrency."""
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -10,6 +9,7 @@ from pydantic import BaseModel
 
 from toolcase.foundation.errors import ErrorCode, ErrorTrace, ToolError, ToolException
 from toolcase.runtime.middleware import Context, Next
+from toolcase.runtime.concurrency import CancelScope
 
 if TYPE_CHECKING:
     from toolcase.foundation.core import BaseTool
@@ -17,10 +17,10 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class TimeoutMiddleware:
-    """Enforce execution timeout.
+    """Enforce execution timeout using CancelScope.
     
-    Wraps execution in asyncio.wait_for. Raises ToolException with
-    TIMEOUT code if exceeded. Stores ErrorTrace in context for observability.
+    Uses structured concurrency CancelScope for clean timeout handling.
+    Raises ToolException with TIMEOUT code if exceeded.
     
     Args:
         timeout_seconds: Maximum execution time
@@ -45,18 +45,22 @@ class TimeoutMiddleware:
     ) -> str:
         timeout = self.per_tool_overrides.get(tool.metadata.name, self.timeout_seconds)
         ctx["timeout_configured"] = timeout
-        try:
-            return await asyncio.wait_for(next(tool, params, ctx), timeout=timeout)
-        except asyncio.TimeoutError:
+        
+        async with CancelScope(timeout=timeout) as scope:
+            result = await next(tool, params, ctx)
+        
+        if scope.cancel_called:
             trace = ErrorTrace(
                 message=f"Execution timed out after {timeout}s",
                 error_code=ErrorCode.TIMEOUT.value,
                 recoverable=True,
-            ).with_operation(f"middleware:timeout", tool=tool.metadata.name, timeout=timeout)
+            ).with_operation("middleware:timeout", tool=tool.metadata.name, timeout=timeout)
             ctx["error_trace"] = trace
             raise ToolException(ToolError.create(
                 tool.metadata.name,
                 trace.message,
                 ErrorCode.TIMEOUT,
                 recoverable=True,
-            )) from None
+            ))
+        
+        return result

@@ -18,9 +18,9 @@ from typing import TYPE_CHECKING, Callable, TypeVar
 from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
-from toolcase.foundation.errors import ErrorCode
-from toolcase.foundation.errors import Err, ErrorTrace, Ok, ToolResult, collect_results, sequence
+from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult, collect_results, sequence
 from toolcase.io.streaming import StreamChunk, StreamEvent, StreamEventKind, stream_error
+from toolcase.runtime.concurrency import Concurrency
 
 if TYPE_CHECKING:
     pass
@@ -493,66 +493,54 @@ class ParallelTool(BaseTool[ParallelParams]):
         return result.unwrap_or(result.unwrap_err().message)
     
     async def _async_run_result(self, params: ParallelParams) -> ToolResult:
-        """Execute all tools concurrently."""
-        # Create params for each tool with validation error handling
+        """Execute all tools concurrently using Concurrency.gather."""
         async def run_tool(tool: BaseTool[BaseModel]) -> ToolResult:
             try:
                 tool_params = tool.params_schema(**params.input)
             except ValidationError as e:
-                trace = ErrorTrace(
+                return Err(ErrorTrace(
                     message=f"Params invalid for {tool.metadata.name}: {e}",
                     error_code=ErrorCode.INVALID_PARAMS.value,
                     recoverable=False,
-                )
-                return Err(trace)
+                ))
             return await tool.arun_result(tool_params)
         
-        # Execute all concurrently
-        results = await asyncio.gather(
-            *[run_tool(t) for t in self._tools],
-            return_exceptions=False,
-        )
+        # Execute all concurrently using Concurrency facade
+        results = await Concurrency.gather(*[run_tool(t) for t in self._tools])
         
         # Combine results
         if self._fail_fast:
             sequenced = sequence(list(results))
             if sequenced.is_err():
-                return Err(
-                    sequenced.unwrap_err().with_operation(f"parallel:{self._meta.name}")
-                )
-            # Handle merge errors
+                return Err(sequenced.unwrap_err().with_operation(f"parallel:{self._meta.name}"))
             try:
                 return Ok(self._merge(sequenced.unwrap()))
             except Exception as e:
-                trace = ErrorTrace(
+                return Err(ErrorTrace(
                     message=f"Merge failed in {self._meta.name}: {e}",
                     error_code=ErrorCode.PARSE_ERROR.value,
                     recoverable=False,
-                )
-                return Err(trace)
+                ))
         
         # Collect all (accumulate errors)
         collected = collect_results(list(results))
         if collected.is_err():
             errors = collected.unwrap_err()
-            combined = ErrorTrace(
+            return Err(ErrorTrace(
                 message=f"Multiple failures in {self._meta.name}",
                 contexts=[],
                 error_code=errors[0].error_code if errors else None,
                 recoverable=any(e.recoverable for e in errors),
-            )
-            return Err(combined)
+            ))
         
-        # Handle merge errors
         try:
             return Ok(self._merge(collected.unwrap()))
         except Exception as e:
-            trace = ErrorTrace(
+            return Err(ErrorTrace(
                 message=f"Merge failed in {self._meta.name}: {e}",
                 error_code=ErrorCode.PARSE_ERROR.value,
                 recoverable=False,
-            )
-            return Err(trace)
+            ))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -565,7 +553,12 @@ StreamMerge = Callable[[list[AsyncIterator[str]]], AsyncIterator[str]]
 
 
 async def interleave_streams(streams: list[AsyncIterator[str]]) -> AsyncIterator[str]:
-    """Default stream merge: interleave chunks round-robin as they arrive."""
+    """Default stream merge: interleave chunks round-robin as they arrive.
+    
+    Uses cooperative cancellation via checkpoint() for clean shutdown.
+    """
+    from toolcase.runtime.concurrency import checkpoint
+    
     pending: dict[int, asyncio.Task[tuple[int, str | None]]] = {}
     active_streams: set[int] = set(range(len(streams)))
     
@@ -580,16 +573,15 @@ async def interleave_streams(streams: list[AsyncIterator[str]]) -> AsyncIterator
         pending[i] = asyncio.create_task(get_next(i, stream))
     
     while pending:
+        await checkpoint()  # Cooperative cancellation point
         done, _ = await asyncio.wait(pending.values(), return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             idx, chunk = task.result()
             if chunk is None:
-                # Stream exhausted
                 active_streams.discard(idx)
                 del pending[idx]
             else:
                 yield chunk
-                # Re-arm this stream
                 if idx in active_streams:
                     pending[idx] = asyncio.create_task(get_next(idx, streams[idx]))
 

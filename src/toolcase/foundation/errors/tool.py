@@ -10,6 +10,7 @@ from typing import TypeAlias
 from .errors import ErrorCode, ToolError, classify_exception
 from .result import Result, _ERR, _OK, collect_results, sequence
 from .types import ErrorContext, ErrorTrace, _EMPTY_CONTEXTS
+from toolcase.runtime.concurrency import to_thread
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Type Aliases
@@ -99,7 +100,7 @@ async def try_tool_operation_async(
 ) -> ToolResult:
     """Async version - executes sync or async operation, converts exceptions to Result."""
     try:
-        result = await operation() if asyncio.iscoroutinefunction(operation) else await asyncio.to_thread(operation)  # type: ignore[misc]
+        result = await operation() if asyncio.iscoroutinefunction(operation) else await to_thread(operation)  # type: ignore[misc]
         return Result(result, _OK)
     except Exception as e:
         return Result(_make_error_trace(tool_name, e, context), _ERR)

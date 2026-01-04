@@ -37,13 +37,20 @@ __all__ = [
     "Backoff", "ExponentialBackoff", "LinearBackoff", "ConstantBackoff", "DecorrelatedJitter",
     "RetryPolicy", "DEFAULT_RETRYABLE", "NO_RETRY",
     "execute_with_retry", "execute_with_retry_sync",
-    # Concurrency (unified facade + direct exports)
-    "Concurrency",  # Primary unified facade
+    # Concurrency - Unified Facade (PRIMARY)
+    "Concurrency", "ConcurrencyConfig",
+    # Concurrency - Task Management
     "TaskGroup", "TaskHandle", "TaskState", "CancelScope",
+    "checkpoint", "shield", "spawn",
+    # Concurrency - Synchronization
     "Lock", "RLock", "Semaphore", "BoundedSemaphore", "Event", "Condition", "Barrier", "CapacityLimiter",
+    # Concurrency - Pools
     "ThreadPool", "ProcessPool", "run_in_thread", "run_in_process",
+    # Concurrency - Wait Strategies
     "race_async", "gather_async", "gather_settled", "first_success", "map_async", "all_settled",
+    # Concurrency - Streams
     "merge_streams", "interleave_streams_async", "buffer_stream", "throttle_stream", "batch_stream",
+    # Concurrency - Interop
     "run_sync", "run_async", "from_thread", "to_thread", "AsyncAdapter", "SyncAdapter",
 ]
 
@@ -107,20 +114,28 @@ def __getattr__(name: str):
         return getattr(retry, name)
     
     concurrency_attrs = {
-        "Concurrency",  # Unified facade
+        # Unified facade
+        "Concurrency", "ConcurrencyConfig",
+        # Task management
         "TaskGroup", "TaskHandle", "TaskState", "CancelScope",
+        "checkpoint", "shield", "spawn",
+        # Synchronization
         "Lock", "RLock", "Semaphore", "BoundedSemaphore", "Event", "Condition", "Barrier", "CapacityLimiter",
+        # Pools
         "ThreadPool", "ProcessPool", "run_in_thread", "run_in_process",
+        # Wait strategies
         "race_async", "gather_async", "gather_settled", "first_success", "map_async", "all_settled",
+        # Streams
         "merge_streams", "interleave_streams_async", "buffer_stream", "throttle_stream", "batch_stream",
+        # Interop
         "run_sync", "run_async", "from_thread", "to_thread", "AsyncAdapter", "SyncAdapter",
     }
     if name in concurrency_attrs:
         from . import concurrency
-        # Map renamed exports
+        # Map public names to internal implementation names
         attr_map = {
-            "race_async": "race",
-            "gather_async": "gather",
+            "race_async": "race_coros",
+            "gather_async": "gather_coros",
             "interleave_streams_async": "interleave_streams",
         }
         return getattr(concurrency, attr_map.get(name, name))

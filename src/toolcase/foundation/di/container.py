@@ -31,6 +31,7 @@ from typing import (
 )
 
 from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, Result
+from toolcase.runtime.concurrency import Lock
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -117,7 +118,7 @@ class Container:
     
     def __init__(self) -> None:
         self._providers: dict[str, Provider] = {}
-        self._lock = asyncio.Lock()
+        self._lock = Lock()
     
     def provide(
         self,

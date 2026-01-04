@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from toolcase.foundation.core.base import BaseTool, ToolMetadata
 from toolcase.foundation.errors import Err, ErrorCode, ErrorTrace, Ok, ToolResult
+from toolcase.runtime.concurrency import to_thread, checkpoint
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -167,6 +168,7 @@ class QueueEscalation:
             if result is not None:
                 return result
             
+            await checkpoint()
             await asyncio.sleep(self.poll_interval)
             elapsed += self.poll_interval
         
@@ -198,7 +200,7 @@ class CallbackEscalation:
     
     async def escalate(self, request: EscalationRequest) -> EscalationResult:
         """Call callback and interpret result."""
-        result = await asyncio.to_thread(self.callback, request)
+        result = await to_thread(self.callback, request)
         
         if isinstance(result, EscalationResult):
             return result
@@ -331,6 +333,7 @@ class EscalationTool(BaseTool[EscalationParams]):
             
             attempt += 1
             logger.info(f"[{self._meta.name}] Retry {attempt}/{self._max_retries}")
+            await checkpoint()
             await asyncio.sleep(0.5 * attempt)  # Simple backoff
         
         # Exhausted retries - escalate to human

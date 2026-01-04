@@ -16,7 +16,7 @@ from toolcase.tools import (
     NoAuth,
     standard_tools,
 )
-from toolcase.tools.http import AuthStrategy
+from toolcase.tools.prebuilt.http import AuthStrategy
 
 
 # ─────────────────────────────────────────────────────────────────────────────

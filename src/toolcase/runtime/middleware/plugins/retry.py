@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from toolcase.foundation.errors import ErrorCode, ErrorTrace, ToolError, ToolException, classify_exception
+from toolcase.runtime.concurrency import checkpoint
 from ...retry import Backoff, ExponentialBackoff
 from toolcase.runtime.middleware import Context, Next
 
@@ -117,6 +118,7 @@ class RetryMiddleware:
                     f"[{tool.metadata.name}] Attempt {attempt + 1} failed ({code}): {e}. "
                     f"Retrying in {delay:.1f}s"
                 )
+                await checkpoint()
                 await asyncio.sleep(delay)
         
         ctx["retry_attempts"] = self.max_attempts
