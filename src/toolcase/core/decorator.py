@@ -53,7 +53,9 @@ from typing import (
 from pydantic import BaseModel, Field, create_model
 
 from ..cache import DEFAULT_TTL
-from ..errors import ToolError, ToolException
+from ..errors import ToolError, ToolException, ToolResult, classify_exception, ErrorTrace, Result
+from ..errors.result import _ERR, _OK
+from ..errors.types import _EMPTY_CONTEXTS, ErrorContext
 from .base import BaseTool, ToolMetadata
 
 if TYPE_CHECKING:
@@ -173,7 +175,7 @@ class FunctionTool(BaseTool[BaseModel]):
     dependencies are resolved from the registry's DI container at execution time.
     """
     
-    __slots__ = ("_func", "_is_async", "_original_func", "_inject")
+    __slots__ = ("_func", "_is_async", "_original_func", "_inject", "_tool_ctx")
     
     def __init__(
         self,
@@ -189,6 +191,8 @@ class FunctionTool(BaseTool[BaseModel]):
         self._is_async = asyncio.iscoroutinefunction(func) or inspect.isasyncgenfunction(func)
         self._original_func = func
         self._inject = inject or []
+        # Pre-compute tool context tuple (avoid repeated allocation)
+        self._tool_ctx = (ErrorContext(f"tool:{metadata.name}", "", {}),)
         
         # Use the actual class being instantiated as base (supports subclasses)
         base_cls = type(self)
@@ -213,12 +217,23 @@ class FunctionTool(BaseTool[BaseModel]):
         Exceptions propagate to _run_result() which handles conversion to Result.
         """
         kwargs = params.model_dump()
-        # Merge injected dependencies
         if self._inject:
             kwargs.update(_injected_deps.get())
         if self._is_async:
             return self._run_async_sync(self._func(**kwargs))  # type: ignore[arg-type]
         return self._func(**kwargs)  # type: ignore[return-value]
+    
+    def _run_result(self, params: BaseModel) -> ToolResult:
+        """Execute with Result-based error handling (optimized path)."""
+        try:
+            kwargs = params.model_dump()
+            if self._inject:
+                kwargs.update(_injected_deps.get())
+            if self._is_async:
+                return Result(self._run_async_sync(self._func(**kwargs)), _OK)  # type: ignore[arg-type]
+            return Result(self._func(**kwargs), _OK)  # type: ignore[arg-type]
+        except Exception as e:
+            return self._make_err(e, "execution")
     
     async def _async_run(self, params: BaseModel) -> str:
         """Execute the wrapped function asynchronously.
@@ -227,13 +242,35 @@ class FunctionTool(BaseTool[BaseModel]):
         Exceptions propagate to _async_run_result() which handles conversion.
         """
         kwargs = params.model_dump()
-        # Merge injected dependencies
         if self._inject:
             kwargs.update(_injected_deps.get())
         if self._is_async:
             result: str = await self._func(**kwargs)  # type: ignore[misc]
             return result
         return await asyncio.to_thread(self._func, **kwargs)  # type: ignore[arg-type]
+    
+    async def _async_run_result(self, params: BaseModel) -> ToolResult:
+        """Execute asynchronously with Result-based error handling."""
+        try:
+            kwargs = params.model_dump()
+            if self._inject:
+                kwargs.update(_injected_deps.get())
+            if self._is_async:
+                result: str = await self._func(**kwargs)  # type: ignore[misc]
+            else:
+                result = await asyncio.to_thread(self._func, **kwargs)  # type: ignore[arg-type]
+            return Result(result, _OK)
+        except Exception as e:
+            return self._make_err(e, "async execution")
+    
+    def _make_err(self, exc: Exception, context: str) -> ToolResult:
+        """Create Err result from exception (internal, optimized)."""
+        import traceback
+        msg = f"{context}: {exc}" if context else str(exc)
+        return Result(
+            ErrorTrace(msg, self._tool_ctx, classify_exception(exc).value, True, traceback.format_exc()),
+            _ERR,
+        )
     
     @property
     def func(self) -> Callable[..., str]:
@@ -298,9 +335,26 @@ class ResultStreamingFunctionTool(FunctionTool):
             parts.append(chunk)
         return "".join(parts)
     
+    async def _async_run_result(self, params: BaseModel) -> ToolResult:
+        """Execute by collecting all stream chunks, with Result handling."""
+        try:
+            parts: list[str] = []
+            async for chunk in self.stream_result(params):
+                parts.append(chunk)
+            return Result("".join(parts), _OK)
+        except Exception as e:
+            return self._make_err(e, "async execution")
+    
     def _run(self, params: BaseModel) -> str:
         """Sync execution via async collection."""
         return self._run_async_sync(self._async_run(params))
+    
+    def _run_result(self, params: BaseModel) -> ToolResult:
+        """Sync execution via async collection, with Result handling."""
+        try:
+            return Result(self._run_async_sync(self._async_run(params)), _OK)
+        except Exception as e:
+            return self._make_err(e, "execution")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -23,8 +23,16 @@ from typing import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..cache import DEFAULT_TTL, get_cache
-from ..errors import ErrorCode, ToolError
-from ..errors import Result, ToolResult, result_to_string, string_to_result
+from ..errors import (
+    ErrorCode,
+    ErrorTrace,
+    Result,
+    ToolError,
+    ToolResult,
+    classify_exception,
+    result_to_string,
+    string_to_result,
+)
 from ..progress import ProgressCallback, ProgressKind, ToolProgress, complete
 from ..retry import RetryPolicy, execute_with_retry, execute_with_retry_sync
 from ..streaming import (
@@ -39,6 +47,9 @@ from ..streaming import (
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
+
+# Internal constants for fast Result construction
+from ..errors.result import _ERR, _OK
 
 
 class ToolMetadata(BaseModel):
@@ -143,12 +154,11 @@ class BaseTool(ABC, Generic[TParams]):
             Formatted error string for LLM consumption
         """
         import traceback
-        
         details = traceback.format_exc() if include_trace else None
-        return ToolError.create(
-            self.metadata.name,
-            message,
-            code,
+        return ToolError(
+            tool_name=self.metadata.name,
+            message=message,
+            code=code,
             recoverable=recoverable,
             details=details,
         ).render()
@@ -161,9 +171,7 @@ class BaseTool(ABC, Generic[TParams]):
         recoverable: bool = True,
     ) -> str:
         """Create error response from caught exception."""
-        return ToolError.from_exception(
-            self.metadata.name, exc, context, recoverable=recoverable
-        ).render()
+        return ToolError.from_exception(self.metadata.name, exc, context, recoverable=recoverable).render()
     
     # ─────────────────────────────────────────────────────────────────
     # Result Helpers
@@ -171,8 +179,7 @@ class BaseTool(ABC, Generic[TParams]):
     
     def _ok(self, value: str) -> ToolResult:
         """Create Ok result (convenience method)."""
-        from ..errors import Ok
-        return Ok(value)
+        return Result(value, _OK)
     
     def _err(
         self,
@@ -182,13 +189,9 @@ class BaseTool(ABC, Generic[TParams]):
         recoverable: bool = True,
     ) -> ToolResult:
         """Create Err result from error parameters."""
-        from ..errors import tool_result
-        return tool_result(
-            self.metadata.name,
-            message,
-            code=code,
-            recoverable=recoverable,
-        )
+        from ..errors.types import _EMPTY_CONTEXTS, ErrorContext, _EMPTY_META
+        ctx = (ErrorContext(f"tool:{self.metadata.name}", "", _EMPTY_META),)
+        return Result(ErrorTrace(message, ctx, code.value, recoverable, None), _ERR)
     
     def _try(
         self,
@@ -197,12 +200,10 @@ class BaseTool(ABC, Generic[TParams]):
         context: str = "",
     ) -> ToolResult:
         """Execute operation with automatic exception handling."""
-        from ..errors import try_tool_operation
-        return try_tool_operation(
-            self.metadata.name,
-            operation,
-            context=context,
-        )
+        try:
+            return Result(operation(), _OK)
+        except Exception as e:
+            return self._err_from_exc(e, context)
     
     async def _try_async(
         self,
@@ -211,12 +212,23 @@ class BaseTool(ABC, Generic[TParams]):
         context: str = "",
     ) -> ToolResult:
         """Execute async operation with automatic exception handling."""
-        from ..errors import try_tool_operation_async
-        return await try_tool_operation_async(
-            self.metadata.name,
-            operation,
-            context=context,
-        )
+        try:
+            if asyncio.iscoroutinefunction(operation):
+                result = await operation()  # type: ignore[misc]
+            else:
+                result = await asyncio.to_thread(operation)
+            return Result(result, _OK)
+        except Exception as e:
+            return self._err_from_exc(e, context)
+    
+    def _err_from_exc(self, exc: Exception, context: str = "") -> ToolResult:
+        """Create Err result from exception (internal helper)."""
+        import traceback
+        from ..errors.types import _EMPTY_META, ErrorContext
+        msg = f"{context}: {exc}" if context else str(exc)
+        tool_ctx = ErrorContext(f"tool:{self.metadata.name}", "", _EMPTY_META)
+        contexts = (tool_ctx, ErrorContext(context, "", _EMPTY_META)) if context else (tool_ctx,)
+        return Result(ErrorTrace(msg, contexts, classify_exception(exc).value, True, traceback.format_exc()), _ERR)
     
     # ─────────────────────────────────────────────────────────────────
     # Async/Sync Interop
@@ -263,12 +275,10 @@ class BaseTool(ABC, Generic[TParams]):
         Returns:
             ToolResult (Result[str, ErrorTrace]) with success or error
         """
-        from ..errors import try_tool_operation
-        return try_tool_operation(
-            self.metadata.name,
-            lambda: self._run(params),
-            context="execution",
-        )
+        try:
+            return Result(self._run(params), _OK)
+        except Exception as e:
+            return self._err_from_exc(e, "execution")
     
     @abstractmethod
     def _run(self, params: TParams) -> str:
@@ -298,21 +308,11 @@ class BaseTool(ABC, Generic[TParams]):
         Override for native async implementations using Result types.
         Catches exceptions and converts them to Err results.
         """
-        from ..errors import Ok, Err, ErrorTrace, classify_exception
-        
         try:
             result = await self._async_run(params)
             return string_to_result(result, self.metadata.name)
         except Exception as e:
-            import traceback
-            code = classify_exception(e)
-            trace = ErrorTrace(
-                message=f"async execution: {e}",
-                error_code=code.value,
-                recoverable=True,
-                details=traceback.format_exc(),
-            ).with_operation(f"tool:{self.metadata.name}")
-            return Err(trace)
+            return self._err_from_exc(e, "async execution")
     
     def run(self, params: TParams) -> str:
         """Execute with caching support.

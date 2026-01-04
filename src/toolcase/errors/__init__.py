@@ -7,7 +7,7 @@
 """
 
 from .errors import ErrorCode, ToolError, ToolException, classify_exception
-from .result import Err, Ok, Result, collect_results, sequence, traverse
+from .result import Err, Ok, Result, collect_results, sequence, traverse, try_fn
 from .tool import (
     ToolResult,
     batch_results,
@@ -20,18 +20,18 @@ from .tool import (
     try_tool_operation,
     try_tool_operation_async,
 )
-from .types import ErrorContext, ErrorTrace, ResultT, context, trace
+from .types import ErrorContext, ErrorTrace, ResultT, context, trace, trace_from_exc
 
 __all__ = [
     # Core errors
     "ErrorCode", "ToolError", "ToolException", "classify_exception",
     # Result monad
-    "Result", "Ok", "Err", "ResultT",
+    "Result", "Ok", "Err", "ResultT", "try_fn",
     # Tool integration
     "ToolResult", "tool_result", "ok_result", "try_tool_operation", "try_tool_operation_async",
     "batch_results", "from_tool_error", "to_tool_error", "result_to_string", "string_to_result",
     # Error context
-    "ErrorContext", "ErrorTrace", "context", "trace",
+    "ErrorContext", "ErrorTrace", "context", "trace", "trace_from_exc",
     # Collection ops
     "sequence", "traverse", "collect_results",
 ]

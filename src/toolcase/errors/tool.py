@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 import traceback
 from collections.abc import Awaitable, Callable
 from typing import TypeAlias
 
 from .errors import ErrorCode, ToolError, classify_exception
-from .result import Err, Ok, Result, _ERR, _OK
-from .types import ErrorTrace
+from .result import Result, _ERR, _OK, collect_results, sequence
+from .types import ErrorContext, ErrorTrace, _EMPTY_CONTEXTS
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Type Aliases
 # ═══════════════════════════════════════════════════════════════════════════════
 
 ToolResult: TypeAlias = Result[str, ErrorTrace]
+
+# Empty metadata dict singleton
+_EMPTY_META: dict[str, object] = {}
+
+
+def _tool_ctx(tool_name: str) -> tuple[ErrorContext, ...]:
+    """Create single-element context tuple for tool."""
+    return (ErrorContext(f"tool:{tool_name}", "", _EMPTY_META),)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -31,38 +40,27 @@ def tool_result(
     details: str | None = None,
 ) -> ToolResult:
     """Create Err ToolResult from error parameters."""
-    return Err(
-        ErrorTrace(message, (), code.value, recoverable, details).with_operation(f"tool:{tool_name}")
-    )
+    return Result(ErrorTrace(message, _tool_ctx(tool_name), code.value, recoverable, details), _ERR)
 
 
 def from_tool_error(error: ToolError) -> ToolResult:
     """Convert ToolError to Result type."""
-    return Err(
-        ErrorTrace(error.message, (), error.code.value, error.recoverable, error.details)
-        .with_operation(f"tool:{error.tool_name}")
-    )
+    return Result(ErrorTrace(error.message, _tool_ctx(error.tool_name), error.code.value, error.recoverable, error.details), _ERR)
 
 
 def to_tool_error(result: ToolResult, tool_name: str) -> ToolError:
     """Convert Err Result to ToolError. Raises ValueError if Ok."""
     if result._is_ok:
         raise ValueError("Cannot convert Ok result to ToolError")
-    
-    trace: ErrorTrace = result._value  # type: ignore[assignment]
-    
-    # Extract error code
-    code = ErrorCode.UNKNOWN
-    if trace.error_code:
-        try:
-            code = ErrorCode(trace.error_code)
-        except ValueError:
-            pass
-    
-    # Format contexts into message
-    message = f"{trace.message} [{' <- '.join(map(str, trace.contexts))}]" if trace.contexts else trace.message
-    
-    return ToolError(tool_name=tool_name, message=message, code=code, recoverable=trace.recoverable, details=trace.details)
+
+    tr: ErrorTrace = result._value  # type: ignore[assignment]
+    try:
+        code = ErrorCode(tr.error_code) if tr.error_code else ErrorCode.UNKNOWN
+    except ValueError:
+        code = ErrorCode.UNKNOWN
+
+    msg = f"{tr.message} [{' <- '.join(map(str, tr.contexts))}]" if tr.contexts else tr.message
+    return ToolError(tool_name=tool_name, message=msg, code=code, recoverable=tr.recoverable, details=tr.details)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -75,12 +73,11 @@ def ok_result(value: str) -> ToolResult:
     return Result(value, _OK)
 
 
-def _make_error_trace(tool_name: str, e: Exception, context: str) -> ErrorTrace:
+def _make_error_trace(tool_name: str, e: Exception, ctx: str) -> ErrorTrace:
     """Internal helper to build ErrorTrace from exception."""
-    message = f"{context}: {e}" if context else str(e)
-    trace = ErrorTrace(message, (), classify_exception(e).value, True, traceback.format_exc())
-    trace = trace.with_operation(f"tool:{tool_name}")
-    return trace.with_operation(context) if context else trace
+    msg = f"{ctx}: {e}" if ctx else str(e)
+    contexts = (ErrorContext(f"tool:{tool_name}", "", _EMPTY_META), ErrorContext(ctx, "", _EMPTY_META)) if ctx else _tool_ctx(tool_name)
+    return ErrorTrace(msg, contexts, classify_exception(e).value, True, traceback.format_exc())
 
 
 def try_tool_operation(tool_name: str, operation: Callable[[], str], *, context: str = "") -> ToolResult:
@@ -98,7 +95,6 @@ async def try_tool_operation_async(
     context: str = "",
 ) -> ToolResult:
     """Async version - executes sync or async operation, converts exceptions to Result."""
-    import asyncio
     try:
         result = await operation() if asyncio.iscoroutinefunction(operation) else await asyncio.to_thread(operation)  # type: ignore[misc]
         return Result(result, _OK)
@@ -119,10 +115,7 @@ def result_to_string(result: ToolResult, tool_name: str) -> str:
 def string_to_result(output: str, tool_name: str) -> ToolResult:
     """Parse string to ToolResult. Detects error strings by '**Tool Error' prefix."""
     if output.startswith("**Tool Error"):
-        return Result(
-            ErrorTrace(output, (), ErrorCode.UNKNOWN.value, True, None).with_operation(f"tool:{tool_name}"),
-            _ERR,
-        )
+        return Result(ErrorTrace(output, _tool_ctx(tool_name), ErrorCode.UNKNOWN.value, True, None), _ERR)
     return Result(output, _OK)
 
 
@@ -133,8 +126,6 @@ def string_to_result(output: str, tool_name: str) -> ToolResult:
 
 def batch_results(results: list[ToolResult], *, accumulate_errors: bool = False) -> ToolResult:
     """Combine multiple ToolResults. accumulate_errors=True collects all errors, False fails fast."""
-    from .result import collect_results, sequence
-    
     if accumulate_errors:
         collected = collect_results(results)
         if collected._is_ok:
@@ -143,13 +134,13 @@ def batch_results(results: list[ToolResult], *, accumulate_errors: bool = False)
         return Result(
             ErrorTrace(
                 f"Multiple errors:\n{chr(10).join(e.message for e in errors)}",
-                (),
+                _EMPTY_CONTEXTS,
                 errors[0].error_code if errors else None,
                 any(e.recoverable for e in errors),
             ),
             _ERR,
         )
-    
+
     # Fail fast
-    sequenced = sequence(results)
-    return Result("\n".join(sequenced._value), _OK) if sequenced._is_ok else Result(sequenced._value, _ERR)  # type: ignore[arg-type]
+    seq = sequence(results)
+    return Result("\n".join(seq._value), _OK) if seq._is_ok else seq  # type: ignore[arg-type,return-value]
