@@ -17,7 +17,7 @@ from .backoff import Backoff, ExponentialBackoff
 if TYPE_CHECKING:
     from collections.abc import Awaitable
 
-    from ..monads import ToolResult
+    from ..errors import ToolResult
 
 
 logger = logging.getLogger("toolcase.retry")
@@ -109,7 +109,7 @@ async def execute_with_retry(
     Returns:
         ToolResult from successful attempt or last failed attempt
     """
-    from ..monads import Err, Ok
+    from ..errors import Err, Ok
     
     result = await operation()
     attempt = 0

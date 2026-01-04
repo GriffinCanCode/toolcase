@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, TypeAlias
 
-from ..errors import ErrorCode, ToolError
+from .errors import ErrorCode, ToolError, classify_exception
 from .result import Err, Ok, Result
 from .types import ErrorTrace
 
@@ -186,9 +186,6 @@ def try_tool_operation(
     try:
         return Ok(operation())
     except Exception as e:
-        # Import here to avoid circular dependency
-        from ..errors import classify_exception
-        
         code = classify_exception(e)
         message = f"{context}: {e}" if context else str(e)
         
@@ -229,12 +226,9 @@ async def try_tool_operation_async(
             result = await asyncio.to_thread(operation)
         return Ok(result)
     except Exception as e:
-        from ..errors import classify_exception
-        
+        import traceback
         code = classify_exception(e)
         message = f"{context}: {e}" if context else str(e)
-        
-        import traceback
         details = traceback.format_exc()
         
         trace = ErrorTrace(

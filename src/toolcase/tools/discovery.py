@@ -11,7 +11,7 @@ from typing import ClassVar, Literal
 from pydantic import BaseModel, Field
 
 from ..core import BaseTool, ToolMetadata
-from ..monads import Ok, ToolResult
+from ..errors import Ok, ToolResult
 from ..registry import get_registry
 
 
@@ -68,7 +68,7 @@ class DiscoveryTool(BaseTool[DiscoveryParams]):
     
     def _run(self, params: DiscoveryParams) -> str:
         """String-based fallback."""
-        from ..monads.tool import result_to_string
+        from ..errors import result_to_string
         return result_to_string(self._run_result(params), self.metadata.name)
     
     def _format_brief(self, tools: list[ToolMetadata], category: str | None) -> str:

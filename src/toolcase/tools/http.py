@@ -39,8 +39,7 @@ from pydantic import BaseModel, Discriminator, Field, Tag, field_validator
 
 from ..core import ToolMetadata
 from ..errors import ErrorCode
-from ..monads import Err, Ok, ToolResult
-from ..monads.types import ErrorTrace
+from ..errors import Err, ErrorTrace, Ok, ToolResult
 from .base import ConfigurableTool, ToolConfig
 
 # Type alias for HTTP methods
@@ -496,7 +495,7 @@ class HttpTool(ConfigurableTool[HttpParams, HttpConfig]):
     
     async def _async_run(self, params: HttpParams) -> str:
         """Execute HTTP request."""
-        from ..monads.tool import result_to_string
+        from ..errors import result_to_string
         result = await self._async_run_result(params)
         return result_to_string(result, self.metadata.name)
     

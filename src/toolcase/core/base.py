@@ -24,8 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..cache import DEFAULT_TTL, get_cache
 from ..errors import ErrorCode, ToolError
-from ..monads import Result, ToolResult
-from ..monads.tool import result_to_string, string_to_result
+from ..errors import Result, ToolResult, result_to_string, string_to_result
 from ..progress import ProgressCallback, ProgressKind, ToolProgress, complete
 from ..retry import RetryPolicy, execute_with_retry, execute_with_retry_sync
 from ..streaming import (
@@ -172,7 +171,7 @@ class BaseTool(ABC, Generic[TParams]):
     
     def _ok(self, value: str) -> ToolResult:
         """Create Ok result (convenience method)."""
-        from ..monads import Ok
+        from ..errors import Ok
         return Ok(value)
     
     def _err(
@@ -183,7 +182,7 @@ class BaseTool(ABC, Generic[TParams]):
         recoverable: bool = True,
     ) -> ToolResult:
         """Create Err result from error parameters."""
-        from ..monads import tool_result
+        from ..errors import tool_result
         return tool_result(
             self.metadata.name,
             message,
@@ -198,7 +197,7 @@ class BaseTool(ABC, Generic[TParams]):
         context: str = "",
     ) -> ToolResult:
         """Execute operation with automatic exception handling."""
-        from ..monads.tool import try_tool_operation
+        from ..errors import try_tool_operation
         return try_tool_operation(
             self.metadata.name,
             operation,
@@ -212,7 +211,7 @@ class BaseTool(ABC, Generic[TParams]):
         context: str = "",
     ) -> ToolResult:
         """Execute async operation with automatic exception handling."""
-        from ..monads.tool import try_tool_operation_async
+        from ..errors import try_tool_operation_async
         return await try_tool_operation_async(
             self.metadata.name,
             operation,
@@ -264,9 +263,7 @@ class BaseTool(ABC, Generic[TParams]):
         Returns:
             ToolResult (Result[str, ErrorTrace]) with success or error
         """
-        from ..monads.tool import try_tool_operation
-        
-        # Use try_tool_operation for automatic exception handling
+        from ..errors import try_tool_operation
         return try_tool_operation(
             self.metadata.name,
             lambda: self._run(params),
@@ -301,9 +298,7 @@ class BaseTool(ABC, Generic[TParams]):
         Override for native async implementations using Result types.
         Catches exceptions and converts them to Err results.
         """
-        from ..monads import Ok, Err
-        from ..monads.types import ErrorTrace
-        from ..errors import classify_exception
+        from ..errors import Ok, Err, ErrorTrace, classify_exception
         
         try:
             result = await self._async_run(params)

@@ -14,7 +14,7 @@ from typing import ClassVar
 from pydantic import BaseModel, Field
 
 from ..core import BaseTool, ToolMetadata
-from ..errors import ErrorCode
+from .errors import ErrorCode
 from .result import Err, Ok, Result, traverse
 from .tool import ToolResult, ok_result, tool_result, try_tool_operation
 from .types import ErrorContext, ErrorTrace

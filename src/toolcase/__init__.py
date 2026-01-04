@@ -181,8 +181,8 @@ from .tools import (
     standard_tools,
 )
 
-# Monadic error handling
-from .monads import (
+# Monadic error handling (unified in errors module)
+from .errors import (
     Err,
     ErrorContext,
     ErrorTrace,
@@ -241,6 +241,30 @@ from .testing import (
     mock_api_slow,
     mock_api_with_errors,
     mock_tool,
+)
+
+# Agentic composition primitives
+from .agents import (
+    # Router
+    Route,
+    RouterTool,
+    router,
+    # Fallback
+    FallbackTool,
+    fallback,
+    # Escalation
+    EscalationHandler,
+    EscalationResult,
+    EscalationStatus,
+    EscalationTool,
+    QueueEscalation,
+    retry_with_escalation,
+    # Race
+    RaceTool,
+    race,
+    # Gate
+    GateTool,
+    gate,
 )
 
 __all__ = [
@@ -379,6 +403,22 @@ __all__ = [
     "mock_api",
     "mock_api_with_errors",
     "mock_api_slow",
+    # Agentic composition primitives
+    "Route",
+    "RouterTool",
+    "router",
+    "FallbackTool",
+    "fallback",
+    "EscalationHandler",
+    "EscalationResult",
+    "EscalationStatus",
+    "EscalationTool",
+    "QueueEscalation",
+    "retry_with_escalation",
+    "RaceTool",
+    "race",
+    "GateTool",
+    "gate",
     # Convenience
     "init_tools",
 ]
